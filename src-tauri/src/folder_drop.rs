@@ -52,7 +52,7 @@ fn collect_media_files(paths: &[PathBuf]) -> Vec<PathBuf> {
 
 /// Wry 0.55: AppKit draggingLocation and GTK drag-motion use logical points.
 /// Only WebView2 reports device pixels. Tauri labels all of them PhysicalPosition
-/// without converting; dividing AppKit coordinates again misses the VJ hit target.
+/// without converting; dividing AppKit coordinates again misses the drop target.
 fn client_position(x: f64, y: f64, scale: f64, physical: bool) -> (f64, f64) {
     let divisor = if physical && scale.is_finite() && scale > 0. {
         scale
@@ -62,7 +62,7 @@ fn client_position(x: f64, y: f64, scale: f64, physical: bool) -> (f64, f64) {
     (x / divisor, y / divisor)
 }
 
-/// One native event owns a drop. The frontend chooses VJ or the library once;
+/// One native event owns a drop. The frontend chooses its target once;
 /// emitting a second folder event used to scan mixed Finder selections as well.
 pub(super) fn handle_event(window: &Window, event: &WindowEvent) {
     if let WindowEvent::DragDrop(drop) = event {
@@ -87,7 +87,7 @@ pub(super) fn handle_webview_event(webview: &Webview, event: &WebviewEvent) {
 }
 
 fn handle_drop(label: &str, app: &tauri::AppHandle, scale: f64, drop: &DragDropEvent) {
-    if !["main", "kvj", "live-vj-control"].contains(&label) {
+    if label != "main" {
         return;
     }
     static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

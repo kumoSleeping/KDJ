@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, FolderOpen, Library, Link2, LoaderCircle, Play, Search } from "lucide-react";
 import { api } from "../../lib/api";
-import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
 import { copyShareContent } from "../../lib/shareClipboard";
 import { formatBpm } from "../../lib/format";
 import { useHarmonicScope } from "../../lib/harmonicScope";
@@ -393,9 +392,6 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
               同名搜索
             </button>
           )}
-          {!isStreamTrack(rowMenu.track) && <WorkshopAddMenu ids={() => selected.has(rowMenu.track.id)
-            ? matches.filter(match => selected.has(match.track.id)).map(match => match.track.id)
-            : [rowMenu.track.id]} close={() => setRowMenu(null)} />}
           <button
             type="button"
             onClick={() => {

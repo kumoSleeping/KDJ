@@ -1,9 +1,8 @@
 import { api } from "../../lib/api";
-import { downloadTaskCovers, visualizerExportCovers, workshopSourceCovers, type DownloadCoverTask } from "../../lib/taskCovers";
+import { downloadTaskCovers, visualizerExportCovers, type DownloadCoverTask } from "../../lib/taskCovers";
 import { appCoverAddresses } from "../../lib/useTaskCovers";
 import { knownVisualizerExportPoster } from "../../lib/visualizerExportPoster";
 import type { DownloadTask, Track } from "../../types";
-import type { CompositionProject } from "../../types/workshop";
 import type { TaskCover } from "./taskBubbleSchema";
 
 /**
@@ -25,14 +24,6 @@ export function trackTaskCover(track: Pick<Track, "id" | "modified_at">, onlineU
 export function downloadTaskCover(task: Pick<DownloadTask, "id"> & DownloadCoverTask): TaskCover | null {
   const urls = downloadTaskCovers(task, appCoverAddresses);
   return urls.length ? { key: task.id, urls } : null;
-}
-
-/** A mixing project stands for its sources, pictures before sounds, as its row in the list does. */
-export function projectTaskCovers(project: CompositionProject | undefined): TaskCover[] {
-  if (!project) return [];
-  return workshopSourceCovers(project, appCoverAddresses)
-    .filter(urls => urls.length > 0)
-    .map((urls, index) => ({ key: `${project.id}:${index}`, urls }));
 }
 
 /** A visualizer export shows its project's own picture once that has been read, else its song. */

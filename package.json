@@ -23,7 +23,7 @@
     "probe:ytm-sabr": "tsx scripts/ytm-sabr-probe.ts",
     "release": "bash scripts/release.sh",
     "size:report": "bash scripts/report-bundle-size.sh",
-    "test:workshop": "node --import tsx --test tests/workshop.test.ts tests/workshop-trim.test.ts && node --conditions=import scripts/test-workshop-ui.mjs && node scripts/test-workshop-audition.mjs"
+    "test:marquee": "node --conditions=import scripts/test-dom-ui.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "3.14.14",

@@ -45,7 +45,7 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
             _ => return,
         };
         let Some(window) = app.webview_windows().into_values().find(|window| {
-            ["main", "kvj", "visualizer-studio", "live-vj-control", "preferences"].contains(&window.label())
+            ["main", "visualizer-studio", "preferences"].contains(&window.label())
                 && window.is_focused().unwrap_or(false)
         }) else { return; };
         let script = format!(r#"(() => {{

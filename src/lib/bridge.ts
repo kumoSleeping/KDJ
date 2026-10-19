@@ -255,10 +255,9 @@ async function createTauriBridge(): Promise<KdjBridge> {
       const picked = await tauriInvoke<unknown>("pick_folders");
       return Array.isArray(picked) ? picked.filter((p): p is string => typeof p === "string") : [];
     },
-    importWorkshopFiles: desktop ? input => tauriInvoke("workshop_import_files", {input}) : undefined,
     onMediaDrop: desktop ? async handler => {
       const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-      return getCurrentWebviewWindow().listen<import("../types/workshop").WorkshopNativeDrop>("kdj:media-drop", e => handler(e.payload));
+      return getCurrentWebviewWindow().listen<import("./mediaDrop").NativeMediaDrop>("kdj:media-drop", e => handler(e.payload));
     } : undefined,
     // 安卓：查询是否已授予媒体读取权限（供扫描 0 首时区分「没权限」和「真没歌」）。
     mediaPermissionGranted: android

@@ -25,7 +25,6 @@ import { coverTile, droppedDragCard, ghostGlyph, isElement, loadedCover, type Dr
 import { useDownloadStore } from "../stores/downloadStore";
 import { useTaskPanelStore, type TaskPanelView } from "../stores/taskPanelStore";
 import { useVisualizerExportStore } from "../stores/visualizerExportStore";
-import { useWorkshopStore } from "../stores/workshopStore";
 import "./dragRefusal";
 import { holdDrawer } from "./drawerHold";
 import { useSidePanels } from "./sidePanels";
@@ -89,11 +88,7 @@ const TARGETS: Record<TossTarget, Target> = {
   },
   exports: {
     view: "exports",
-    // The exports list has the workshop's projects and jobs beside the pictures: none of them is new.
-    before: () => {
-      const workshop = useWorkshopStore.getState();
-      return new Set([...useVisualizerExportStore.getState().tasks.map(task => task.id), ...workshop.jobs.map(job => job.id), ...workshop.projects.map(project => project.id)]);
-    },
+    before: () => new Set(useVisualizerExportStore.getState().tasks.map(task => task.id)),
     subscribe: listener => useVisualizerExportStore.subscribe(listener),
     list: drawer => Array.from(drawer.querySelectorAll<HTMLElement>(".kd-download-task-list"))
       .find(node => !node.closest(".kd-slide-ghost, [hidden], [data-drawer-pending]")) ?? null,

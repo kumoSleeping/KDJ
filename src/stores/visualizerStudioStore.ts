@@ -3,7 +3,6 @@ import { isEditorWindow } from "../lib/windowRole";
 import { showKvj } from "../lib/kvjWindow";
 import { useSidePanels } from "../lib/sidePanels";
 import type { TrackSummary } from "../types";
-import { useAppStore } from "./appStore";
 
 /** The visualizer configuration's id among the drawer's apps (see drawerApps). */
 export const VISUALIZER_DOCK_APP = "visualizer";
@@ -38,7 +37,6 @@ export const useVisualizerStudioStore = create<State>((set, get) => ({
   // The floating picture keeps the picture; only its controls come up in the column.
   openInlineSettings: (track, options) => {
     set({ track: { ...track }, inlineSettings: true, editorIfNoWindow: options?.editorIfNoWindow ? track.id : null });
-    useAppStore.setState({ showComposition: false });
     useSidePanels.getState().raise(VISUALIZER_DOCK_APP);
   },
   setBeforeClose: beforeClose => set({ beforeClose }),
@@ -46,7 +44,6 @@ export const useVisualizerStudioStore = create<State>((set, get) => ({
     // A tool window has no right column: the main window hosts the configuration.
     if (isEditorWindow) { showKvj({ tab: "visualizer", track }); return; }
     set({ track: { ...track }, inlineSettings: false, editorIfNoWindow: null });
-    useAppStore.setState({ showComposition: false });
     useSidePanels.getState().raise(VISUALIZER_DOCK_APP);
   },
   follow: track => {

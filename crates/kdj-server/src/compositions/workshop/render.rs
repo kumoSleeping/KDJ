@@ -1,12 +1,12 @@
+//! A project's sound and picture as FFmpeg graphs: sound in cached eight-second PCM chunks,
+//! the picture composed over the mixed sound into one MP4.
 use super::*;
-use kdj_core::work_scheduler::{WorkClass, WorkRequest, work_scheduler};
 use std::{
     hash::{Hash, Hasher},
     time::Duration,
 };
 use tokio::io::AsyncWriteExt;
 pub const SAMPLE_RATE: u64 = 48_000;
-pub const BYTES_PER_FRAME: u64 = 4;
 pub const CHUNK_MS: f64 = 8_000.;
 fn number(x: f64) -> String {
     format!("{x:.9}")
@@ -34,49 +34,6 @@ pub(super) fn check(cancel: &CancellationToken) -> Result<()> {
     Ok(())
 }
 
-// A successful process exit (or an existing cache name) does not prove that an
-// MP4 was finalized. Check its boxes as well as the advertised video duration.
-async fn validate_proxy(path: &Path, duration: f64, cancel: &CancellationToken) -> Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    let mut file = tokio::fs::File::open(path).await?;
-    let length = file.metadata().await?.len();
-    let (mut offset, mut movie, mut data) = (0u64, false, false);
-    while offset < length {
-        check(cancel)?;
-        let mut header = [0u8; 8];
-        file.read_exact(&mut header).await?;
-        let short = u32::from_be_bytes(header[..4].try_into().unwrap());
-        let (size, header_size) = match short {
-            0 => (length - offset, 8),
-            1 => (file.read_u64().await?, 16),
-            n => (u64::from(n), 8),
-        };
-        if size < header_size || size > length - offset {
-            bail!("预览缓存未写完整")
-        }
-        movie |= &header[4..] == b"moov" && size > header_size;
-        data |= &header[4..] == b"mdat" && size > header_size;
-        offset += size;
-        file.seek(std::io::SeekFrom::Start(offset)).await?;
-    }
-    if !movie || !data {
-        bail!("预览缓存缺少画面数据")
-    }
-    let probe = media::probe(path, cancel).await?;
-    let actual = probe.check(true)? as f64;
-    if actual + 100. < duration {
-        bail!("预览缓存时长不完整")
-    }
-    Ok(())
-}
-
-struct PreviewTemp(PathBuf);
-impl Drop for PreviewTemp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-        let _ = std::fs::remove_file(self.0.with_extension("ffgraph"));
-    }
-}
 fn wave_header(frames: u64) -> Vec<u8> {
     let size = (frames * 4) as u32;
     let mut b = Vec::with_capacity(44);
@@ -94,14 +51,8 @@ fn wave_header(frames: u64) -> Vec<u8> {
     b.extend(size.to_le_bytes());
     b
 }
-pub fn header(p: &CompositionProject) -> Vec<u8> {
-    wave_header(frames(p.duration()))
-}
 pub fn frames(ms: f64) -> u64 {
     (ms * SAMPLE_RATE as f64 / 1000.).round() as u64
-}
-pub fn wav_length(p: &CompositionProject) -> u64 {
-    44 + frames(p.duration()) * BYTES_PER_FRAME
 }
 /// A pixel format with an alpha plane (FFmpeg's names: yuva420p, rgba, gbrap10le, ya8, …).
 fn has_alpha(pix_fmt: &str) -> bool {
@@ -508,61 +459,8 @@ impl Workshop {
         self.trim_cache();
         Ok(bytes)
     }
-    pub async fn proxy(&self, preview: &Preview, cid: &str, part: u64) -> Result<PathBuf> {
-        let visual = preview.project.video_project();
-        let c = visual.clip(cid).context("片段不存在")?;
-        let lo = part as f64 * CHUNK_MS;
-        let hi = (lo + CHUNK_MS).min(c.duration());
-        if hi <= lo {
-            bail!("预览区间越界")
-        }
-        let c = slice(c, lo, hi);
-        let s = preview.project.source(&c.source_id).context("素材不存在")?;
-        let key = key(&(
-            "video-v3",
-            s,
-            &c.speed,
-            c.source_in_ms,
-            c.source_out_ms,
-            preview.project.canvas.fps.min(30.),
-        ))?;
-        let path = self.cache.join(format!("{key}.mp4"));
-        let lock = self.cache_lock(&key).await;
-        let _lock = lock.lock().await;
-        check(&preview.cancel)?;
-        if path.is_file() {
-            if validate_proxy(&path, c.duration(), &preview.cancel).await.is_ok() {
-                return Ok(path);
-            }
-            check(&preview.cancel)?;
-            tokio::fs::remove_file(&path).await?;
-        }
-        let _permit = tokio::select! {_=preview.cancel.cancelled()=>bail!("预览已取消"),p=self.preview_slots.acquire()=>p?};
-        // Unique staging names also isolate a decoder still shutting down after
-        // its HTTP request was dropped from a new request for the same chunk.
-        let temp = self.cache.join(format!("{key}-{}.part", id()));
-        let _temp = PreviewTemp(temp.clone());
-        let result = video(
-            s,
-            &c,
-            preview.project.canvas.fps.min(30.),
-            Some(640),
-            &temp,
-            &preview.cancel,
-        )
-        .await;
-        if let Err(e) = result {
-            let _ = tokio::fs::remove_file(&temp).await;
-            return Err(e);
-        }
-        check(&preview.cancel)?;
-        validate_proxy(&temp, c.duration(), &preview.cancel).await?;
-        tokio::fs::rename(&temp, &path).await?;
-        self.trim_cache();
-        Ok(path)
-    }
-    /// The sound of `p` between `lo` and `hi` (ms), mixed into `stage/mix.wav` from the same
-    /// cached pieces the preview plays. Progress goes from 0 to 1.
+    /// The sound of `p` between `lo` and `hi` (ms), mixed into `stage/mix.wav` from the
+    /// cached chunks of `audio_chunk`. Progress goes from 0 to 1.
     pub(super) async fn mix_file(
         &self,
         p: &CompositionProject,
@@ -773,293 +671,6 @@ impl Workshop {
         Ok(())
     }
 
-    pub(super) async fn render_export(
-        &self,
-        p: &CompositionProject,
-        jid: &str,
-        cancel: &CancellationToken,
-    ) -> Result<()> {
-        let _slot = tokio::select! {_=cancel.cancelled()=>bail!("导出已取消"),s=self.export_slots.acquire()=>s?};
-        let work_cancel = cancel.clone();
-        let _work = tokio::task::spawn_blocking(move || {
-            work_scheduler()
-                .acquire(WorkRequest::new(WorkClass::MediaComposition), || {
-                    work_cancel.is_cancelled()
-                })
-                .map_err(|_| anyhow::anyhow!("导出已取消"))
-        })
-        .await??;
-        let directory = PathBuf::from(&p.output.directory);
-        if !directory.is_dir() {
-            bail!("导出目录不存在")
-        }
-        let stage = directory.join(format!(".kdj-composition-vj-{jid}"));
-        std::fs::create_dir(&stage)?;
-        let _scratch = Scratch(stage.clone());
-        let mut owner = std::fs::OpenOptions::new().write(true).create_new(true).open(stage.join(".owner"))?;
-        std::io::Write::write_all(&mut owner, jid.as_bytes())?;
-        owner.sync_all()?;
-        self.job(jid, |j| {
-            j.staging = Some(stage.to_string_lossy().into_owned());
-            j.phase = "rendering".into();
-            j.error.clear();
-            j.detail = "混合声音".into();
-        })?;
-        let lo = p.output.in_ms;
-        let hi = p.output.out_ms.unwrap_or(p.duration());
-        let duration = hi - lo;
-        let report = |step: Step| -> Result<()> {
-            match step {
-                Step::Progress(v) => self.job(jid, |j| j.progress = v).map(|_| ()),
-                Step::Detail(detail) => self.job(jid, |j| j.detail = detail).map(|_| ()),
-            }
-        };
-        let audio = self
-            .mix_file(p, &stage, lo, hi, cancel, &|step| match step {
-                Step::Progress(v) => report(Step::Progress(0.2 * v)),
-                detail => report(detail),
-            })
-            .await?;
-        let extension = p.output.format.as_str();
-        let output = stage.join(format!("render.{extension}"));
-        if extension == "mp4" {
-            self.picture_file(p, &stage, &audio, &output, lo, hi, cancel, &|step| match step {
-                Step::Progress(v) => report(Step::Progress(0.2 + 0.75 * v)),
-                detail => report(detail),
-            })
-            .await?;
-            self.job(jid, |j| {
-                j.phase = "validating".into();
-                j.progress = 0.96;
-            })?;
-        } else {
-            self.job(jid, |j| { j.detail = "编码音频".into(); j.progress = 0.5; })?;
-            if extension == "wav" {
-                tokio::fs::rename(&audio, &output).await?;
-            } else {
-                let mut args = strings(&["-v", "error", "-nostdin", "-y", "-i"]);
-                args.push(audio.to_string_lossy().into_owned());
-                args.extend(strings(&["-vn", "-c:a"]));
-                args.push(if extension == "flac" { "flac" } else { "libmp3lame" }.into());
-                if extension == "mp3" { args.extend(strings(&["-b:a", "320k"])); }
-                args.push(output.to_string_lossy().into_owned());
-                media::capture(&kdj_providers::ffmpeg::binary()?, &args, 4096, Duration::from_secs(3600), cancel).await?;
-            }
-            self.job(jid, |j| { j.phase = "validating".into(); j.progress = 0.96; })?;
-            let probe = media::probe(&output, cancel).await?;
-            let stream = probe.audio().context("成品没有音轨")?;
-            if probe.video().is_some() || (probe.duration(stream) as f64 - duration).abs() > 100. {
-                bail!("音频成品时长或格式校验失败");
-            }
-            let args = vec!["-v".into(), "error".into(), "-xerror".into(), "-i".into(), output.to_string_lossy().into_owned(), "-f".into(), "null".into(), "-".into()];
-            media::capture(&kdj_providers::ffmpeg::binary()?, &args, 4096, Duration::from_secs(3600), cancel).await?;
-        }
-        for source in p.sources.iter().filter(|s| {
-            p.layers
-                .iter()
-                .any(|l| l.clips.iter().any(|c| c.source_id == s.id))
-        }) {
-            if !source.signature.is_empty()
-                && signature(Path::new(&source.path))? != source.signature
-            {
-                bail!("素材在导出期间发生变化：{}", source.title)
-            }
-        }
-        let sig = media::signature(&output)?;
-        // Windows requires a writable handle for FlushFileBuffers.
-        std::fs::File::options().write(true).open(&output)
-            .context("无法打开导出成品进行落盘同步")?
-            .sync_all().context("导出成品落盘同步失败")?;
-        let name = p.output.name.trim();
-        if name.is_empty() || name.contains(['/', '\\', '\0']) || name == "." || name == ".." {
-            bail!("导出文件名无效")
-        }
-        let stem = [".mp4", ".wav", ".flac", ".mp3"].iter().find_map(|ext| name.strip_suffix(ext)).unwrap_or(name);
-        let mut destination = None;
-        for n in 0..10_000 {
-            check(cancel)?;
-            let path = directory.join(if n == 0 {
-                format!("{stem}.{extension}")
-            } else {
-                format!("{stem} ({n}).{extension}")
-            });
-            if path.exists() {
-                continue;
-            }
-            self.job(jid, |j| {
-                j.phase = "committing".into();
-                j.path = path.to_string_lossy().into_owned();
-                j.signature = Some(sig.clone());
-            })?;
-            match kdj_providers::net::rename_download_noclobber(&output, &path) {
-                Ok(()) => {
-                    destination = Some(path);
-                    break;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    self.job(jid, |j| {
-                        j.signature = None;
-                        j.path.clear();
-                    })?;
-                    continue;
-                }
-                Err(e) => {
-                    self.job(jid, |j| {
-                        j.signature = None;
-                        j.path.clear();
-                    })?;
-                    return Err(e.into());
-                }
-            }
-        }
-        let destination = destination.context("无法创建不重名的成品")?;
-        #[cfg(unix)]
-        std::fs::File::open(&directory)?.sync_all()?;
-        // After publication cancellation cannot turn a committed export into a second render.
-        self.job(jid, |j| {
-            j.phase = "importing".into();
-            j.progress = 0.99;
-        })?;
-        let tid = self.import(&destination).await?;
-        self.job(jid, |j| {
-            j.phase = "complete".into();
-            j.progress = 1.;
-            j.track_id = Some(tid);
-            j.error.clear();
-        })?;
-        self.state.hub.publish(
-            "composition.completed",
-            &serde_json::json!({"track_id":tid,"path":destination,"replaced":false}),
-        );
-        Ok(())
-    }
-}
-async fn video(
-    s: &Source,
-    c: &Clip,
-    fps: f64,
-    max_width: Option<u32>,
-    out: &Path,
-    cancel: &CancellationToken,
-) -> Result<(u32, u32)> {
-    let probe = verify_source(s, cancel).await?;
-    let stream = probe.video().context("素材没有画面")?;
-    let (width, height) = media::workshop_video_size(stream)?;
-    let mut args = strings(&[
-        "-nostdin",
-        "-n",
-        "-v",
-        "error",
-        "-progress",
-        "pipe:1",
-        "-nostats",
-        "-filter_complex_threads",
-        "1",
-        "-threads",
-        "1",
-        "-ss",
-    ]);
-    args.push(secs(c.source_in_ms));
-    args.extend(["-i".into(), s.path.clone()]);
-    let mut filters = format!(
-        "[0:{}]trim=duration={},setpts=PTS-STARTPTS,setpts='({})/TB',fps={}:eof_action=pass",
-        stream.index,
-        secs(c.source_out_ms - c.source_in_ms),
-        retime(c),
-        number(fps)
-    );
-    if media::workshop_hdr(stream) {
-        media::ensure_tone_mapping(cancel).await?;
-        filters.push_str(&format!(",{}", media::HDR_TO_SDR));
-    }
-    filters.push_str(&format!(",scale={width}:{height},setsar=1"));
-    if let Some(max) = max_width {
-        filters.push_str(&format!(",scale=w='min({max},iw)':h='min({max},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"));
-    }
-    filters.push_str(",setsar=1[v]");
-    // A script avoids OS argument limits for long speed curves.
-    let script = out.with_extension("ffgraph");
-    tokio::fs::write(&script, &filters).await?;
-    args.extend([
-        "-filter_complex_script".into(),
-        script.to_string_lossy().into_owned(),
-        "-map".into(),
-        "[v]".into(),
-        "-an".into(),
-        "-c:v".into(),
-        "libx264".into(),
-        "-preset".into(),
-        "ultrafast".into(),
-        "-crf".into(),
-        if max_width.is_some() { "24" } else { "16" }.into(),
-        "-threads:v".into(),
-        "2".into(),
-        "-pix_fmt".into(),
-        "yuv420p".into(),
-        "-t".into(),
-        secs(c.duration()),
-        "-movflags".into(),
-        "+faststart".into(),
-        "-f".into(),
-        "mp4".into(),
-        out.to_string_lossy().into_owned(),
-    ]);
-    let result = media::render(&args, c.duration().round() as i64, cancel, |_| {}).await;
-    let _ = tokio::fs::remove_file(script).await;
-    result.map(|()| (width, height))
-}
-pub(super) async fn alignment_pcm(
-    p: &CompositionProject,
-    c: &Clip,
-    cancel: &CancellationToken,
-) -> Result<Vec<f32>> {
-    // The caller schedules any number of blocks. This bound protects only one
-    // decoder invocation, including overlap and rounding of variable-rate cuts.
-    let max_seconds = kdj_analysis::alignment::FEATURE_BLOCK_SECONDS
-        + 2 * kdj_analysis::alignment::FEATURE_GUARD_SECONDS + 1;
-    anyhow::ensure!(c.duration() <= max_seconds as f64 * 1000., "音频分析块超出内存预算");
-    let mut p = p.clone();
-    let mut c = c.clone();
-    c.start_ms = 0.;
-    c.sound.muted = false;
-    c.sound.gain = 1.;
-    c.fades.audio_in_ms = 0.;
-    c.fades.audio_out_ms = 0.;
-    p.layers = vec![Layer {
-        grid: None,
-        id: id(),
-        source_id: c.source_id.clone(),
-        clips: vec![c.clone()],
-    }];
-    let started = std::time::Instant::now();
-    let mut args = audio_args(&p, 0., c.duration(), cancel).await?;
-    let prepare_ms = started.elapsed().as_secs_f64() * 1000.;
-    let index = args
-        .iter()
-        .rposition(|s| s == "48000")
-        .context("缺少采样率")?;
-    args[index] = "8000".into();
-    let index = args.iter().rposition(|s| s == "2").context("缺少通道")?;
-    args[index] = "1".into();
-    let decode_started = std::time::Instant::now();
-    let bytes = media::capture(
-        &kdj_providers::ffmpeg::binary()?,
-        &args,
-        (max_seconds * kdj_analysis::alignment::SAMPLE_RATE * 2 + 4096) as u64,
-        Duration::from_secs(300),
-        cancel,
-    )
-    .await?;
-    let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.;
-    let convert_started = std::time::Instant::now();
-    let pcm = bytes.chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.)
-        .collect();
-    tracing::debug!(target: "kdj_alignment_timing", source = %c.source_id,
-        source_in_ms = c.source_in_ms, duration_ms = c.duration(), bytes = bytes.len(),
-        prepare_ms, decode_ms, convert_ms = convert_started.elapsed().as_secs_f64() * 1000.,
-        "alignment PCM ready");
-    Ok(pcm)
 }
 
 impl Workshop {

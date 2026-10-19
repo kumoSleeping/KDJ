@@ -62,8 +62,6 @@ export interface SourceSwitchFenceIntent {
   nextIsStream: boolean;
   /** Its provider URL is still being resolved. */
   nextIsUnresolved: boolean;
-  /** A scratch/preview track of a composition editor keeps its own lifecycle. */
-  nextIsCompositionPreview: boolean;
   purposeIsComposition: boolean;
 }
 
@@ -80,5 +78,5 @@ export function shouldFenceStreamSwitch(intent: SourceSwitchFenceIntent): boolea
   return intent.autoPlay
     && !intent.djTransition
     && (intent.nextIsUnresolved
-      || (intent.nextIsStream && !intent.nextIsCompositionPreview && !intent.purposeIsComposition));
+      || (intent.nextIsStream && !intent.purposeIsComposition));
 }

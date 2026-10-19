@@ -16,7 +16,7 @@ import { bootAll, connectEvents, selectConnected, useAppStore } from "./stores/a
 import { useLyricsPrefs } from "./lib/lyricsPrefs";
 import { useUpdateStore } from "./stores/updateStore";
 import { flushLocalStorageWrites } from "./lib/storageWrite";
-import { useWorkshopDrop } from "./lib/workshopDrop";
+import { useMediaDrop } from "./lib/mediaDrop";
 import { useWindowTaken } from "./lib/windowTaken";
 
 // 只有一个界面：工作台（曲库 + 搜索下载合一）。
@@ -53,7 +53,7 @@ export default function App() {
   const isMac = platform === "darwin";
   const isMobile = platform === "android" || platform === "ios";
 
-  useWorkshopDrop(ready);
+  useMediaDrop(ready);
 
   useEffect(() => {
     // 全应用只有这一处订阅 WS；卸载时断开（StrictMode 的二次挂载会自动重订）

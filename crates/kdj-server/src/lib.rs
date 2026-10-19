@@ -22,7 +22,6 @@ pub mod library_watch;
 pub mod lyrics;
 pub mod protected_media;
 pub mod routes;
-mod live_vj;
 pub mod rhythm;
 pub mod state;
 pub mod preview_policy;
@@ -149,11 +148,7 @@ fn media_path_allowed(path: &str) -> bool {
     ) || matches!(
         segments.as_slice(),
         ["api", "video", "youtube", "hls", ticket] if !ticket.is_empty()
-    ) || matches!(
-        segments.as_slice(),
-        ["api", "workshop", "media", ticket, "audio.wav"]
-        | ["api", "workshop", "media", ticket, "video", _, _] if !ticket.is_empty()
-    ) || matches!(segments.as_slice(), ["api","workshop",pid,"sources",sid,"frame"] if !pid.is_empty() && !sid.is_empty())
+    )
 }
 
 fn request_authorized(request: &Request<Body>, auth: &AuthState) -> bool {
@@ -413,15 +408,12 @@ pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) ->
         control: control.clone(),
         media: media.clone(),
     };
-    let compositions = compositions::CompositionManager::open(state.clone())?;
-    let workshop = compositions::workshop::Workshop::open(state.clone(), &compositions)?;
+    let workshop = compositions::workshop::Workshop::new(state.clone())?;
     let router = routes::router(ctx)
         .merge(compositions::workshop::routes::router(workshop))
         .merge(compositions::audio_visualizer::studio::router())
         .merge(themes::router())
         .merge(diagnostics::router())
-        .merge(live_vj::router())
-        .merge(compositions::routes::router(compositions))
         .route("/ws", axum::routing::get(ws::handler))
         .layer(Extension(control))
         .layer(Extension(media))

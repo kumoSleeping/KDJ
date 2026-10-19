@@ -12,7 +12,6 @@ import { useDownloadStore } from "../../stores/downloadStore";
 import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelStore";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import { useVisualizerStudioStore, VISUALIZER_DOCK_APP } from "../../stores/visualizerStudioStore";
-import { useWorkshopStore } from "../../stores/workshopStore";
 import { VisualizerDock } from "../composition/VisualizerDock";
 import { SlidePages } from "../drawer/SlidePages";
 import type { DrawerEntry, DrawerSpec } from "../drawer/drawerSchema";
@@ -109,9 +108,6 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
   return apps;
 }
 
-/** An export that is waiting or being written. */
-const exportRunning = (phase: string) => ["queued", "rendering", "validating", "committing", "importing"].includes(phase);
-
 /**
  * What the drawer's head offers while it is rolled up: the apps that are opened by hand. The
  * ids are those of the apps in `useDrawerApps`. 下载 carries the number of downloads and
@@ -119,9 +115,8 @@ const exportRunning = (phase: string) => ["queued", "rendering", "validating", "
  */
 export function useDrawerEntries(): DrawerEntry[] {
   const downloading = useDownloadStore(state => state.activeCount);
-  const exporting = useWorkshopStore(state => state.jobs.reduce((count, job) => count + (exportRunning(job.phase) ? 1 : 0), 0));
   const rendering = useVisualizerExportStore(state => state.tasks.reduce((count, task) => count + (visualizerExportActive(task) ? 1 : 0), 0));
-  const running = downloading + exporting + rendering;
+  const running = downloading + rendering;
   return useMemo(() => [
     {
       id: "downloads",

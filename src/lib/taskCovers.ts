@@ -9,7 +9,6 @@
  */
 
 import type { DownloadTask } from "../types";
-import type { CompositionProject, WorkshopJob, WorkshopSource } from "../types/workshop";
 import { onlineCoverUrls } from "./format";
 
 /** The longest side asked for. A row's box is 3rem; this covers it on a 2x screen. */
@@ -19,8 +18,6 @@ export const TASK_COVER_PX = 96;
 export interface TaskCoverAddresses {
   /** The sized thumbnail of a library track: its embedded cover, or a frame when it is a video. */
   library(trackId: number, size: number): string;
-  /** A frame of one source of a mixing-editor project. */
-  frame(projectId: string, sourceId: string, ms: number): string;
 }
 
 /** What a box draws when no address loads: the glyph of what the task makes. */
@@ -63,70 +60,6 @@ export function downloadTaskCovers(
   ]);
 }
 
-const pictured = (source: WorkshopSource): boolean =>
-  source.video || source.kind === "video" || source.kind === "image" || source.kind === "gif";
-
-/**
- * One source of a mixing-editor project. A source taken from the library shows the library's
- * picture of it; a source with a picture of its own (video, image) also has the frame at
- * `startMs`. A sound that is not in the library has nothing to show.
- */
-export function workshopSourceCover(
-  projectId: string,
-  source: WorkshopSource,
-  at: TaskCoverAddresses,
-  startMs = 0,
-  size = TASK_COVER_PX,
-): string[] {
-  return distinct([
-    libraryCover(source.track_id, at, size),
-    pictured(source) ? at.frame(projectId, source.id, Number.isFinite(startMs) ? Math.max(0, startMs) : 0) : "",
-  ]);
-}
-
-/**
- * The sources a mixing-editor project is made of, one list each (see `workshopSourceCover`), the
- * ones with a picture of their own before the ones that only sound. The frame is the one a
- * source's first clip starts on. Sources nothing can be shown for are left out.
- */
-export function workshopSourceCovers(
-  project: Pick<CompositionProject, "id" | "sources" | "layers">,
-  at: TaskCoverAddresses,
-  size = TASK_COVER_PX,
-): string[][] {
-  const clips = project.layers.flatMap((layer) => layer.clips);
-  // Sources in the order the layers use them; one that no clip uses any more is not in the mix.
-  const used = distinct(clips.map((clip) => clip.source_id))
-    .map((id) => project.sources.find((source) => source.id === id))
-    .filter((source): source is WorkshopSource => Boolean(source));
-  const ordered = [...used.filter(pictured), ...used.filter((source) => !pictured(source))];
-  const lists = ordered.map((source) => workshopSourceCover(project.id, source, at,
-    Math.min(...clips.filter((clip) => clip.source_id === source.id).map((clip) => clip.source_in_ms)), size));
-  const seen = new Set<string>();
-  return lists.filter((list) => {
-    const key = list.join("\n");
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-/**
- * A mixing-editor export. Once the finished file is in the library the row shows that file — a
- * video's poster frame, an audio file's cover — and falls back to what it was made of. Until then
- * it shows its sources, one list each, for a stack.
- */
-export function workshopExportCovers(
-  project: Pick<CompositionProject, "id" | "sources" | "layers"> | undefined,
-  job: Pick<WorkshopJob, "track_id"> | undefined,
-  at: TaskCoverAddresses,
-  size = TASK_COVER_PX,
-): string[][] {
-  const sources = project ? workshopSourceCovers(project, at, size) : [];
-  const finished = libraryCover(job?.track_id, at, size);
-  return finished ? [distinct([finished, ...sources.flat()])] : sources;
-}
-
 /**
  * A visualizer export: the project's own picture (`poster`, read from the queued snapshot) and
  * then the cover of the song it was made for.
@@ -146,7 +79,6 @@ export type DownloadCoverTask = Pick<DownloadTask, "cover" | "track_id" | "platf
 /** Any task of the four pages, for code that handles them together (a batch, a notification). */
 export type TaskCoverSubject =
   | { kind: "download"; task: DownloadCoverTask }
-  | { kind: "workshop"; project?: Pick<CompositionProject, "id" | "sources" | "layers">; job?: Pick<WorkshopJob, "track_id"> }
   | { kind: "visualizer"; poster?: string; trackId?: number | null }
   | { kind: "track"; trackId: number; video?: boolean };
 
@@ -154,7 +86,6 @@ export type TaskCoverSubject =
 export function taskCovers(subject: TaskCoverSubject, at: TaskCoverAddresses, size = TASK_COVER_PX): string[] {
   switch (subject.kind) {
     case "download": return downloadTaskCovers(subject.task, at, size);
-    case "workshop": return distinct(workshopExportCovers(subject.project, subject.job, at, size).flat());
     case "visualizer": return visualizerExportCovers(subject, at, size);
     case "track": return distinct([libraryCover(subject.trackId, at, size)]);
   }
@@ -164,7 +95,6 @@ export function taskCovers(subject: TaskCoverSubject, at: TaskCoverAddresses, si
 export function taskCoverKind(subject: TaskCoverSubject): TaskCoverKind {
   switch (subject.kind) {
     case "download": return subject.task.kind === "video" && subject.task.quality?.toLowerCase() !== "audio" ? "video" : "song";
-    case "workshop": return "mix";
     case "visualizer": return "visualizer";
     case "track": return subject.video ? "video" : "song";
   }

@@ -198,8 +198,6 @@ export interface UnifiedPlayer {
   load(source: UnifiedPlayerSource): Promise<UnifiedPlayerState>;
   loadDeck(deck: 0 | 1, source: UnifiedPlayerSource): Promise<UnifiedPlayerState>;
   prepare(source: UnifiedPlayerSource): Promise<UnifiedPlayerState>;
-  /** Same project and duration; the native device clock survives a mix change. */
-  replaceAudio?(source: UnifiedPlayerSource): Promise<UnifiedPlayerState>;
   handoff(
     trackId: number,
     position: number,
@@ -1179,11 +1177,6 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     this.platterRevisions[deck] += 1;
     this.platterSessions[deck] = null;
     return this.command({ type: "loadDeck", deck, source: this.source(source) });
-  }
-
-  replaceAudio(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
-    if (isEditorWindow) return requestKvjTransport("replaceAudio", this.snapshot.trackId, source);
-    return this.command({ type: "replaceAudio", source: this.source(source) });
   }
 
   prepare(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {

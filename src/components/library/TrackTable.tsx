@@ -1,4 +1,3 @@
-import { dropWorkshopTracks, paintWorkshopDrop } from "../../lib/workshopDrop";
 import { useStore } from "zustand";
 import type { LibraryPaneStore, LibraryPaneStoreApi } from "../../stores/temporaryLibraryStore";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore, type CSSProperties, type Ref } from "react";
@@ -28,7 +27,6 @@ import { listScrollsItself, rowListPadding, useRowList, useScrollMotion } from "
 import { scrollTopTo } from "../../lib/wheelScroll";
 import { tracePlayback } from "../../lib/playbackTrace";
 import { api } from "../../lib/api";
-import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
 import { OverlayScrollbars } from "../common/OverlayScrollbars";
 import { VinylPlaceholder } from "../common/VinylPlaceholder";
 import { RowIndex, RowPick } from "../common/RowPick";
@@ -1288,7 +1286,6 @@ export const TrackTable = memo(function TrackTable({
     };
 
     const clearTargets = () => {
-      paintWorkshopDrop();
       document
         .querySelectorAll<HTMLElement>("[data-kd-pointer-track-over], [data-kd-pointer-ai-over]")
         .forEach((node) => {
@@ -1304,7 +1301,6 @@ export const TrackTable = memo(function TrackTable({
         ai.setAttribute("data-kd-pointer-ai-over", "");
         return;
       }
-      if (paintWorkshopDrop(x, y)) return;
       const folder = folderDropElementAt(x, y);
       if (folder) {
         folder.setAttribute("data-kd-pointer-track-over", "folder");
@@ -1493,7 +1489,6 @@ export const TrackTable = memo(function TrackTable({
           .catch(reportVisualizerExportError);
         return;
       }
-      if (dropWorkshopTracks(up.clientX, up.clientY)) return;
 
       if (deckSide !== null) {
         dispatchTrackDeckDrop(ids, deckSide);
@@ -2662,10 +2657,6 @@ export const TrackTable = memo(function TrackTable({
             useVisualizerPopup.getState().openTrack(track);
             useVisualizerStudioStore.getState().openInlineSettings(track, { editorIfNoWindow: true });
           }}><BarChart3 size={12} />展开可视化</button>
-          <WorkshopAddMenu ids={() => {
-            const chosen = new Set(menuIds);
-            return orderedIds.filter(id => chosen.has(id));
-          }} close={() => setRowMenu(null)} />
           {menuIds.length === 1 && (
             <button
               type="button"

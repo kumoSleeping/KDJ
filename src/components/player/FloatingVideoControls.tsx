@@ -69,7 +69,7 @@ export function PreviewVolume({ channel = "master", layout = "popover" }: { chan
   </div>;
 }
 
-/** Shared by local playback and the workshop. Chrome stays inside the picture. */
+/** Shared by local playback and the video previews. Chrome stays inside the picture. */
 export function FloatingVideoControls({ title, playing, loading = false, position, duration, fullscreen, showTitle = true, showVolume = true, volumeChannel = "master", onClose, onToggle, onFullscreen, onTitlePointerDown, extra, titleExtra, error, closeLabel = "关闭预览" }: {
   title: string; playing: boolean; loading?: boolean; position: number; duration: number; fullscreen: boolean; showTitle?: boolean; showVolume?: boolean;
   /** Which level this surface's sound actually passes through. */

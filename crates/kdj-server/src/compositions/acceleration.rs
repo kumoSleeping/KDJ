@@ -570,17 +570,7 @@ async fn source_bitrate(
 /// removing its private staging partial. Cancellation and `-n` collisions never
 /// retry. Copy, WebM, other codecs, and unrecognized layouts pass through unchanged.
 /// Progress is monotonic across fallback; the existing renderer reserves 1.0 for
-/// the caller's validation/commit phase. No additional trait bounds on the callback.
-pub async fn render(
-    args: &[String],
-    duration: i64,
-    cancel: &CancellationToken,
-    preference: EncodingAcceleration,
-    progress: impl FnMut(f64),
-) -> Result<()> {
-    render_with_status(args, duration, cancel, preference, progress, |_| {}).await
-}
-
+/// the caller's validation/commit phase. `status` names the encoder in use.
 pub async fn render_with_status(
     args: &[String], duration: i64, cancel: &CancellationToken,
     preference: EncodingAcceleration, progress: impl FnMut(f64), status: impl Fn(&str),
@@ -1007,9 +997,9 @@ mod tests {
         cancel.cancel();
         let mut progress = Vec::new();
         assert!(
-            render(&args, 1000, &cancel, EncodingAcceleration::Auto, |p| {
+            render_with_status(&args, 1000, &cancel, EncodingAcceleration::Auto, |p| {
                 progress.push(p)
-            })
+            }, |_| {})
             .await
             .is_err()
         );

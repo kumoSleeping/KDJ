@@ -26,6 +26,14 @@ KDJ 里的 AI 是用户自己装的 [pi](https://pi.dev)，由 kdj-server 以 `p
 - AI 工作时，输入框的边上有一段彩色的光绕着走：由红到橙到黄，两头淡出（一个遮罩出的细环，`@property` 角度动画；
   减弱动态时是一圈静止的同色淡边），底色流动变快，✨ 键变成转圈的停止键。
 - 没装 pi、pi 无法运行、未设置模型：顶部一句状态，带「AI 设置」键。
+- **拖进来的东西**（`src/lib/aiAttachments.ts`）：曲库的歌曲和视频、搜索结果（歌和视频）、从访达/资源管理器拖来的文件，
+  放到 Agent Mode 这一行上（或放到普通搜索栏末尾的 ✨ 键上，顺便切到 Agent Mode），变成输入框下面的一排卡片：封面、名字、
+  标在它上面的时间、一个移除键。时间是播放条波形上按住 Shift 拖出来的那一段（`playRange.ts`），没有就取正在播放的位置
+  （只对正在播放的那首）。拖动时这一行的边亮成它自己的颜色。卡片跟着下一句话交出去：消息末尾一个 `<kdj-attachments>` 块，
+  每项一行 JSON（本地的 `track_id`、`path`，在线的 `url`；`at`、`range` 都是秒），提示词讲了怎么读；任务气泡里只写用户的话和
+  「附带：……」。在线歌曲交的是分享链接（AI 的搜索 ref 只认它自己搜过的）。
+- **Shift + 拖动标一段**：播放条的波形上按住 Shift 拖，标出一段（波形上一层墨色），播放马上跳进这一段，到段尾回到段首
+  （普通的跳转，视频跟着走），直到在段外点一下、按 Esc 或换歌。段尾离歌曲结尾至少 0.2 秒，自动接歌不会在段里触发。
 
 ## AI 做事时窗口里发生什么（`aiEvents.tsx`）
 
@@ -80,7 +88,8 @@ default）；收到「用户改变了页面」以用户为准；网页内容只�
   npm 上有新版本时设置里提示可更新（`pi update`），不替用户更新。
 - 运行目录全部在 `<data>/ai/` 下，不碰全局 `~/.pi`：`PI_CODING_AGENT_DIR=<data>/ai/pi-agent`
   （`auth.json` 存设置里填的 Key，合并写入，只改该服务商一项）、`workspace/`、`sessions/`、
-  `kdj-ai.json`（选中的服务商、模型和网页搜索方式）。启动时 `--no-skills --no-context-files --no-builtin-tools`：
+  `kdj-ai.json`（选中的服务商、模型和网页搜索方式）。启动时 `--no-skills --no-context-files --no-builtin-tools`
+  加 `--skill <pi-agent/kdj/skills/kdj-video>`：`--no-skills` 关掉一切自动发现的技能，明确给出的只有 KDJ 的视频技能；
   扩展保留，因为 KDJ 目录里只有 KDJ 自己的扩展和它装的 pi-web-access。
 - 没选模型时用 pi 自己的默认模型，KDJ 不替用户换。换 Key、服务商或网页搜索方式会结束 pi，下一句话时重新启动；
   只换模型用 `set_model`，对话保留。
@@ -116,7 +125,24 @@ KDJ 之外的 AI 用的。`kdj_peek` 把截下的画面作为图片直接交给�
 `--exclude-tools` 收起。网页都由这些服务读取，本机不打开任何网页或文件。早先的浏览器（CDP）方案已经删掉：它能用
 `file://` 读到本机文件。
 
-pi 没有 shell、读写文件等内置工具（`--no-builtin-tools`）。整理文件、剪辑视频需要放开这些工具，等确定了确认机制再做。
+pi 没有 shell、读写文件等内置工具（`--no-builtin-tools`），整理文件仍然不做。
+
+## 视频（kdj-video 技能）
+
+剪视频交给 AI：它做出来的是 `.kdjv` 视频工程（`docs/kdjv.md`），曲库里的一行，点开像视频一样播放。手动的剪辑器已经删掉。
+
+- **技能**：`crates/kdj-server/src/ai/skills/kdj-video/`（`SKILL.md` 和 `references/` 下的 `kdjv.md`、`ffmpeg.md`、
+  `remotion.md`），由 kdj-server 写进 pi 目录。pi 只把名字和描述放进系统提示，模型遇到视频的事才用 `read` 读全文。pi 只在有
+  名为 `read`（或 `bash`）的工具时才列出技能，所以 KDJ 自己注册了一个只读得到技能、工作目录和 `.kdjv` 的 `read`。
+- **工具**（`kdj-video.ts`，没有 shell）：`read`；`write`（只写工作目录，`remotion/node_modules` 除外）；`kdj_probe`（ffprobe）；
+  `kdj_ffmpeg`（参数 + 输出文件，输出只能在工作目录，相对路径进 `renders/`，KDJ 自己的 FFmpeg，经 `KDJ_FFMPEG`）；
+  `kdj_remotion_render`（用跑 pi 的那个 node 跑工作目录 `remotion/` 里的 Remotion CLI）；`kdj_project_save`（写进曲库根目录，
+  改已有工程不许少字段、旧版先备份）和 `kdj_project_render`（经 `kdj project check|render`）。`kdj_peek` 截下的画面作为图片交给
+  模型。`read`、`write` 不出顶部提示，其余几步各有自己的一句（`aiTasks.ts`）。
+- **Remotion**：设置 → AI → 视频，「安装/更新」用跑 pi 的那个 node 旁边的 npm，在 `<data>/ai/workspace/remotion/` 装
+  `remotion`、`@remotion/cli`、`@remotion/transitions`、`react`、`react-dom`，再 `remotion browser ensure` 下好渲染用的浏览器；
+  后台进行，`ai.status` 的 `remotion` 报版本、是否在装、失败原因。Remotion 对个人和三人以内的团队免费（源码可见、非开源），
+  它带的 FFmpeg 是 GPL；KDJ 不打包它。Windows 上不需要 Git Bash：AI 不用 shell。
 
 ## 使用提示
 

@@ -1,4 +1,3 @@
-import { isCompositionPreview } from "../../lib/streamTrack";
 import { MarqueeText } from "../common/MarqueeText";
 import { PlaybackModeButton, MODE_UI } from "./PlaybackModeButton";
 import {
@@ -1821,7 +1820,6 @@ export function PlayerBar() {
         djTransition: wantsDjTransition,
         nextIsStream: isStreamTrack(next),
         nextIsUnresolved: isUnresolvedStreamTrack(next),
-        nextIsCompositionPreview: isCompositionPreview(next),
         purposeIsComposition: parsed.purpose === "composition",
       });
       if (fencesStreamSwitch) {
@@ -2441,7 +2439,7 @@ export function PlayerBar() {
     }
   }, [playing, track?.id, frontEl, nativePlayer]);
 
-  // All playback purposes share this output: decks, workshop mixes and visualizers.
+  // All playback purposes share this output: decks and visualizers.
   // Subscribe synchronously so mute/load in the same turn cannot use yesterday's gain.
   useEffect(() => {
     const apply = () => {
@@ -2743,7 +2741,7 @@ export function PlayerBar() {
         commitPlaying(otherStillPlaying);
         return;
       }
-      if (!autoAdvanceRef.current || isCompositionPreview(finished)) {
+      if (!autoAdvanceRef.current) {
         commitPlaying(false);
         return;
       }
@@ -2972,7 +2970,6 @@ export function PlayerBar() {
           state.playing &&
           !state.buffering &&
           djEnabled &&
-          !isCompositionPreview(current) &&
           !state.transitioning &&
           !nativeDjBusyRef.current &&
           !djBusyRef.current &&

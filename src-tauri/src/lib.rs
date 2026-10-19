@@ -36,8 +36,6 @@ mod midi;
 #[cfg(desktop)]
 mod mini_player;
 #[cfg(desktop)]
-mod live_vj;
-#[cfg(desktop)]
 mod kvj_window;
 #[cfg(desktop)]
 mod media_tools;
@@ -238,47 +236,6 @@ fn is_exact_directory(canonical: &Path, directory: Option<&Path>) -> bool {
     directory
         .and_then(|directory| directory.canonicalize().ok())
         .is_some_and(|directory| directory == canonical)
-}
-
-// Requests to the embedded server carry control credentials and local file paths.
-// Never send them through an OS/environment proxy or follow redirects.
-fn local_api_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|error| format!("无法创建本机服务连接：{error}"))
-}
-
-#[tauri::command]
-async fn workshop_import_files(app: tauri::AppHandle, mut input: Value) -> Result<Value, String> {
-    let (base, token) = {
-        let bridge = app.state::<Bridge>();
-        let paths = input.get("paths").and_then(Value::as_array).ok_or("缺少文件列表")?;
-        if paths.len() > 500 { return Err("一次最多导入 500 个素材，请分批拖入".into()); }
-        let mut accepted = vec![];
-        let mut errors = vec![];
-        for raw in paths {
-            let raw = raw.as_str().ok_or("文件路径无效")?;
-            match bridge.authorize_existing_path(raw, true) {
-                Ok(path) if path.is_file() => accepted.push(path.to_string_lossy().into_owned()),
-                Ok(_) => errors.push(format!("{raw}：请拖入本地文件")),
-                Err(e) => errors.push(format!("{raw}：{e}")),
-            }
-        }
-        input["paths"] = serde_json::json!(accepted);
-        input["native_errors"] = serde_json::json!(errors);
-        (bridge.base_url.clone(), bridge.auth_token.clone())
-    };
-    let response = local_api_client()?.post(format!("{base}/api/workshop/intake")).bearer_auth(token).json(&input).send().await.map_err(|e| format!("无法连接本机混音编辑器：{e:#}"))?;
-    let status = response.status();
-    let mut result: Value = response.json().await.map_err(|e| e.to_string())?;
-    if !status.is_success() { return Err(result.get("detail").or_else(|| result.get("error")).and_then(Value::as_str).unwrap_or("导入失败").to_owned()); }
-    if let Some(errors) = result.get_mut("errors").and_then(Value::as_array_mut) {
-        errors.extend(input["native_errors"].as_array().into_iter().flatten().cloned());
-    }
-    Ok(result)
 }
 
 const RELEASE_PAGE: &str = "https://github.com/kumoSleeping/KDJ/releases/latest";
@@ -1131,7 +1088,6 @@ fn mobile_library_roots(app: &tauri::AppHandle) -> Vec<String> {
 /// 自绘标题栏的窗口动作。`maximize` 是切换；`drag` 用于 Overlay 顶栏拖动。
 #[cfg(desktop)]
 fn shutdown_desktop_runtime(app: &tauri::AppHandle) {
-    if let Some(live) = app.try_state::<live_vj::LiveVj>() { live.cancel(); live.shutdown_connections(); }
     if let Some(player) = app.try_state::<desktop_player::DesktopPlayerHandle>() {
         player.shutdown();
     }
@@ -2263,8 +2219,6 @@ pub fn run() {
         app.manage(bilibili_embed::BilibiliEmbedState::default());
         #[cfg(desktop)]
         app.manage(midi::MidiHub::spawn(app.handle().clone()));
-        #[cfg(desktop)]
-        app.manage(live_vj::LiveVj::default());
         #[cfg(any(desktop, target_os = "android"))]
         app.manage(
             desktop_player::DesktopPlayerHandle::spawn(app.handle().clone())
@@ -2340,27 +2294,6 @@ pub fn run() {
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_bridge_info,
         kvj_window::open_kvj_window,
-        live_vj::live_vj_document,
-        live_vj::live_vj_edit,
-        live_vj::live_vj_import,
-        live_vj::live_vj_pick_files,
-        live_vj::live_vj_inputs,
-        live_vj::live_vj_outputs,
-        live_vj::live_vj_start,
-        live_vj::live_vj_send_start,
-        live_vj::bluetooth::live_vj_bluetooth_scan,
-        live_vj::bluetooth::live_vj_bluetooth_connect,
-        live_vj::bluetooth::live_vj_bluetooth_disconnect,
-        live_vj::bluetooth::live_vj_bluetooth_select,
-        live_vj::bluetooth::live_vj_bluetooth_pair,
-        live_vj::projection::live_vj_standby,
-        live_vj::projection::live_vj_projection_open,
-        live_vj::projection::live_vj_projection_close,
-        live_vj::projection::live_vj_projection_error,
-        live_vj::live_vj_prepare,
-        live_vj::live_vj_stop,
-        live_vj::live_vj_status,
-        live_vj::live_vj_output_status,
         cli_install_status,
         install_cli,
         open_path,
@@ -2369,7 +2302,6 @@ pub fn run() {
         share_clipboard::read_clipboard_text,
         desktop_lyrics_hit_test::set_desktop_lyrics_drag_regions,
         start_native_file_drag,
-        workshop_import_files,
         start_native_link_drag,
         save_login_qr,
         open_external,

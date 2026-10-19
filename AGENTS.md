@@ -11,7 +11,8 @@
 - Use `npm run build` or `npm run tauri:build` for production builds.
 - Backend work belongs in `crates/` and `src-tauri/`.
 - Frontend work belongs in `src/` and must be validated against the Tauri shell.
-- Video scheduling is shared through `src/lib/videoPlaybackEngine.ts`, `videoFrames.ts`, and `videoSeekQueue.ts`. Local playback, online previews, YouTube, and the mixing editor (formerly VJ workshop) must use this common scheduling layer; official embedded players adapt their commands to the shared seek queue.
+- Video scheduling is shared through `src/lib/videoPlaybackEngine.ts`, `videoFrames.ts`, and `videoSeekQueue.ts`. Local playback, online previews and YouTube must use this common scheduling layer; official embedded players adapt their commands to the shared seek queue.
+- Video editing is the AI's: KDJ's own AI (the kdj-video skill) writes `.kdjv` projects that play like videos (`docs/kdjv.md`). There is no hand-operated editor and no VJ projection any more (the workshop and Live VJ were removed; their code is in git history). The workshop's render engine stays, as what plays a project.
 - Prioritize macOS and Windows while retaining Android support. Reuse system decoding; do not introduce a bundled decoder/player dependency merely to unify video controls. Keep native decoding, shared scheduling, and source-specific loading distinct when reporting capabilities.
 
 ## Disabled Legacy Runtime
@@ -23,10 +24,10 @@
 
 ## Persisted User Data
 
-- `vj-projects.json`（以及其它版本间共用的 `settings.json`、队列文件、数据库）是用户的长期资产，必须按“任何一次写入都不得比读到的内容少”处理。
+- `vj-projects.json`（以及其它版本间共用的 `settings.json`、队列文件、数据库）是用户的长期资产，必须按“任何一次写入都不得比读到的内容少”处理。本版不再读取 `vj-projects.json`，也绝不删除、改写或移动它；`.kdjv` 工程只由用户或 AI 写，KDJ 只读。
 - Never rewrite a persisted document on open unless normalization or migration actually changed it; an unconditional save-on-open lets an older build restructure the whole file. This already destroyed every `crop_auto_fit` flag once (installed `/Applications/KDJ.app` 1.0.2-rc3 shares the same data directory as the dev build).
 - When a build cannot round-trip a loaded document without dropping keys, it MUST open it read-only, report the dropped paths, and leave the file untouched — never silently strip fields.
-- Keep automatic snapshots (`workshop-backups/auto/` at a ten-minute gap, `workshop-backups/daily/`) before writes; recover from them rather than from memory.
+- Keep automatic snapshots before rewriting a persisted document (the old workshop kept `workshop-backups/auto/` and `workshop-backups/daily/`; leave them where they are); recover from them rather than from memory. The AI backs up a `.kdjv` it replaces into its workspace's `backups/`.
 - Do not run two builds against one data directory at the same time; upgrading the installed app is the fix, not a compatibility shim.
 
 ## Release
@@ -73,6 +74,6 @@
 - Do not impose a global zero-radius rule or inherit another project's visual style. Use restrained radii appropriate to each component.
 - The two lists of the workspace (the local track list, the search results) are row lists: independently placed `div` rows of a grid, rendered by the virtualizer in `src/components/common/rowList.ts`, laid out by `RowList.css`, arriving through `src/components/common/listArrival.ts`. Never add a `<table>` list, a second virtualization, a stand-in painted during scrolling, or a mark on an ancestor of the rows; never `flushSync`, measure layout or paint in a scroll frame beyond what the virtualizer does. In WebKit the two lists scroll themselves (each is `overflow: hidden` so the main thread scrolls it, takes the wheel and the page keys, keeps only the rows around the viewport and renders in the scroll event): do not build it whole there, every cell that clips is a layer WebKit walks on each scroll. Rules and a worked example: `docs/row-list.md`.
 - Side apps on a wide window (lyrics, downloads/exports, settings, visualizer configuration, Meta editor, tips, previews) are apps of the one drawer over the list. Describe a new one with `DrawerSpec` (`src/components/drawer/drawerSchema.ts`) and let `DrawerHost` draw its title, close button, extent and motion; never add another right-hand column, floating panel or hand-made head for such a surface. A panel with sibling pages uses `TitleTabs` for its title row and `SlidePages` for the sideways switch instead of a new tab strip. Rules and a worked example: `docs/drawer-schema.md`.
-- Local video and workshop previews must share `FloatingVideoControls`, `FloatingVideoScrub`, and the `kd-pip-float` styles. Controls overlay the picture; do not create separate white header/footer strips.
+- Local video previews must share `FloatingVideoControls`, `FloatingVideoScrub`, and the `kd-pip-float` styles. Controls overlay the picture; do not create separate white header/footer strips.
 - Anything reported while the user is doing something else (a song started, a download or export started, ended or failed, an action could not be carried out) is a task bubble: one `showTask({...})` call with a `TaskBubbleSpec` (`src/components/tasks/taskBubbleSchema.ts`), drawn by `TaskBubbleHost`. Never add another toast, snackbar or corner pop-up, and never draw a bubble's surface, covers, countdown or motion yourself. Rules and how to add a kind: `docs/task-bubbles.md`.
 - Anything that comes and goes (a menu, a popover, a sheet, a small window, a notice) uses the motion schema: build menus and popovers on `ContextMenu`, give any other transient surface `{...motion("unfold" | "pop" | "slide" | "fade")}` (`src/lib/motion.ts`), and take durations and curves from the `--kd-motion-*` / `--kd-ease-*` tokens in `src/motion.css`; never write one-off keyframes or timings for such a surface. Rules and the list of gestures: `docs/motion-schema.md`.

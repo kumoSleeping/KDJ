@@ -1,4 +1,3 @@
-import type { WorkshopSnapshot, WorkshopEdit, WorkshopPositionResults } from "../types/workshop";
 /**
  * 本地后端客户端。所有网络访问都必须走这里，组件里不要出现裸 fetch。
  */
@@ -6,7 +5,6 @@ import type { WorkshopSnapshot, WorkshopEdit, WorkshopPositionResults } from "..
 import { getBridge } from "./bridge";
 import { captureDiagnostic } from "./diagnostics";
 import type { LibraryQuery, TrackIndex } from "./libraryWindow";
-import type { CompositionLane, CompositionOptions, CompositionPatch, CompositionSnapshot } from "../types/composition";
 import {
   describeApiActivity,
   finishApiActivity,
@@ -943,51 +941,8 @@ export const api = {
   resolve: (url: string, limit = 0) => post<ResolveResponse>("/resolve", { url, limit }),
   intake: (body: IntakeRequest) => post<IntakeResponse>("/intake", body),
 
-  intakeWorkshop: (input: import("../types/workshop").WorkshopIntake) => input.paths.length && bridge().importWorkshopFiles
-    ? bridge().importWorkshopFiles!(input)
-    : post<import("../types/workshop").WorkshopIntakeResult>("/workshop/intake", input),
-  rhythm: (id: number) => request<import("../types/workshop").RhythmResponse>(`/library/rhythm/${id}`),
-  analyzeRhythm: (id: number, precise = false, force = false) => post<{job_id: string | null; queued: number}>(`/library/rhythm/${id}`, {precise, force}),
-  workshop: () => request<WorkshopSnapshot>("/workshop"),
-  createWorkshop: () => post<WorkshopSnapshot>("/workshop", {}),
-  uploadWorkshopSubtitle: (id: string, revision: number, title: string, png: Blob) =>
-    request<{snapshot: WorkshopSnapshot; source_id: string}>(`/workshop/${encodeURIComponent(id)}/subtitle-source?${new URLSearchParams({revision: String(revision), title})}`,
-      {method: "POST", headers: {"Content-Type": "image/png"}, body: png}),
-  editWorkshop: (id: string, revision: number, edit: WorkshopEdit) => request<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ revision, ...edit }) }),
-  deleteWorkshop: (id: string, revision: number) => request<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ revision }) }),
-  addWorkshopSources: (id: string, revision: number, track_ids: number[], at_ms: number) => post<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}/sources`, { revision, track_ids, at_ms }),
-  alignWorkshop: (id: string, revision: number, clip_id: string, reference_id: string, request_id?: string, signal?: AbortSignal) => request<{start_ms: number; revision: number}>(`/workshop/${encodeURIComponent(id)}/align`, {method: "POST", body: JSON.stringify({revision, clip_id, reference_id, request_id}), signal}),
-  cancelWorkshopAlignment: (request: string) => post(`/workshop/align/${encodeURIComponent(request)}/cancel`, {}),
-  acknowledgeWorkshopRecovery: () => post<WorkshopSnapshot>("/workshop/recovery/ack", {}),
-  previewWorkshop: (id: string, revision: number, auditionAfterLayer?: string) => post<{ticket: string; revision: number}>(`/workshop/${encodeURIComponent(id)}/preview`, {revision, audition_after_layer: auditionAfterLayer}),
-  releaseWorkshop: (ticket: string) => request(`/workshop/preview/${encodeURIComponent(ticket)}`, {method: "DELETE"}),
-  workshopPositions: (id:string) => post<WorkshopPositionResults>(`/workshop/${encodeURIComponent(id)}/positions`,{}),
-  analyzeWorkshopPositions: (id:string, layer_id?:string, restart = false) => post<WorkshopPositionResults>(`/workshop/${encodeURIComponent(id)}/positions/analyze`,{layer_id:layer_id ?? null,restart}),
-  controlWorkshopPositions: (id:string, stopped:boolean, layer_id?:string) => post<WorkshopPositionResults>(`/workshop/${encodeURIComponent(id)}/positions/control`,{stopped,layer_id}),
-  applyWorkshopPositions: (id:string, revision:number, layer_id:string, analysis_id:string, preset_id:string) => post<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}/positions/apply`,{revision,layer_id,analysis_id,preset_id}),
-  workshopFrameUrl: (project: string, source: string, ms: number, width: 160 | 320 | 960 = 160) => authenticatedGetUrl(`${bridge().baseUrl}/api/workshop/${encodeURIComponent(project)}/sources/${encodeURIComponent(source)}/frame?ms=${Math.max(0,ms).toFixed(3)}&width=${width}`),
-  workshopAudioUrl: (ticket: string) => authenticatedGetUrl(`${bridge().baseUrl}/api/workshop/media/${encodeURIComponent(ticket)}/audio.wav`),
-  workshopVideoUrl: (ticket: string, clip: string, part: number) => authenticatedGetUrl(`${bridge().baseUrl}/api/workshop/media/${encodeURIComponent(ticket)}/video/${encodeURIComponent(clip)}/${part}`),
   /** A `.kdjv` project's render (docs/kdjv.md): found in the cache, or made now (can take minutes). */
   renderKdjv: (trackId: number) => post<{ path: string; track_id: number | null }>("/kdjv/render", { track_id: trackId }),
-  exportWorkshop: (id: string, revision: number) => post<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}/export`, {revision}),
-  cancelWorkshopExport: (id: string) => post<WorkshopSnapshot>(`/workshop/jobs/${encodeURIComponent(id)}/cancel`, {}),
-  importWorkshopExport: (id: string) => post<WorkshopSnapshot>(`/workshop/jobs/${encodeURIComponent(id)}/import`, {}),
-  clearWorkshopExports: (projects: Record<string, number>, job_ids: string[]) => post<WorkshopSnapshot>("/workshop/exports/clear", { projects, job_ids }),
-  discardWorkshopReceipt: (id: string) => post<WorkshopSnapshot>(`/workshop/jobs/${encodeURIComponent(id)}/discard`, {}),
-  compositions: () => request<CompositionSnapshot>("/compositions"),
-  enqueueCompositions: async (trackIds: number[]) => {
-    await waitForSettingsWrites();
-    return post<CompositionSnapshot>("/compositions", { track_ids: trackIds });
-  },
-  compositionDefaults: (options: CompositionOptions) => post<CompositionSnapshot>("/compositions/defaults", options),
-  reorderCompositions: (lane: CompositionLane, entryIds: string[]) => post<CompositionSnapshot>("/compositions/order", { lane, entry_ids: entryIds }),
-  stackCompositionVideo: (sourceEntryId: string, targetTaskId: string) => post<CompositionSnapshot>("/compositions/stack-video", { source_entry_id: sourceEntryId, target_task_id: targetTaskId }),
-  patchComposition: (id: string, patch: CompositionPatch) => request<CompositionSnapshot>(`/compositions/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) }),
-  reanalyzeComposition: (id: string, generation: number) => post<CompositionSnapshot>(`/compositions/${encodeURIComponent(id)}/analyze`, { generation }),
-  startCompositions: (ids?: string[]) => post<CompositionSnapshot>("/compositions/start", { ids }),
-  cancelCompositions: (ids?: string[]) => post<CompositionSnapshot>("/compositions/cancel", { ids }),
-  removeComposition: (id?: string, lane?: CompositionLane) => request<CompositionSnapshot>(`/compositions${id ? `/${encodeURIComponent(id)}${lane ? `/${lane}` : ""}` : ""}`, { method: "DELETE" }),
   downloads: () => request<DownloadTask[]>("/downloads"),
   enqueue: async (body: DownloadRequest) => {
     // 目录选择先乐观更新 UI、再异步落盘。入队若抢在落盘前，后端会冻结上一个目录。
