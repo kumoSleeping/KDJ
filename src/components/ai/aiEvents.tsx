@@ -17,7 +17,7 @@
  * - what goes wrong is an amber bubble at the top.
  */
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { Check, FileVideo, Globe, Library, LoaderCircle, LogIn, Search, Settings2, Sparkles, Wrench } from "lucide-react";
+import { Check, FileVideo, Globe, Library, LoaderCircle, LogIn, Search, Settings2, Sparkles, Square, Undo2, Wrench } from "lucide-react";
 import { aiApi } from "../../lib/api";
 import { requestAiLibrary, requestAiSearch } from "../../lib/aiSearch";
 import { aiTaskBegan, aiTaskEnded } from "../../lib/aiPlace";
@@ -474,8 +474,17 @@ function drawMain() {
     icon: task.working ? <LoaderCircle size={16} className="kd-spin" aria-hidden="true" /> : AI_MARK,
     stay: 0,
     controls: <TaskText task={task} />,
-    dismiss: { label: task.working ? "停止任务" : "撤销" },
-    onDismiss: reason => { if (reason === "user") stopTask(); },
+    // The task stays in sight until it ends: it cannot be put away, only stopped with its key.
+    held: true,
+    actions: [{
+      id: "stop",
+      label: task.working ? "停止任务" : "撤销",
+      icon: task.working ? <Square size={13} aria-hidden="true" /> : <Undo2 size={14} aria-hidden="true" />,
+      onSelect: () => {
+        dismissTask(`ai-task:${task.id}`, "caller");
+        stopTask();
+      },
+    }],
   });
 }
 

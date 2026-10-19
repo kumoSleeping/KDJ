@@ -70,7 +70,10 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   `taskDefaultStay`), an error twice that, and downloads twice that too.
   `stay: 0` keeps the bubble until it is dismissed — a pinned or opened bubble. The ring shows the
   time that is left and stops while the stack is hovered or focused. Every bubble can be rolled
-  down by hand; `escape: true` also lets Esc do it (only for a bubble the user called up).
+  down by hand; `escape: true` also lets Esc do it (only for a bubble the user called up). The
+  one exception is `held: true`: work under way that must stay in sight (the AI's task) has no
+  key that rolls it down and no Esc, only its own stop key in `actions`, and leaves when its
+  caller takes it down.
   `dismiss: { label, icon? }` rewrites the key that rolls it down when doing so does more than
   put the bubble away — never by testing an id in the host.
 - **Tone is not selection.** `info`, `success`, `error` colour the leading mark only (on a cover

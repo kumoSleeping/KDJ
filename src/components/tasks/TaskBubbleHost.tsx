@@ -245,7 +245,7 @@ function ReadyTaskBubble({ entry, lift, away, front, held, onHeld, onSize, prepa
     };
   }, [timed, held, preparing, swapping, entry.token, stay, id]);
 
-  const escape = !!entry.spec.escape && !entry.leaving;
+  const escape = !!entry.spec.escape && !entry.spec.held && !entry.leaving;
   useEffect(() => {
     if (!escape) return;
     const dismiss = (event: KeyboardEvent) => {
@@ -381,11 +381,11 @@ function ReadyTaskBubble({ entry, lift, away, front, held, onHeld, onSize, prepa
             onClick={() => setExpanded(!expanded)}>
             <ChevronsUpDown size={14} aria-hidden="true" />
           </button>}
-          <button type="button" className="kd-task-action kd-task-dismiss" aria-label={dismissLabel}
+          {!spec.held && <button type="button" className="kd-task-action kd-task-dismiss" aria-label={dismissLabel}
             title={spec.escape ? `${dismissLabel}（Esc）` : dismissLabel}
             onClick={() => useTaskBubbles.getState().dismiss(id, "user")}>
             {spec.dismiss?.icon ?? <Away size={14} aria-hidden="true" />}
-          </button>
+          </button>}
         </div>
       </div>
       {expanded && <div className="kd-task-body kd-scroll">{spec.body}</div>}

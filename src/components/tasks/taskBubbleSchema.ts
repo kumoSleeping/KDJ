@@ -148,6 +148,12 @@ export interface TaskBubbleSpec {
    * that is read at length (the AI's plans and messages).
    */
   resizable?: boolean;
+  /**
+   * The listener cannot put it away: no dismiss key, no Esc. It leaves when its caller takes it
+   * down. For work under way that must stay in sight, and that has its own key to stop it in
+   * `actions` (the AI's task).
+   */
+  held?: boolean;
   /** Esc dismisses it. For a bubble the user called up; never for a transient report. */
   escape?: boolean;
   /**
