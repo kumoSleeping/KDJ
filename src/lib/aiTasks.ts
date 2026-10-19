@@ -59,6 +59,8 @@ function running(tool: string, args: Fields): Omit<AiNotice, "tone"> {
       return { icon: "library", title: "读取曲目" };
     case "kdj_folders":
       return { icon: "library", title: str(args.query) ? `找文件夹“${str(args.query)}”` : "列出文件夹" };
+    case "kdj_library_add_root":
+      return { icon: "library", title: `加入曲库 ${sourceName(args.path)}` };
     case "kdj_peek":
       return { icon: "video", title: `截帧 ${sourceName(args.source)}` };
     case "kdj_align":

@@ -484,6 +484,16 @@ fn library(http: &HttpClient, command: LibraryCmd) -> Result<Value> {
                 json!({ "items": items })
             })
         }
+        LibraryCmd::Add { path } => {
+            let folder = absolute(&path);
+            if !Path::new(&folder).is_dir() {
+                return Err(CliError::new("not_found", format!("不是文件夹：{folder}")).into());
+            }
+            // The same import as 添加文件夹: the songs come in, and the folder becomes a root
+            // once the import has gone through.
+            let scan = http.post_json("/api/library/scan", &json!({ "paths": [folder], "recursive": true }))?;
+            Ok(json!({ "folder": folder, "job_id": scan.get("job_id") }))
+        }
     }
 }
 
@@ -709,6 +719,7 @@ mod tests {
                 "kdj align",
                 "kdj library list",
                 "kdj library get",
+                "kdj library add <PATH>",
                 "kdj project check <PATH>",
                 "kdj project render <PATH>",
                 "kdj visualizer render <ID>",

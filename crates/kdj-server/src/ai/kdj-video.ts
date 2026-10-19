@@ -302,7 +302,7 @@ function projectTools(deps: VideoDeps) {
     label: "保存工程",
     description:
       "把一个 .kdjv 视频工程（格式见 kdj-video 技能的 references/kdjv.md）写进曲库里的文件夹，KDJ 曲库里会出现这一行，标着「工程」。" +
-      "path 是 .kdjv 文件的绝对路径，必须在曲库根目录内（用 kdj_folders 找文件夹）；document 是整份工程。改已有的工程先用 read 读出整份，" +
+      "path 是 .kdjv 文件的绝对路径，必须在曲库根目录内一个已有的文件夹里（用 kdj_folders 找文件夹；它不建文件夹）；document 是整份工程。改已有的工程先用 read 读出整份，" +
       "改完整份写回：原有的顶层字段一个都不能少。旧版本会先备份到工作目录的 backups/。写入前先检查：不能播放（区间越界、淡入淡出过长、素材不存在…）时不写，" +
       "直接报错说明原因，改好再保存；通过了才写进曲库，返回时长、画布和素材。",
     parameters: Type.Object({
@@ -314,6 +314,8 @@ function projectTools(deps: VideoDeps) {
       if (extname(path).toLowerCase() !== ".kdjv") throw new Error("工程文件要以 .kdjv 结尾");
       const roots = await deps.libraryRoots(signal);
       if (!roots.some(root => inside(resolve(root), path))) throw new Error(`工程要放在曲库根目录内：${roots.join("、")}`);
+      // Saving a project never makes folders: it is not a way to lay out the library.
+      if (!statSync(dirname(path), { throwIfNoEntry: false })?.isDirectory()) throw new Error(`文件夹不存在：${dirname(path)}。工程只能存进已有的文件夹`);
       if (params.document.kdjv !== 1) throw new Error("document 需要 \"kdjv\": 1");
       // Checked before it is written: a project that cannot play never reaches the library.
       const checks = join(WORKSPACE, "checks");
@@ -339,7 +341,6 @@ function projectTools(deps: VideoDeps) {
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
         await writeFile(join(backups, `${stamp}-${relative(dirname(path), path)}`), old, "utf8");
       }
-      await mkdir(dirname(path), { recursive: true });
       const temporary = `${path}.${process.pid}.tmp`;
       await writeFile(temporary, `${JSON.stringify(params.document, null, 2)}\n`, "utf8");
       await rename(temporary, path);
@@ -377,6 +378,7 @@ function projectTools(deps: VideoDeps) {
       const folder = resolve(params.to ?? dirname(project));
       const roots = await deps.libraryRoots(signal);
       if (!roots.some(root => inside(resolve(root), folder))) throw new Error(`导出要放在曲库根目录内：${roots.join("、")}`);
+      if (!statSync(folder, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`文件夹不存在：${folder}`);
       const name = (params.name ?? basename(project, extname(project))).replace(/[\\/:*?"<>|]/g, "_").trim();
       if (!name) throw new Error("文件名为空");
       const target = join(folder, `${name}.mp4`);
@@ -386,7 +388,6 @@ function projectTools(deps: VideoDeps) {
         details: { done, total, detail },
       })) as { path?: unknown };
       if (typeof rendered?.path !== "string") throw new Error("渲染没有给出文件");
-      await mkdir(folder, { recursive: true });
       await copyFile(rendered.path, target, constants.COPYFILE_EXCL);
       return text({ exported: target, from: project });
     },
@@ -412,6 +413,7 @@ function projectTools(deps: VideoDeps) {
         folder = resolve(params.to);
         const roots = await deps.libraryRoots(signal);
         if (!roots.some(root => inside(resolve(root), folder))) throw new Error(`导出要放在曲库根目录内：${roots.join("、")}`);
+        if (!statSync(folder, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`文件夹不存在：${folder}`);
       }
       const name = (params.name ?? `visualizer-${params.track_id}-${Date.now()}`).replace(/[\\/:*?"<>|]/g, "_").trim();
       const target = join(folder, `${name}.mp4`);

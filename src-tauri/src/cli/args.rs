@@ -168,6 +168,11 @@ pub enum LibraryCmd {
         #[arg(long)]
         beats: bool,
     },
+    /// 把一个文件夹加进曲库，和「添加文件夹」一样：导入其中的歌，并登记为曲库根目录（已在某个根里的不重复登记）
+    Add {
+        /// 文件夹的绝对路径
+        path: String,
+    },
 }
 
 #[cfg(test)]

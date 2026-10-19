@@ -21,6 +21,10 @@ import { folderScore, walk } from "./kdj-folders.ts";
 import { blindLine, registerVideo, videoHeight } from "./kdj-video.ts";
 import { registerWeb } from "./kdj-web.ts";
 
+/** The opening of the system prompt, in place of pi's coding-assistant one. */
+const PREAMBLE = "你是 KDJ 里的 AI 助手，在用户自己的电脑上替用户完成音乐和视频的事。" +
+  "你没有 shell，也不能随意读写文件：你能做的只有下面这些工具做得到的事。";
+
 const CLI = process.env.KDJ_CLI || "kdj";
 const DATA_DIR = process.env.KDJ_DATA_DIR;
 
@@ -304,6 +308,19 @@ const libraryGet = defineTool({
   },
 });
 
+const addRoot = defineTool({
+  name: "kdj_library_add_root",
+  label: "加入曲库",
+  description: "把本机一个已有的文件夹加进 KDJ 曲库（和设置里「添加文件夹」一样）：导入其中的歌，并把它登记为曲库根目录，之后它和它的子文件夹会出现在曲库里。" +
+    "用户说「导入到 KDJ」「加进曲库」指的就是这个。已经在某个曲库根目录里的文件夹不用加。只在用户要求时用。",
+  parameters: Type.Object({ path: Type.String({ description: "文件夹的绝对路径" }) }),
+  async execute(_id, params, signal) {
+    const data = await kdj(["library", "add", params.path], signal);
+    roots = null; // The new root is asked for again on the next folder lookup.
+    return result(data);
+  },
+});
+
 const peek = defineTool({
   name: "kdj_peek",
   label: "截帧",
@@ -540,15 +557,18 @@ const play = defineTool({
 });
 
 export default function (pi: ExtensionAPI) {
-  for (const tool of [status, search, download, folders, login, libraryList, libraryGet, peek, align, play, askUser, tellUser]) {
+  for (const tool of [status, search, download, folders, login, libraryList, libraryGet, addRoot, peek, align, play, askUser, tellUser]) {
     pi.registerTool(tool);
   }
   registerWeb(pi);
   // Video work (the kdj-video skill): files in the workspace, FFmpeg, Remotion and .kdjv projects.
   registerVideo(pi, { kdj, libraryRoots });
-  // A model that takes no pictures is told so at the start of every run, and turns video work down.
   pi.on("before_agent_start", (event, ctx) => {
-    const line = blindLine(ctx.model);
-    return line ? { systemPrompt: `${event.systemPrompt}\n\n${line}` } : undefined;
+    // pi's own opening line calls the model a coding assistant that runs commands and edits code;
+    // this one has neither, and says what it is instead (kdj-prompt.md has the rest).
+    event.systemPromptOptions.customPrompt = PREAMBLE;
+    // A model that takes no pictures is told so at the start of every run, and turns video work
+    // down; an empty section is left out, so a model changed in 设置 is judged afresh.
+    event.systemPromptOptions.sections.blind = blindLine(ctx.model) ?? "";
   });
 }

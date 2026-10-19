@@ -162,7 +162,11 @@ KDJ 之外的 AI 用的。`kdj_peek` 把截下的画面作为图片直接交给�
 `--exclude-tools` 收起。网页都由这些服务读取，本机不打开任何网页或文件。早先的浏览器（CDP）方案已经删掉：它能用
 `file://` 读到本机文件。
 
-pi 没有 shell、读写文件等内置工具（`--no-builtin-tools`），整理文件仍然不做。
+pi 没有 shell、读写文件等内置工具（`--no-builtin-tools`），整理文件仍然不做：建文件夹、复制、改名、删除都请用户自己做，
+提示词要求 AI 用 `tell_user` 说明，不许拿别的工具凑（保存工程、导出都只写进已有的文件夹，不建目录）。
+`kdj_library_add_root`（`kdj library add <PATH>`，走「添加文件夹」同一条 `/api/library/scan`）把一个已有文件夹加进曲库。
+系统提示开头 pi 自带的「编程助手、能执行命令」一句由 `kdj-tools.ts` 在 `before_agent_start` 换成 KDJ 的
+（`customPrompt`；非视觉模型的那句放在 `blind` 段）。
 
 ## 视频（kdj-video 技能）
 
