@@ -141,6 +141,13 @@ export interface TaskBubbleSpec {
    * (src/lib/songSwapMotion.ts), and it counts as a surface of that song.
    */
   song?: string | number;
+  /**
+   * The listener can make the bubble wider or narrower by dragging its inner edge (the left
+   * one: the stacks stand at the right); its height still follows what it holds. The width
+   * is kept for the kind of bubble, so the next one of that kind comes up as wide. For a bubble
+   * that is read at length (the AI's plans and messages).
+   */
+  resizable?: boolean;
   /** Esc dismisses it. For a bubble the user called up; never for a transient report. */
   escape?: boolean;
   /**

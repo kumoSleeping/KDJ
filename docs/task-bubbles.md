@@ -61,6 +61,10 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   In a tall desktop window (`tall` in `src/lib/useLayoutMode.ts`) a `large` bubble spans the
   window, with the same gap on its left and its right; `regular` and `small` keep their size
   and stack above it at the right, where they rise from behind it.
+  The one exception is `resizable: true`, for a bubble that is read at length (the AI's plans and
+  messages): the listener drags its inner (left) edge to set the width, the height still follows
+  what it holds, the width is kept per `kind`, and a double click on the edge gives the usual
+  width back. The owner still sets no width itself.
 - **The stay.** Each kind chooses its own `stay`: the playing song 5 s, a short note such as
   "没有找到歌词" 3 s. `stay` in ms; left out, the listener's own length decides (设置 → 通用 → 提示停留, 30 s by default;
   `taskDefaultStay`), an error twice that, and downloads twice that too.

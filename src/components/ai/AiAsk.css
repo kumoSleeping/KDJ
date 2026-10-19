@@ -99,7 +99,11 @@
 .kd-ai-task { display: grid; gap: 4px; min-width: 0; }
 .kd-ai-task-more { color: var(--kd-muted); }
 
-/* A longer message from the AI: its text under the bubble's name. */
+/* A message from the AI, as Markdown (AiMarkup.tsx), under the bubble's name; a long one
+   scrolls inside the bubble. */
+.kd-ai-message-md { max-height: min(32rem, 64vh); min-width: 0; overflow-y: auto; }
+
+/* The listener's own words in their task. */
 .kd-ai-message {
   margin: 0;
   color: var(--kd-text-body);
@@ -185,11 +189,56 @@ button.kd-ai-media-main:hover { background: var(--kd-hover); color: var(--kd-tex
 }
 .kd-ai-media-open:hover { background: var(--kd-hover); color: var(--kd-text); }
 
-/* Evidence: a frame the AI looked at, with what it shows. */
-.kd-ai-shot { display: grid; gap: 3px; width: 100%; margin: 2px 0; }
-.kd-ai-shot > img { display: block; width: 100%; height: auto; border-radius: 8px; }
+.kd-ai-md del { color: var(--kd-muted); }
+.kd-ai-md-quote { display: grid; gap: 4px; margin: 0; padding-left: 0.8rem; color: var(--kd-muted); }
+.kd-ai-md-code {
+  margin: 0;
+  padding: 6px 8px;
+  overflow-x: auto;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--kd-text) 6%, transparent);
+  font-size: var(--kd-size-xs);
+  line-height: 1.45;
+  white-space: pre;
+}
+.kd-ai-md-code > code { padding: 0; background: none; font-size: inherit; }
+/* A table: its columns set apart by spacing and its head by weight; no rules between rows. */
+.kd-ai-md-table { min-width: 0; overflow-x: auto; }
+.kd-ai-md-table > table { border-collapse: collapse; font-size: var(--kd-size-xs); }
+.kd-ai-md-table th,
+.kd-ai-md-table td { padding: 2px 14px 2px 0; text-align: left; vertical-align: top; }
+.kd-ai-md-table th { color: var(--kd-text); font-weight: 600; white-space: nowrap; }
+.kd-ai-md-table td { color: var(--kd-text-body, var(--kd-text)); }
+
+/* Evidence: a frame the AI looked at, with what it shows. It stands small; pressed, it opens to
+   the bubble's width where it is, arriving a little past its size and settling, and pressed
+   again it goes back. */
+.kd-ai-shot {
+  display: grid;
+  gap: 3px;
+  width: 9.5rem;
+  max-width: 100%;
+  margin: 2px 0;
+  transition: width var(--kd-motion-in) var(--kd-ease-spring);
+}
+.kd-ai-shot[data-open] { width: 100%; }
+.kd-ai-shot-key {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  cursor: zoom-in;
+}
+.kd-ai-shot[data-open] .kd-ai-shot-key { cursor: zoom-out; }
+.kd-ai-shot-key:focus-visible { outline: 2px solid var(--kd-focus, var(--kd-text)); outline-offset: 2px; }
+.kd-ai-shot-key > img { display: block; width: 100%; height: auto; border-radius: 8px; }
 .kd-ai-shot > figcaption,
 .kd-ai-shot-missing { color: var(--kd-muted); font-size: var(--kd-size-xs); }
+@media (prefers-reduced-motion: reduce) {
+  .kd-ai-shot { transition-duration: var(--kd-motion-reduced); }
+}
 
 /* The listener's own words: a soft field that grows to a few lines, the keys under it. */
 .kd-ai-note { display: grid; gap: 6px; }

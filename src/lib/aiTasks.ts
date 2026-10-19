@@ -89,7 +89,7 @@ function running(tool: string, args: Fields): Omit<AiNotice, "tone"> {
     case "kdj_project_save":
       return { icon: "video", title: `保存工程 ${sourceName(args.path)}` };
     case "kdj_project_render":
-      return { icon: "video", title: `准备工程 ${sourceName(args.path)}` };
+      return { icon: "video", title: `预渲染工程 ${sourceName(args.path)}` };
     case "kdj_project_export":
       return { icon: "video", title: `导出工程 ${sourceName(args.path)}` };
     case "kdj_visualizer_render":
@@ -132,7 +132,6 @@ function outcome(tool: string, details: Fields): string | undefined {
       return str(details.title) || undefined;
     case "kdj_project_save": {
       const check = fields(details.check);
-      if (details.problem) return str(details.problem).split("\n")[0];
       return typeof check.duration === "number" ? `${Math.round(check.duration)} 秒 · ${count(check.sources)} 个素材` : undefined;
     }
     case "kdj_project_export":
@@ -142,6 +141,18 @@ function outcome(tool: string, details: Fields): string | undefined {
     default:
       return undefined;
   }
+}
+
+/**
+ * How far a long step is, from its partial result (`{ done, total, detail }`: a render's
+ * percentage and what it is doing): 0..1 and a line, or null for a step that does not say.
+ */
+export function stepProgress(tool: string, details: unknown): { progress: number; line: string } | null {
+  if (tool !== "kdj_project_render" && tool !== "kdj_project_export") return null;
+  const d = fields(details);
+  if (typeof d.done !== "number" || typeof d.total !== "number" || d.total <= 0) return null;
+  const progress = Math.max(0, Math.min(1, d.done / d.total));
+  return { progress, line: [`${Math.round(progress * 100)}%`, str(d.detail)].filter(Boolean).join(" · ") };
 }
 
 /** The bubble of a tool call that has started; null for those that report elsewhere. */
@@ -167,7 +178,7 @@ export function stepLine(tool: string, args: unknown, state: "running" | "done" 
   // The quiet tools have no words of their own in a bubble (a failure would only name the tool).
   const notice = SILENT.has(tool) ? null
     : state === "running" ? noticeOnStart(tool, args) : noticeOnEnd(tool, args, details, state === "failed", text);
-  if (notice) return { title: notice.title, detail: notice.detail };
+  if (notice) return { title: notice.title, detail: (state === "running" ? stepProgress(tool, details)?.line : undefined) ?? notice.detail };
   const failure = state === "failed" ? text.trim().split("\n")[0] || undefined : undefined;
   const line = (title: string, detail?: string) => ({ title: failure ? `${title} 失败` : title, detail: failure ?? detail });
   switch (tool) {

@@ -22,7 +22,7 @@ import { aiApi } from "../../lib/api";
 import { requestAiLibrary, requestAiSearch } from "../../lib/aiSearch";
 import { aiTaskBegan, aiTaskEnded } from "../../lib/aiPlace";
 import { openAiSettings } from "../../lib/aiSettings";
-import { noticeOnEnd, noticeOnStart, resultText, type AiNotice, type AiNoticeIcon } from "../../lib/aiTasks";
+import { noticeOnEnd, noticeOnStart, resultText, stepProgress, type AiNotice, type AiNoticeIcon } from "../../lib/aiTasks";
 import { formatDuration, thumbUrl } from "../../lib/format";
 import type { PiEvent } from "../../types/ai";
 import type { Platform } from "../../types";
@@ -84,8 +84,9 @@ function gatherSearch(args: Fields) {
 /** The calls under way: their tool and arguments, for the line their end writes. */
 const calls = new Map<string, { tool: string; args: Fields }>();
 
-function noticeBubble(id: string, notice: AiNotice, stay: number | undefined) {
+function noticeBubble(id: string, notice: AiNotice, stay: number | undefined, progress?: number) {
   showTask({
+    progress,
     id: `ai:${id}`,
     kind: "ai",
     title: notice.title,
@@ -321,6 +322,7 @@ function askBubble(callId: string, ask: Asked) {
     title: "需要你决定",
     icon: AI_MARK,
     stay: ask.timeout * 1000,
+    resizable: true,
     controls: ask.questions.length > 0 ? <AskPlan callId={callId} ask={ask} /> : <AskPanel callId={callId} ask={ask} />,
     // Put away by hand: nothing chosen. Run out: pi takes the AI's default itself.
     onDismiss: reason => { if (reason === "user") sendAsk(callId, { choices: [], cancelled: true }); },
@@ -388,7 +390,8 @@ function dialog(event: PiEvent) {
 function tell(callId: string, args: Fields) {
   const message = str(args.message).trim();
   if (!message) return;
-  const short = message.length <= SHORT_MESSAGE && !message.includes("\n");
+  // A short line with no Markdown in it is the bubble's title; anything else is drawn as Markdown.
+  const short = message.length <= SHORT_MESSAGE && !message.includes("\n") && !/[*`#|>\[~]/.test(message);
   const seconds = typeof args.seconds === "number" ? args.seconds : 0;
   showTask({
     id: `ai-tell:${callId}`,
@@ -398,7 +401,8 @@ function tell(callId: string, args: Fields) {
     placement: "top",
     size: short ? "small" : "regular",
     stay: seconds * 1000,
-    controls: short ? undefined : <p className="kd-ai-message">{message}</p>,
+    resizable: !short,
+    controls: short ? undefined : <div className="kd-ai-message-md"><PlanText text={message} /></div>,
   });
 }
 
@@ -558,9 +562,18 @@ export function handlePiEvent(event: PiEvent) {
     }
     case "tool_execution_update": {
       const id = str(event.toolCallId);
-      if (calls.get(id)?.tool === "ask_user" || str(event.toolName) === "ask_user") {
-        askBubble(id, asked(fields(event.partialResult).details));
+      const call = calls.get(id);
+      const details = fields(event.partialResult).details;
+      if (call?.tool === "ask_user" || str(event.toolName) === "ask_user") {
+        askBubble(id, asked(details));
+        return;
       }
+      // A render's percentage: on its bubble and on its step in the drawer.
+      const step = call ? stepProgress(call.tool, details) : null;
+      const notice = call && step ? noticeOnStart(call.tool, call.args) : null;
+      if (!call || !step || !notice) return;
+      noticeBubble(id, { ...notice, detail: step.line }, RUNNING_STAY_MS, step.progress);
+      updateRun(run => ({ ...run, steps: run.steps.map(item => item.id === id ? { ...item, details } : item) }));
       return;
     }
     case "tool_execution_end": {

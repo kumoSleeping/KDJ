@@ -6,6 +6,7 @@ import { useMiniPlayer } from "../../lib/miniPlayer";
 import { MOTION_MICRO_MS, MOTION_MICRO_OUT_MS, MOTION_REDUCED_MS } from "../../lib/motion";
 import { playerBarMoving, usePlayerBarAway } from "../../lib/playerBarAway";
 import { prefersReducedSeekMotion } from "../../lib/seekTransition";
+import { readLocalStorage, writeLocalStorageSoon } from "../../lib/storageWrite";
 import {
   SONG_SWAP_IN_EASE,
   SONG_SWAP_IN_MS,
@@ -31,6 +32,47 @@ const EDGE_GAP: Record<TaskPlacement, number> = { bottom: 12, top: 10 };
  *  so that nothing of its edge or shadow shows before it moves. */
 const BEHIND_INSET = 6;
 const SIZE_RANK: Record<TaskSize, number> = { small: 0, regular: 1, large: 2 };
+/** A resizable bubble (TaskBubbleSpec.resizable) is never narrower than this, in px. */
+const RESIZE_MIN = 288;
+const widthKey = (kind: string) => `kd-task-width:${kind}`;
+function storedWidth(kind: string): number | null {
+  const value = Number(readLocalStorage(widthKey(kind)));
+  return Number.isFinite(value) && value >= RESIZE_MIN ? value : null;
+}
+/** The widest a bubble may be: the host's width less its gaps. */
+const resizeMax = (slot: HTMLElement) => Math.max(RESIZE_MIN, (slot.parentElement?.clientWidth ?? window.innerWidth) - 2 * EDGE_GAP.bottom);
+
+/**
+ * The inner edge of a resizable bubble, as a grip: dragging it sets the bubble's width (the
+ * right edge stays where the stack stands), double-clicking gives the bubble its usual width.
+ */
+function ResizeGrip({ kind, width, onWidth }: { kind: string; width: number | null; onWidth(width: number | null): void }) {
+  return <span className="kd-task-resize" role="separator" aria-orientation="vertical" aria-label="调整宽度"
+    onDoubleClick={() => { onWidth(null); writeLocalStorageSoon(widthKey(kind), ""); }}
+    onPointerDown={event => {
+      const slot = event.currentTarget.parentElement;
+      if (!slot || event.button !== 0) return;
+      event.preventDefault();
+      const grip = event.currentTarget;
+      grip.setPointerCapture(event.pointerId);
+      const startX = event.clientX, startWidth = width ?? slot.getBoundingClientRect().width, max = resizeMax(slot);
+      let last = startWidth;
+      const move = (moved: PointerEvent) => {
+        last = Math.round(Math.min(max, Math.max(RESIZE_MIN, startWidth + startX - moved.clientX)));
+        onWidth(last);
+      };
+      const end = () => {
+        grip.removeEventListener("pointermove", move);
+        grip.removeEventListener("pointerup", end);
+        grip.removeEventListener("pointercancel", end);
+        writeLocalStorageSoon(widthKey(kind), String(last));
+      };
+      grip.addEventListener("pointermove", move);
+      grip.addEventListener("pointerup", end);
+      grip.addEventListener("pointercancel", end);
+    }} />;
+}
+
 /** The exit under reduced motion: a short fade. */
 const REDUCED_LEAVE_MS = 140;
 
@@ -134,6 +176,8 @@ function ReadyTaskBubble({ entry, lift, away, front, held, onHeld, onSize, prepa
   const reduced = prefersReducedSeekMotion();
   const mini = useMiniPlayer(state => state.phase === "on") && entry.spec.song !== undefined;
   const node = useRef<HTMLElement>(null);
+  const resizable = !!entry.spec.resizable;
+  const [width, setWidth] = useState(() => (resizable ? storedWidth(entry.spec.kind) : null));
 
   // A bubble about the playing song keeps the old song while it rolls down, then rises with
   // the new one.
@@ -289,8 +333,10 @@ function ReadyTaskBubble({ entry, lift, away, front, held, onHeld, onSize, prepa
   const open = spec.onOpen;
   // The key that sends it away points the way it goes.
   const Away = entry.place === "top" ? ChevronsUp : ChevronsDown;
-  return <div className="kd-task-slot" data-size={spec.size ?? "regular"}
-    style={{ "--kd-task-lift": `${lift}px`, "--kd-task-away": away === null ? undefined : `${away}px`, zIndex: front } as CSSProperties}>
+  return <div className="kd-task-slot" data-size={spec.size ?? "regular"} data-resizable={resizable || undefined}
+    style={{ "--kd-task-lift": `${lift}px`, "--kd-task-away": away === null ? undefined : `${away}px`, zIndex: front,
+      width: resizable && width !== null ? `min(${width}px, calc(100% - 2 * var(--kd-task-gap)))` : undefined } as CSSProperties}>
+    {resizable && !entry.leaving && <ResizeGrip kind={entry.spec.kind} width={width} onWidth={setWidth} />}
     <article ref={node} className="kd-task" role={tone === "error" ? "alert" : "status"}
       data-kind={spec.kind} data-tone={tone} data-phase={entry.leaving || swapping ? "out" : "in"}
       data-expanded={expanded || undefined} data-held={held || preparing || swapping || undefined}

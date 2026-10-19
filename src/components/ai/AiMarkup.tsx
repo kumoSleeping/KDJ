@@ -7,8 +7,13 @@
  *   title, source, length, a key that opens it); with `q`, pressing the card picks its ref.
  * - `<shot src="frame">caption</shot>`: a frame kdj_peek cut, shown as the evidence for a choice.
  *
- * The Markdown is the small part a plan needs: headings, lists, paragraphs, **bold**, *italic*,
- * `code` and links. Everything is built as elements; no markup from the model reaches the page.
+ * The Markdown is the part a plan or a message needs: headings, lists, paragraphs, quotes,
+ * tables, fenced code, **bold**, *italic*, ~~struck~~, `code` and links; a rule (---) is left out,
+ * as the window draws no lines. Everything is built as elements; no markup from the model
+ * reaches the page.
+ *
+ * A frame shows small; pressing it opens it to the bubble's width where it stands, and pressing
+ * it again puts it back — no window of its own.
  */
 import { useState, type ReactNode } from "react";
 import { Check, ExternalLink, Music, Video } from "lucide-react";
@@ -92,15 +97,19 @@ function MediaCard({ refId, question, item, picked, onPick }: {
 }
 
 function Shot({ src, caption, picture }: { src: string; caption: string; picture?: string }) {
+  const [open, setOpen] = useState(false);
   if (!picture) return caption ? <span className="kd-ai-shot-missing">{caption}</span> : null;
-  return <figure className="kd-ai-shot">
-    <img src={picture} alt={caption || "截图"} draggable={false} title={src} />
+  return <figure className="kd-ai-shot" data-open={open || undefined}>
+    <button type="button" className="kd-ai-shot-key" aria-expanded={open} title={open ? "缩小" : "放大"}
+      aria-label={`${open ? "缩小" : "放大"}${caption ? `：${caption}` : "截图"}`} onClick={() => setOpen(value => !value)}>
+      <img src={picture} alt={caption || "截图"} draggable={false} data-src={src} />
+    </button>
     {caption && <figcaption>{caption}</figcaption>}
   </figure>;
 }
 
 /** Bold, italic, code, links and the three tags inside one block of text. */
-const INLINE = /(<choice\b[^>]*>[\s\S]*?<\/choice>)|(<media\b[^>]*\/?>(?:<\/media>)?)|(<shot\b[^>]*>[\s\S]*?<\/shot>|<shot\b[^>]*\/>)|\*\*([^*]+)\*\*|`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|\*([^*\s][^*]*)\*/g;
+const INLINE = /(<choice\b[^>]*>[\s\S]*?<\/choice>)|(<media\b[^>]*\/?>(?:<\/media>)?)|(<shot\b[^>]*>[\s\S]*?<\/shot>|<shot\b[^>]*\/>)|\*\*([^*]+)\*\*|`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|\*([^*\s][^*]*)\*|~~([^~]+)~~/g;
 
 function inline(text: string, props: PlanProps, key: string): ReactNode[] {
   const out: ReactNode[] = [];
@@ -135,6 +144,7 @@ function inline(text: string, props: PlanProps, key: string): ReactNode[] {
       const url = match[7];
       out.push(<a key={k} href={url} onClick={event => { event.preventDefault(); openLink(url); }}>{match[6]}</a>);
     } else if (match[8]) out.push(<em key={k}>{match[8]}</em>);
+    else if (match[9]) out.push(<del key={k}>{match[9]}</del>);
     at = index + match[0].length;
   }
   if (at < text.length) out.push(text.slice(at));
@@ -144,17 +154,47 @@ function inline(text: string, props: PlanProps, key: string): ReactNode[] {
 type Block =
   | { kind: "heading"; level: number; text: string }
   | { kind: "list"; ordered: boolean; items: string[] }
+  | { kind: "quote"; lines: string[] }
+  | { kind: "code"; lines: string[] }
+  | { kind: "table"; rows: string[][] }
   | { kind: "para"; lines: string[] };
 
-/** Lines into blocks: a heading, a run of list items, or a paragraph up to a blank line. */
+const cells = (line: string) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(cell => cell.trim());
+
+/**
+ * Lines into blocks: a heading, a run of list items, a quote, a fenced code block, a table, or a
+ * paragraph up to a blank line.
+ */
 function blocks(body: string): Block[] {
   const out: Block[] = [];
+  let fence: { kind: "code"; lines: string[] } | null = null;
   for (const raw of body.replace(/\r\n?/g, "\n").split("\n")) {
     const line = raw.trimEnd();
+    if (/^\s*(```|~~~)/.test(line)) {
+      if (fence) fence = null;
+      else { fence = { kind: "code", lines: [] }; out.push(fence); }
+      continue;
+    }
+    if (fence) { fence.lines.push(raw); continue; }
     const last = out[out.length - 1];
     if (!line.trim()) { out.push({ kind: "para", lines: [] }); continue; }
-    const heading = /^(#{1,4})\s+(.*)$/.exec(line);
-    if (heading) { out.push({ kind: "heading", level: heading[1].length, text: heading[2] }); continue; }
+    // A rule: the window draws no lines, and the blank space around it already parts the blocks.
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { out.push({ kind: "para", lines: [] }); continue; }
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) { out.push({ kind: "heading", level: Math.min(4, heading[1].length), text: heading[2] }); continue; }
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      // The row under the head (| --- | :-: |) only says how to align; it is not shown.
+      if (/^\s*\|?(\s*:?-{2,}:?\s*\|)+\s*:?-*:?\s*\|?\s*$/.test(line)) continue;
+      if (last?.kind === "table") last.rows.push(cells(line));
+      else out.push({ kind: "table", rows: [cells(line)] });
+      continue;
+    }
+    const quote = /^\s*>\s?(.*)$/.exec(line);
+    if (quote) {
+      if (last?.kind === "quote") last.lines.push(quote[1]);
+      else out.push({ kind: "quote", lines: [quote[1]] });
+      continue;
+    }
     const item = /^\s*(?:([-*+])|(\d+)[.)])\s+(.*)$/.exec(line);
     if (item) {
       const ordered = Boolean(item[2]);
@@ -165,7 +205,7 @@ function blocks(body: string): Block[] {
     if (last?.kind === "para" && last.lines.length > 0) last.lines.push(line.trim());
     else out.push({ kind: "para", lines: [line.trim()] });
   }
-  return out.filter(block => block.kind !== "para" || block.lines.length > 0);
+  return out.filter(block => (block.kind !== "para" && block.kind !== "quote") || block.lines.length > 0);
 }
 
 /** The plan's body, with its keys, cards and frames. */
@@ -178,6 +218,19 @@ export function PlanBody(props: PlanProps) {
         const items = block.items.map((item, i) => <li key={i}>{inline(item, props, `${key}-${i}`)}</li>);
         return block.ordered ? <ol key={key}>{items}</ol> : <ul key={key}>{items}</ul>;
       }
+      if (block.kind === "code") return <pre key={key} className="kd-ai-md-code"><code>{block.lines.join("\n")}</code></pre>;
+      if (block.kind === "table") {
+        const [head, ...rows] = block.rows;
+        return <div key={key} className="kd-ai-md-table kd-scroll">
+          <table>
+            <thead><tr>{head.map((cell, i) => <th key={i}>{inline(cell, props, `${key}-h${i}`)}</th>)}</tr></thead>
+            <tbody>{rows.map((row, r) => <tr key={r}>{row.map((cell, i) => <td key={i}>{inline(cell, props, `${key}-${r}-${i}`)}</td>)}</tr>)}</tbody>
+          </table>
+        </div>;
+      }
+      if (block.kind === "quote") return <blockquote key={key} className="kd-ai-md-quote">
+        {block.lines.map((line, i) => <div key={i} className="kd-ai-md-line">{inline(line, props, `${key}-${i}`)}</div>)}
+      </blockquote>;
       return <div key={key} className="kd-ai-md-p">
         {block.lines.map((line, i) => <div key={i} className="kd-ai-md-line">{inline(line, props, `${key}-${i}`)}</div>)}
       </div>;
@@ -185,7 +238,7 @@ export function PlanBody(props: PlanProps) {
   </div>;
 }
 
-/** Markdown alone (a preview or a question written the old way). */
+/** Markdown alone (a message, a preview, or a question written the old way). */
 export function PlanText({ text }: { text: string }) {
   return <PlanBody body={text} media={{}} shots={{}} picked={{}} onPick={() => undefined} />;
 }

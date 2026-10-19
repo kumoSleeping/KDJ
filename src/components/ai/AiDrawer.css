@@ -15,6 +15,8 @@
 .kd-ai-step-copy { display: flex; flex-direction: column; min-width: 0; font-size: var(--kd-size-sm); }
 .kd-ai-step-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kd-ai-step-copy > small { color: var(--kd-muted); font-size: var(--kd-size-xs); overflow-wrap: anywhere; white-space: pre-line; }
+.kd-ai-step-md { margin-top: 2px; min-width: 0; }
+.kd-ai-step-md .kd-ai-md { color: var(--kd-text-body, var(--kd-text)); font-size: var(--kd-size-xs); }
 .kd-ai-step-request { margin-top: 0.5rem; }
 .kd-ai-step-request .kd-ai-request { margin-bottom: 0.1rem; }
 

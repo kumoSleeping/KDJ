@@ -11,6 +11,8 @@ import { stepLine } from "../../lib/aiTasks";
 import { useAiStore } from "../../stores/aiStore";
 import type { AiSessionStep, AiSessionSummary } from "../../types/ai";
 import { InlineNotice } from "../common";
+import { PlanText } from "./AiMarkup";
+import "./AiAsk.css";
 import "./AiDrawer.css";
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -19,13 +21,15 @@ export function StepRow({ tool, args, state, details, text }: {
   tool: string; args: unknown; state: "running" | "done" | "failed"; details?: unknown; text?: string;
 }) {
   const line = stepLine(tool, args, state, details, text ?? "");
+  // A message is the AI's own words, written as Markdown: drawn as such, not as a line of text.
+  const message = tool === "tell_user" && state !== "failed" ? line.detail : undefined;
   return <li className="kd-ai-step" data-state={state}>
     <span className="kd-ai-step-mark" aria-hidden="true">
       {state === "running" ? <LoaderCircle size={12} className="kd-spin" /> : state === "failed" ? <TriangleAlert size={12} /> : <Check size={12} />}
     </span>
     <span className="kd-ai-step-copy">
       <span>{line.title}</span>
-      {line.detail && <small>{line.detail}</small>}
+      {message ? <div className="kd-ai-step-md"><PlanText text={message} /></div> : line.detail && <small>{line.detail}</small>}
     </span>
   </li>;
 }
