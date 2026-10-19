@@ -47,6 +47,6 @@ UTF-8 JSON，扩展名 `.kdjv`，`"kdjv": 1`。字段说明写给 AI 看，在�
 
 KDJ 自己从不写 `.kdjv`。AI 用 `kdj_project_save` 保存（`kdj-video.ts`）：只能写进曲库根目录；改已有工程时新内容不能少掉
 原有的顶层字段，旧版本先备份到 AI 工作目录的 `backups/`；写入前先在工作目录 `checks/` 里用一份把相对 `src` 换成绝对路径的副本
-`kdj project check`，不通过就不写，曲库里不会出现打不开的工程。`kdj_project_render` 预先渲染，进度逐行报给 AI 和它的气泡
-（`/api/kdjv/render` 带 `"stream": true` 时回 NDJSON）。
+`kdj project check`，不通过就不写，曲库里不会出现打不开的工程。AI 保存后直接 `kdj_play`，用户看的是实时预览；
+`kdj_project_render` 只在用户要求预先渲染时用，进度逐行报给 AI 和它的气泡（`/api/kdjv/render` 带 `"stream": true` 时回 NDJSON）。
 用户也可以手写，规则一样。

@@ -20,13 +20,16 @@ KDJ 自己加 `-hide_banner -nostdin -y`。只渲染需要的那一小段：用 
 ## 转场（xfade，两段 → 一段过渡）
 
 ```
--ss A_END-1 -t 1 -i A.mp4  -ss B_START -t 1 -i B.mp4
--filter_complex "[0:v]settb=AVTB,fps=30[a];[1:v]settb=AVTB,fps=30[b];[a][b]xfade=transition=fade:duration=1:offset=0[v]" -map "[v]"
+-ss A_END-0.5 -t 1 -i A.mp4  -ss B_START-0.5 -t 1 -i B.mp4
+-filter_complex "[0:v]settb=AVTB,fps=<fps>[a];[1:v]settb=AVTB,fps=<fps>[b];[a][b]xfade=transition=fade:duration=1:offset=0[v]" -map "[v]" -an
 ```
 
 `transition` 可选：fade、fadeblack、fadewhite、dissolve、wipeleft/right/up/down、slideleft/right/up/down、circleopen、circleclose、
-radial、smoothleft、pixelize、hblur、zoomin、squeezeh、diagtl 等。声音用 `acrossfade=d=1`。
-做法：渲染出 1 秒过渡片段，放进 .kdjv 盖在两段交界处（`at` = 交界 − 0.5）。
+radial、smoothleft、pixelize、hblur、zoomin、squeezeh、diagtl 等。
+`A_END` 是 A 片段的 `out`，`B_START` 是 B 片段的 `in`：两段都从交界前 0.5 秒取，过渡的每一帧和底下两段同一时刻放的是同一帧，
+盖上去不跳。所以 A 在 `out` 之后、B 在 `in` 之前各要有 0.5 秒素材；不够，或两段的 `speed` 不是 1 时，改用 .kdjv 的交叉淡化。
+做法：渲染出 1 秒过渡片段，放在两段上一层的轨道（`at` = 交界 − 0.5，`in` 0，`out` 1，`muted: true`）。
+声音由底下两段照旧放，过渡片段不带声音（`-an`），不要另做 `acrossfade`。
 
 ## 遮罩与合成
 

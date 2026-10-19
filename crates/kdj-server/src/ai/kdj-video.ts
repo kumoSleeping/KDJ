@@ -351,7 +351,8 @@ function projectTools(deps: VideoDeps) {
   const render = defineTool({
     name: "kdj_project_render",
     label: "预渲染工程",
-    description: "预先渲染好一个已保存的 .kdjv 工程，之后用户在 KDJ 里点它立即就能播放；全部结束才返回（长工程可能要几分钟）。",
+    description: "把一个已保存的 .kdjv 工程整片渲染进 KDJ 的缓存。播放不需要它：KDJ 点开工程就实时预览，改了工程也一样，保存后直接 kdj_play。" +
+      "只在用户要求预先渲染时用；改了工程要重新渲染。全部结束才返回（长工程可能要几分钟）。",
     parameters: Type.Object({ path: Type.String({ description: ".kdjv 文件的绝对路径" }) }),
     async execute(_id, params, signal, onUpdate) {
       // The render's percentage, for the AI corner and the drawer's step.

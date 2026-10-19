@@ -31,7 +31,7 @@
 <choice q="ratio" value="1920x1080">16:9（1920×1080）</choice> <choice q="ratio" value="810x1440">9:16（810×1440）</choice> <choice q="ratio" value="1080x1080">1:1（1080×1080）</choice>
 
 ### 交付
-<choice q="deliver" value="mp4">直接导出 MP4</choice> <choice q="deliver" value="kdjv">放进 .kdjv 先预览</choice>
+<choice q="deliver" value="kdjv">放进 .kdjv 先预览</choice> <choice q="deliver" value="mp4">直接导出 MP4</choice>
 ```
 
-`questions`：`[{"id":"ratio","default":["1920x1080"]}]`
+`questions`：`[{"id":"ratio","default":["1920x1080"]},{"id":"deliver","default":["kdjv"]}]`
