@@ -162,8 +162,9 @@ KDJ 之外的 AI 用的。`kdj_peek` 把截下的画面作为图片直接交给�
 `--exclude-tools` 收起。网页都由这些服务读取，本机不打开任何网页或文件。早先的浏览器（CDP）方案已经删掉：它能用
 `file://` 读到本机文件。
 
-pi 没有 shell、读写文件等内置工具（`--no-builtin-tools`），整理文件仍然不做：建文件夹、复制、改名、删除都请用户自己做，
-提示词要求 AI 用 `tell_user` 说明，不许拿别的工具凑（保存工程、导出都只写进已有的文件夹，不建目录）。
+pi 通过 `--no-builtin-tools --tools +bash` 只启用内置 shell，保留 KDJ 和网页扩展工具，不启用内置文件工具。
+AI 可用 bash 做用户明确要求的文件操作；删除、覆盖先确认，不得绕过专用工具的路径限制。
+bash 以当前用户权限运行，并非文件沙箱；保存工程、导出仍只写进已有的文件夹，不建目录。
 `kdj_library_add_root`（`kdj library add <PATH>`，走「添加文件夹」同一条 `/api/library/scan`）把一个已有文件夹加进曲库。
 系统提示开头 pi 自带的「编程助手、能执行命令」一句由 `kdj-tools.ts` 在 `before_agent_start` 换成 KDJ 的
 （`customPrompt`；非视觉模型的那句放在 `blind` 段）。
@@ -177,7 +178,7 @@ pi 没有 shell、读写文件等内置工具（`--no-builtin-tools`），整理
 - **技能**：`crates/kdj-server/src/ai/skills/kdj-video/`（`SKILL.md` 和 `references/` 下的 `kdjv.md`、`ffmpeg.md`、
   `remotion.md`、四种做法的 `preset-*.md`），由 kdj-server 写进 pi 目录。pi 只把名字和描述放进系统提示，模型遇到视频的事才用 `read` 读全文。pi 只在有
   名为 `read`（或 `bash`）的工具时才列出技能，所以 KDJ 自己注册了一个只读得到技能、工作目录和 `.kdjv` 的 `read`。
-- **工具**（`kdj-video.ts`，没有 shell）：`read`；`write`（只写工作目录，`remotion/node_modules` 除外）；`kdj_probe`（ffprobe）；
+- **视频工具**（`kdj-video.ts`；shell 由 pi 提供）：`read`；`write`（只写工作目录，`remotion/node_modules` 除外）；`kdj_probe`（ffprobe）；
   `kdj_ffmpeg`（参数 + 输出文件，输出只能在工作目录，相对路径进 `renders/`，KDJ 自己的 FFmpeg，经 `KDJ_FFMPEG`）；
   `kdj_remotion_render`（用跑 pi 的那个 node 跑工作目录 `remotion/` 里的 Remotion CLI）；`kdj_project_save`（写进曲库根目录，
   改已有工程不许少字段、旧版先备份）、`kdj_project_render`（经 `kdj project check|render`）、`kdj_project_export`（渲染后复制成
@@ -187,7 +188,7 @@ pi 没有 shell、读写文件等内置工具（`--no-builtin-tools`），整理
 - **Remotion**：设置 → AI → 视频，「安装/更新」用跑 pi 的那个 node 旁边的 npm，在 `<data>/ai/workspace/remotion/` 装
   `remotion`、`@remotion/cli`、`@remotion/transitions`、`react`、`react-dom`，再 `remotion browser ensure` 下好渲染用的浏览器；
   后台进行，`ai.status` 的 `remotion` 报版本、是否在装、失败原因。Remotion 对个人和三人以内的团队免费（源码可见、非开源），
-  它带的 FFmpeg 是 GPL；KDJ 不打包它。Windows 上不需要 Git Bash：AI 不用 shell。
+  它带的 FFmpeg 是 GPL；KDJ 不打包它。Windows 上使用 bash 需要可用的 Bash（如 Git Bash）；视频专用工具本身不依赖 shell。
 
 ## 使用提示
 

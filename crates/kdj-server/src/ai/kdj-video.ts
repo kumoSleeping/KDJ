@@ -1,6 +1,6 @@
 /**
  * KDJ's video tools for the pi it runs (docs/ai-dock.md, "视频"): what the kdj-video skill
- * (skills/kdj-video) works with. pi's own file and shell tools stay off; these reach only:
+ * (skills/kdj-video) works with. pi's own file tools stay off (bash is enabled separately); these reach only:
  *
  * - `read`: the skill's files, the AI's workspace, and `.kdjv` projects. pi lists the skill to the
  *   model only when a tool named `read` is active, and the model loads the skill with it.
