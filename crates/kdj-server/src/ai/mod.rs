@@ -10,6 +10,7 @@
 //! Search / Fetch, DeepSeek with Jina Reader, Jina with a key). The prompt is KDJ's (kdj-prompt.md).
 
 mod pi;
+mod sessions;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -702,6 +703,46 @@ pub async fn reset(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>>
         }
         process.send(json!({ "type": "new_session" })).await?;
     }
+    Ok(Json(json!({})))
+}
+
+// ---------------------------------------------------------------- the history
+
+/// The sessions in KDJ's sessions folder (sessions.rs), and the one pi has open, if it runs.
+pub async fn list_sessions(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
+    let bridge = bridge(&state);
+    let running = bridge.process.lock().await.clone();
+    let current = match running {
+        Some(process) => process.send(json!({ "type": "get_state" })).await.ok().and_then(|data| data["sessionId"].as_str().map(str::to_string)),
+        None => None,
+    };
+    let dir = bridge.paths.sessions.clone();
+    let listed = tokio::task::spawn_blocking(move || sessions::list(&dir)).await.map_err(anyhow::Error::from)?;
+    Ok(Json(json!({ "current": current, "sessions": listed })))
+}
+
+#[derive(Deserialize)]
+pub struct SessionQuery {
+    path: String,
+}
+
+/// What was asked and what the AI did in one session.
+pub async fn session_detail(State(state): State<Arc<AppState>>, Query(query): Query<SessionQuery>) -> ApiResult<Json<Value>> {
+    let bridge = bridge(&state);
+    let path = sessions::inside(&bridge.paths.sessions, &query.path).ok_or_else(|| ApiError::bad_request("不是 AI 的会话"))?;
+    let steps = tokio::task::spawn_blocking(move || sessions::detail(&path)).await.map_err(anyhow::Error::from)?;
+    Ok(Json(json!({ "steps": steps })))
+}
+
+/// Goes on with an earlier session: the next request continues it.
+pub async fn switch_session(State(state): State<Arc<AppState>>, Json(body): Json<SessionQuery>) -> ApiResult<Json<Value>> {
+    let bridge = bridge(&state);
+    let path = sessions::inside(&bridge.paths.sessions, &body.path).ok_or_else(|| ApiError::bad_request("不是 AI 的会话"))?;
+    let process = bridge.process(&state).await?;
+    if process.streaming.load(Ordering::Relaxed) {
+        return Err(ApiError::bad_request("AI 正在做事，停下后再切换"));
+    }
+    process.send(json!({ "type": "switch_session", "sessionPath": path })).await?;
     Ok(Json(json!({})))
 }
 
