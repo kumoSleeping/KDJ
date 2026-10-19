@@ -74,7 +74,7 @@ impl LibraryService {
             {
                 continue;
             }
-            if kdj_providers::workshop_images::is_image_path(Path::new(&path)) {
+            if kdj_providers::workshop_images::is_image_path(Path::new(&path)) || kdj_providers::tags::is_project_path(Path::new(&path)) {
                 continue;
             }
             if force || rev.as_deref() != Some(REVISION) || old != new {

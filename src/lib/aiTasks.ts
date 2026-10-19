@@ -29,7 +29,7 @@ const PLATFORM_NAMES: Record<string, string> = {
 };
 
 /** Tools that report elsewhere, or not at all. */
-const SILENT = new Set(["kdj_download", "kdj_play", "kdj_status", "ask_user", "tell_user"]);
+const SILENT = new Set(["kdj_download", "kdj_play", "kdj_status", "ask_user", "tell_user", "read", "write"]);
 
 function hostOf(url: string): string {
   try {
@@ -79,6 +79,17 @@ function running(tool: string, args: Fields): Omit<AiNotice, "tone"> {
       return { icon: "web", title: "读取搜索结果" };
     case "source_check":
       return { icon: "web", title: "核对来源" };
+    // The video tools (kdj-video.ts).
+    case "kdj_probe":
+      return { icon: "video", title: `读取 ${sourceName(args.path)}` };
+    case "kdj_ffmpeg":
+      return { icon: "video", title: `渲染 ${sourceName(args.output)}` };
+    case "kdj_remotion_render":
+      return { icon: "video", title: `Remotion 渲染 ${sourceName(args.output)}` };
+    case "kdj_project_save":
+      return { icon: "video", title: `保存工程 ${sourceName(args.path)}` };
+    case "kdj_project_render":
+      return { icon: "video", title: `准备工程 ${sourceName(args.path)}` };
     default:
       return { icon: "tool", title: tool };
   }
@@ -109,6 +120,11 @@ function outcome(tool: string, details: Fields): string | undefined {
     }
     case "kdj_web_fetch":
       return str(details.title) || undefined;
+    case "kdj_project_save": {
+      const check = fields(details.check);
+      if (details.problem) return str(details.problem).split("\n")[0];
+      return typeof check.duration === "number" ? `${Math.round(check.duration)} 秒 · ${count(check.sources)} 个素材` : undefined;
+    }
     default:
       return undefined;
   }

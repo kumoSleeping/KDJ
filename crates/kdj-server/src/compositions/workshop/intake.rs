@@ -61,6 +61,9 @@ impl Workshop {
                     5000.
                 } else {
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    if kdj_providers::tags::is_project_path(&path) {
+                        bail!("视频工程不能作为素材加入工坊")
+                    }
                     if !kdj_providers::tags::is_media_extension(ext) {
                         bail!("不支持此素材格式")
                     }

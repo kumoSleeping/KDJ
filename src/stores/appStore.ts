@@ -753,5 +753,9 @@ export function connectEvents(): () => void {
     useWorkshopStore.getState().handleEvent(event);
     useLibraryStore.getState().handleEvent(event);
     useAiStore.getState().handleEvent(event);
+    if (event.type === "kdjv.progress") {
+      const payload = event.payload;
+      void import("../lib/kdjvPlay").then(module => module.handleKdjvProgress(payload));
+    }
   });
 }

@@ -200,9 +200,45 @@ function WebGroup({ status, onError }: { status: AiStatus; onError(text: string)
   </div>;
 }
 
+const REMOTION_PAGE = "https://www.remotion.dev";
+
+/**
+ * What the AI makes videos with (the kdj-video skill, docs/ai-dock.md): Remotion, installed by
+ * KDJ into the AI's own workspace with the npm of the node that runs pi. FFmpeg is KDJ's own
+ * (设置 → FFmpeg).
+ */
+function VideoGroup({ status, onError }: { status: AiStatus; onError(text: string): void }) {
+  const setStatus = useAiStore(state => state.setStatus);
+  const { remotion } = status;
+  const install = async () => {
+    try {
+      setStatus(await aiApi.installRemotion());
+    } catch (cause) {
+      onError(message(cause));
+    }
+  };
+  return <div className="kd-djp-group">
+    <span className="kd-djp-label">视频</span>
+    <div className="kd-ai-row">
+      <span className="kd-ai-row-copy">
+        <strong>{remotion.installing ? "正在安装 Remotion…" : remotion.version ? `Remotion ${remotion.version}` : "未安装 Remotion"}</strong>
+        {remotion.error && <small title={remotion.error}>{remotion.error}</small>}
+      </span>
+      <span className="kd-ai-row-keys">
+        <Button variant="ghost" size="sm" onClick={() => open(REMOTION_PAGE, onError)}><ExternalLink size={12} aria-hidden="true" />介绍</Button>
+        <Button variant="ghost" size="sm" disabled={remotion.installing || status.pi.state !== "ready"} onClick={() => void install()}>
+          {remotion.installing ? <LoaderCircle size={12} className="kd-spin" aria-hidden="true" /> : <Download size={12} aria-hidden="true" />}
+          {remotion.version ? "更新" : "安装"}
+        </Button>
+      </span>
+    </div>
+  </div>;
+}
+
 /**
  * 设置 → AI (docs/ai-dock.md): pi, the logins of KDJ's own pi directory (never the global
- * ~/.pi; a key it already has can be brought over), and how the AI searches the web.
+ * ~/.pi; a key it already has can be brought over), how the AI searches the web, and what it
+ * makes videos with.
  */
 export function AiPanel() {
   const status = useAiStore(state => state.status);
@@ -215,6 +251,7 @@ export function AiPanel() {
       <PiRow status={status} onError={setError} />
       {status && <LoginsGroup status={status} onError={setError} />}
       {status && <WebGroup status={status} onError={setError} />}
+      {status && <VideoGroup status={status} onError={setError} />}
       <InlineNotice text={error || statusError} block onDismiss={error ? () => setError("") : undefined} />
     </div>
   </Panel>;

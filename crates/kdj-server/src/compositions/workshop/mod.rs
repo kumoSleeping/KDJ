@@ -5,6 +5,7 @@ mod alignment_control;
 mod alignment_cache;
 mod alignment_matching;
 mod intake;
+pub mod kdjv;
 mod naming;
 mod patch_guard;
 mod positions;

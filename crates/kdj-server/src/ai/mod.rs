@@ -35,6 +35,25 @@ const TOOLS: &str = include_str!("kdj-tools.ts");
 const WEB: &str = include_str!("kdj-web.ts");
 const FOLDERS: &str = include_str!("kdj-folders.ts");
 const PROMPT: &str = include_str!("kdj-prompt.md");
+const VIDEO: &str = include_str!("kdj-video.ts");
+/// The kdj-video skill (skills/kdj-video), as files under the skill's directory.
+const SKILL: &[(&str, &str)] = &[
+    ("SKILL.md", include_str!("skills/kdj-video/SKILL.md")),
+    ("references/kdjv.md", include_str!("skills/kdj-video/references/kdjv.md")),
+    ("references/ffmpeg.md", include_str!("skills/kdj-video/references/ffmpeg.md")),
+    ("references/remotion.md", include_str!("skills/kdj-video/references/remotion.md")),
+];
+/// What the Remotion project holds: Remotion's packages move in lockstep, so `latest` of each
+/// is one release.
+const REMOTION_PACKAGES: &[&str] = &[
+    "remotion@latest",
+    "@remotion/cli@latest",
+    "@remotion/transitions@latest",
+    "react@19",
+    "react-dom@19",
+];
+/// How long installing Remotion and its browser may take.
+const REMOTION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// How long a command waits for pi's response. `prompt` answers when the run is accepted, not
 /// when it ends.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -126,6 +145,17 @@ impl Paths {
     }
     fn prompt(&self) -> PathBuf {
         self.agent.join("kdj").join("kdj-prompt.md")
+    }
+    fn video(&self) -> PathBuf {
+        self.agent.join("kdj").join("kdj-video.ts")
+    }
+    /// The kdj-video skill: the only skill pi is given (`--skill`; `--no-skills` keeps out the rest).
+    fn skill(&self) -> PathBuf {
+        self.agent.join("kdj").join("skills").join("kdj-video")
+    }
+    /// The Remotion project the AI renders with, its packages installed by KDJ.
+    fn remotion(&self) -> PathBuf {
+        self.workspace.join("remotion")
     }
 }
 
@@ -244,6 +274,9 @@ struct AiBridge {
     /// pi-web-access is being installed; and why the last try failed.
     installing: AtomicBool,
     install_error: Mutex<String>,
+    /// Remotion is being installed into the workspace; and why the last try failed.
+    remotion_installing: AtomicBool,
+    remotion_error: Mutex<String>,
 }
 
 fn bridge(state: &AppState) -> &'static AiBridge {
@@ -254,6 +287,8 @@ fn bridge(state: &AppState) -> &'static AiBridge {
         detected: Mutex::new(None),
         installing: AtomicBool::new(false),
         install_error: Mutex::new(String::new()),
+        remotion_installing: AtomicBool::new(false),
+        remotion_error: Mutex::new(String::new()),
     })
 }
 
@@ -349,6 +384,11 @@ impl AiBridge {
                 "error": self.install_error.lock().unwrap_or_else(|e| e.into_inner()).clone(),
                 "jina": configured.iter().any(|id| id == "jina"),
             },
+            "remotion": {
+                "version": self.remotion_version(),
+                "installing": self.remotion_installing.load(Ordering::Relaxed),
+                "error": self.remotion_error.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            },
         })
     }
 
@@ -365,6 +405,31 @@ impl AiBridge {
         Ok(process)
     }
 
+    /// KDJ's extension, prompt and skill, written into its pi directory where they differ.
+    fn write_extension(&self) -> anyhow::Result<()> {
+        let paths = &self.paths;
+        write_if_changed(&paths.tools(), TOOLS)?;
+        write_if_changed(&paths.web(), WEB)?;
+        write_if_changed(&paths.folders(), FOLDERS)?;
+        write_if_changed(&paths.video(), VIDEO)?;
+        write_if_changed(&paths.prompt(), PROMPT)?;
+        write_if_changed(&paths.agent.join("web-search.json"), ACCESS_CONFIG)?;
+        for (name, contents) in SKILL {
+            write_if_changed(&paths.skill().join(name), contents)?;
+        }
+        Ok(())
+    }
+
+    /// Remotion's version when it is installed in the workspace (its CLI is there to render with).
+    fn remotion_version(&self) -> Option<String> {
+        let modules = self.paths.remotion().join("node_modules");
+        if !modules.join("@remotion").join("cli").join("remotion-cli.js").is_file() {
+            return None;
+        }
+        let package = read_object(&modules.join("remotion").join("package.json")).ok()?;
+        package.get("version").and_then(Value::as_str).map(str::to_string)
+    }
+
     async fn spawn(&self, state: &Arc<AppState>) -> ApiResult<Arc<PiProcess>> {
         let pi = self.pi(false).await;
         let Some(path) = pi.path.filter(|_| pi.state == PiState::Ready).map(PathBuf::from) else {
@@ -374,11 +439,7 @@ impl AiBridge {
         for dir in [&paths.agent, &paths.workspace, &paths.sessions] {
             std::fs::create_dir_all(dir).map_err(anyhow::Error::from)?;
         }
-        write_if_changed(&paths.tools(), TOOLS)?;
-        write_if_changed(&paths.web(), WEB)?;
-        write_if_changed(&paths.folders(), FOLDERS)?;
-        write_if_changed(&paths.prompt(), PROMPT)?;
-        write_if_changed(&paths.agent.join("web-search.json"), ACCESS_CONFIG)?;
+        self.write_extension()?;
         // The browser earlier versions drove is gone, with what it left behind.
         let _ = std::fs::remove_file(paths.agent.join("kdj").join("kdj-browser.ts"));
         let _ = std::fs::remove_dir_all(paths.data.join("ai").join("browser-profile"));
@@ -397,6 +458,9 @@ impl AiBridge {
             .arg(&paths.sessions)
             .arg("--extension")
             .arg(paths.tools())
+            // The one skill: listed by name, read by the model only for video work.
+            .arg("--skill")
+            .arg(paths.skill())
             .arg("--append-system-prompt")
             .arg(paths.prompt());
         if let (Some(provider), Some(model)) = (&choice.provider, &choice.model) {
@@ -413,9 +477,19 @@ impl AiBridge {
             .env("KDJ_CLI", &cli)
             .env("KDJ_DATA_DIR", &paths.data)
             .env("KDJ_WEB_MODE", &web_mode)
+            // The video tools (kdj-video.ts): where they may read and write, and KDJ's FFmpeg.
+            .env("KDJ_WORKSPACE", &paths.workspace)
+            .env("KDJ_SKILLS", paths.skill())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Without FFmpeg the video tools say so when they run; the rest of the AI works as before.
+        if let Ok(ffmpeg) = kdj_providers::ffmpeg::binary() {
+            command.env("KDJ_FFMPEG", ffmpeg);
+        }
+        if let Ok(ffprobe) = kdj_providers::ffmpeg::probe_binary() {
+            command.env("KDJ_FFPROBE", ffprobe);
+        }
         let mut child = command.spawn().map_err(|error| ApiError::bad_request(format!("无法启动 pi：{error}")))?;
         let stdin = child.stdin.take().ok_or_else(|| ApiError::bad_request("无法连接 pi"))?;
         let stdout = child.stdout.take().ok_or_else(|| ApiError::bad_request("无法连接 pi"))?;
@@ -702,6 +776,72 @@ pub async fn install_access(State(state): State<Arc<AppState>>) -> ApiResult<Jso
     Ok(Json(bridge.status(false).await))
 }
 
+// ---------------------------------------------------------------- Remotion
+
+/// Installs Remotion into the workspace's Remotion project with the npm of the node that runs
+/// pi, then the browser Remotion renders with; in the background, `ai.status` tells when it is
+/// done or why it failed. Installing again updates it.
+pub async fn install_remotion(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
+    let bridge = bridge(&state);
+    let pi = bridge.pi(false).await;
+    let Some(pi_path) = pi.path.filter(|_| pi.state == PiState::Ready).map(PathBuf::from) else {
+        return Err(ApiError::bad_request("请先安装 pi"));
+    };
+    let (Some(npm), Some(node)) = (pi::beside(&pi_path, "npm"), pi::beside(&pi_path, "node")) else {
+        return Err(ApiError::bad_request("没有找到 Node.js 的 npm"));
+    };
+    if bridge.remotion_installing.swap(true, Ordering::Relaxed) {
+        return Ok(Json(bridge.status(false).await));
+    }
+    *bridge.remotion_error.lock().unwrap_or_else(|e| e.into_inner()) = String::new();
+    let project = bridge.paths.remotion();
+    std::fs::create_dir_all(&project).map_err(anyhow::Error::from)?;
+    // A package.json of its own keeps npm from walking up to some other project.
+    update_object(&project.join("package.json"), |package| {
+        package.entry("name").or_insert_with(|| json!("kdj-ai-remotion"));
+        package.entry("private").or_insert_with(|| json!(true));
+    })?;
+    let state = state.clone();
+    state.hub.publish("ai.status", &bridge.status(false).await);
+    tokio::spawn(async move {
+        let run = |program: &Path, args: Vec<String>| {
+            let mut command = pi::command(program);
+            command
+                .env("PATH", pi::child_path(&pi_path))
+                .args(args)
+                .current_dir(&project)
+                .stdin(Stdio::null());
+            command
+        };
+        let mut install = vec!["install".to_string(), "--no-audit".into(), "--no-fund".into(), "--save-exact".into()];
+        install.extend(REMOTION_PACKAGES.iter().map(|p| p.to_string()));
+        let cli = project.join("node_modules").join("@remotion").join("cli").join("remotion-cli.js");
+        let steps = async {
+            for (program, args) in [
+                (npm.clone(), install),
+                (node.clone(), vec![cli.to_string_lossy().into_owned(), "browser".into(), "ensure".into()]),
+            ] {
+                let output = run(&program, args).output().await?;
+                if !output.status.success() {
+                    let text = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+                    anyhow::bail!("{}", text.trim().lines().last().unwrap_or("安装失败"));
+                }
+            }
+            anyhow::Ok(())
+        };
+        let error = match tokio::time::timeout(REMOTION_TIMEOUT, steps).await {
+            Ok(Ok(())) if bridge.remotion_version().is_some() => String::new(),
+            Ok(Ok(())) => "安装后没有找到 Remotion".to_string(),
+            Ok(Err(error)) => error.to_string(),
+            Err(_) => "安装超时".to_string(),
+        };
+        *bridge.remotion_error.lock().unwrap_or_else(|e| e.into_inner()) = error;
+        bridge.remotion_installing.store(false, Ordering::Relaxed);
+        state.hub.publish("ai.status", &bridge.status(false).await);
+    });
+    Ok(Json(bridge.status(false).await))
+}
+
 #[derive(Deserialize)]
 pub struct WebBody {
     #[serde(default)]
@@ -829,7 +969,36 @@ mod tests {
             detected: Mutex::new(None),
             installing: AtomicBool::new(false),
             install_error: Mutex::new(String::new()),
+            remotion_installing: AtomicBool::new(false),
+            remotion_error: Mutex::new(String::new()),
         }
+    }
+
+    #[test]
+    fn remotion_is_installed_when_its_cli_is_in_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = bridge_in(dir.path());
+        assert_eq!(bridge.remotion_version(), None);
+        let cli = bridge.paths.remotion().join("node_modules/@remotion/cli");
+        std::fs::create_dir_all(&cli).unwrap();
+        std::fs::write(cli.join("remotion-cli.js"), "").unwrap();
+        let core = bridge.paths.remotion().join("node_modules/remotion");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::write(core.join("package.json"), r#"{"name":"remotion","version":"4.0.300"}"#).unwrap();
+        assert_eq!(bridge.remotion_version().as_deref(), Some("4.0.300"));
+    }
+
+    #[test]
+    fn the_video_skill_and_tools_are_written_beside_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = bridge_in(dir.path());
+        bridge.write_extension().unwrap();
+        let skill = std::fs::read_to_string(bridge.paths.skill().join("SKILL.md")).unwrap();
+        assert!(skill.starts_with("---\nname: kdj-video\n"), "{skill}");
+        for reference in ["kdjv.md", "ffmpeg.md", "remotion.md"] {
+            assert!(bridge.paths.skill().join("references").join(reference).is_file(), "{reference}");
+        }
+        assert!(bridge.paths.agent.join("kdj").join("kdj-video.ts").is_file());
     }
 
     #[test]

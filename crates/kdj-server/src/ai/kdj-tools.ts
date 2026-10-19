@@ -18,6 +18,7 @@ import { basename, relative } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { folderScore, walk } from "./kdj-folders.ts";
+import { registerVideo } from "./kdj-video.ts";
 import { registerWeb } from "./kdj-web.ts";
 
 const CLI = process.env.KDJ_CLI || "kdj";
@@ -363,4 +364,6 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool(tool);
   }
   registerWeb(pi);
+  // Video work (the kdj-video skill): files in the workspace, FFmpeg, Remotion and .kdjv projects.
+  registerVideo(pi, { kdj, libraryRoots });
 }

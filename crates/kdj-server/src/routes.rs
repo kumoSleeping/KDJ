@@ -57,6 +57,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/ai/import", post(crate::ai::import_login))
         .route("/api/ai/web", axum::routing::put(crate::ai::set_web))
         .route("/api/ai/web/install", post(crate::ai::install_access))
+        .route("/api/ai/remotion/install", post(crate::ai::install_remotion))
         .route("/api/cli/status", get(crate::cli_api::status))
         .route("/api/cli/search", post(crate::cli_api::search))
         .route("/api/cli/download", post(crate::cli_api::download))
@@ -7787,6 +7788,18 @@ fn is_video_container(path: &Path) -> bool {
     kdj_providers::tags::VIDEO_EXTENSIONS.contains(&ext.as_str())
 }
 
+/// A `.kdjv` project plays from its render (compositions/workshop/kdjv.rs), which the window asks
+/// for before it plays the project; here the render is only looked up.
+fn kdjv_render_for(path: &Path) -> ApiResult<Option<PathBuf>> {
+    use crate::compositions::workshop::kdjv;
+    if !kdjv::is_project_path(path) {
+        return Ok(None);
+    }
+    kdjv::rendered(path)
+        .map(Some)
+        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "工程还没有渲染好"))
+}
+
 /// 缓存键里的文件 mtime。文件被换掉（重新打了标签、换了个更好的版本）之后
 /// 旧缓存必须自动作废，否则用户会一直看到旧封面 / 旧波形，还完全不知道怎么刷。
 /// 读不到就当 0——最坏是这份缓存一直命中，比每次都重算强。
@@ -7863,6 +7876,9 @@ async fn library_audio(
     let mut path = PathBuf::from(&track.path);
     if !path.is_file() {
         return Err(ApiError::not_found("音频文件已丢失"));
+    }
+    if let Some(render) = kdjv_render_for(&path)? {
+        path = render;
     }
     if is_video_container(&path) {
         path = extracted_audio(&path, track.id, &state.config.data_dir.join("audio-cache")).await?;
@@ -7974,6 +7990,9 @@ async fn library_video(
     let mut path = PathBuf::from(&track.path);
     if !path.is_file() {
         return Err(ApiError::not_found("视频文件已丢失"));
+    }
+    if let Some(render) = kdjv_render_for(&path)? {
+        path = render;
     }
     if !is_video_container(&path) {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "这不是视频曲目"));
@@ -8439,6 +8458,7 @@ async fn library_waveform(
         .get(id)?
         .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
     if kdj_providers::workshop_images::is_image_path(Path::new(&track.path)) { return Err(ApiError::bad_request("图片没有音频波形")); }
+    if kdj_providers::tags::is_project_path(Path::new(&track.path)) { return Err(ApiError::bad_request("视频工程没有音频波形")); }
     let release_intent = crate::waveform::ReleaseOverviewIntent::from(params.intent);
     if params.profile == WaveformRequestProfile::ReleaseOverview && params.intent_only {
         state

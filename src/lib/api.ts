@@ -968,6 +968,8 @@ export const api = {
   workshopFrameUrl: (project: string, source: string, ms: number, width: 160 | 320 | 960 = 160) => authenticatedGetUrl(`${bridge().baseUrl}/api/workshop/${encodeURIComponent(project)}/sources/${encodeURIComponent(source)}/frame?ms=${Math.max(0,ms).toFixed(3)}&width=${width}`),
   workshopAudioUrl: (ticket: string) => authenticatedGetUrl(`${bridge().baseUrl}/api/workshop/media/${encodeURIComponent(ticket)}/audio.wav`),
   workshopVideoUrl: (ticket: string, clip: string, part: number) => authenticatedGetUrl(`${bridge().baseUrl}/api/workshop/media/${encodeURIComponent(ticket)}/video/${encodeURIComponent(clip)}/${part}`),
+  /** A `.kdjv` project's render (docs/kdjv.md): found in the cache, or made now (can take minutes). */
+  renderKdjv: (trackId: number) => post<{ path: string; track_id: number | null }>("/kdjv/render", { track_id: trackId }),
   exportWorkshop: (id: string, revision: number) => post<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}/export`, {revision}),
   cancelWorkshopExport: (id: string) => post<WorkshopSnapshot>(`/workshop/jobs/${encodeURIComponent(id)}/cancel`, {}),
   importWorkshopExport: (id: string) => post<WorkshopSnapshot>(`/workshop/jobs/${encodeURIComponent(id)}/import`, {}),
@@ -1333,6 +1335,7 @@ export const aiApi = {
   answer: (body: { id: string; value?: string; confirmed?: boolean; cancelled?: boolean }) =>
     request<void>("/ai/answer", { method: "POST", body: JSON.stringify(body) }, null),
   installAccess: () => request<import("../types/ai").AiStatus>("/ai/web/install", { method: "POST" }, null),
+  installRemotion: () => request<import("../types/ai").AiStatus>("/ai/remotion/install", { method: "POST" }, null),
   setWeb: (body: { mode?: import("../types/ai").AiWebMode; jina_key?: string }) =>
     request<import("../types/ai").AiStatus>("/ai/web", { method: "PUT", body: JSON.stringify(body) }, null),
   globalLogins: () => request<{ path?: string; logins: import("../types/ai").AiGlobalLogin[] }>("/ai/global", {}, null),

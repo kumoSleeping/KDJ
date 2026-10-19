@@ -53,6 +53,7 @@ async fn intake(
                 children.sort();
                 pending.extend(children.into_iter().rev());
             } else if metadata.is_file()
+                && !kdj_providers::tags::is_project_path(&path)
                 && kdj_providers::tags::is_media_extension(
                     path.extension().and_then(|e| e.to_str()).unwrap_or(""),
                 )

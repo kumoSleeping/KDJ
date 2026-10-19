@@ -22,6 +22,11 @@ pub(super) fn key(value: &impl Serialize) -> Result<String> {
     serde_json::to_vec(value)?.hash(&mut h);
     Ok(format!("{:016x}", h.finish()))
 }
+/// What a render reports while it runs: how far it is (0..1 of its own part), or what it does.
+pub(super) enum Step {
+    Progress(f64),
+    Detail(String),
+}
 pub(super) fn check(cancel: &CancellationToken) -> Result<()> {
     if cancel.is_cancelled() {
         bail!("处理已取消")
@@ -98,7 +103,11 @@ pub fn frames(ms: f64) -> u64 {
 pub fn wav_length(p: &CompositionProject) -> u64 {
     44 + frames(p.duration()) * BYTES_PER_FRAME
 }
-struct Scratch(PathBuf);
+/// A pixel format with an alpha plane (FFmpeg's names: yuva420p, rgba, gbrap10le, ya8, …).
+fn has_alpha(pix_fmt: &str) -> bool {
+    ["yuva", "rgba", "bgra", "argb", "abgr", "gbrap", "ya8", "ya16"].iter().any(|prefix| pix_fmt.starts_with(prefix))
+}
+pub(super) struct Scratch(pub(super) PathBuf);
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -552,41 +561,17 @@ impl Workshop {
         self.trim_cache();
         Ok(path)
     }
-    pub(super) async fn render_export(
+    /// The sound of `p` between `lo` and `hi` (ms), mixed into `stage/mix.wav` from the same
+    /// cached pieces the preview plays. Progress goes from 0 to 1.
+    pub(super) async fn mix_file(
         &self,
         p: &CompositionProject,
-        jid: &str,
+        stage: &Path,
+        lo: f64,
+        hi: f64,
         cancel: &CancellationToken,
-    ) -> Result<()> {
-        let _slot = tokio::select! {_=cancel.cancelled()=>bail!("导出已取消"),s=self.export_slots.acquire()=>s?};
-        let work_cancel = cancel.clone();
-        let _work = tokio::task::spawn_blocking(move || {
-            work_scheduler()
-                .acquire(WorkRequest::new(WorkClass::MediaComposition), || {
-                    work_cancel.is_cancelled()
-                })
-                .map_err(|_| anyhow::anyhow!("导出已取消"))
-        })
-        .await??;
-        let directory = PathBuf::from(&p.output.directory);
-        if !directory.is_dir() {
-            bail!("导出目录不存在")
-        }
-        let stage = directory.join(format!(".kdj-composition-vj-{jid}"));
-        std::fs::create_dir(&stage)?;
-        let _scratch = Scratch(stage.clone());
-        let mut owner = std::fs::OpenOptions::new().write(true).create_new(true).open(stage.join(".owner"))?;
-        std::io::Write::write_all(&mut owner, jid.as_bytes())?;
-        owner.sync_all()?;
-        self.job(jid, |j| {
-            j.staging = Some(stage.to_string_lossy().into_owned());
-            j.phase = "rendering".into();
-            j.error.clear();
-            j.detail = "混合声音".into();
-        })?;
-        let lo = p.output.in_ms;
-        let hi = p.output.out_ms.unwrap_or(p.duration());
-        let duration = hi - lo;
+        report: &(dyn Fn(Step) -> Result<()> + Sync),
+    ) -> Result<PathBuf> {
         let audio = stage.join("mix.wav");
         let mut file = tokio::fs::File::create(&audio).await?;
         file.write_all(&wave_header(frames(hi) - frames(lo)))
@@ -599,15 +584,29 @@ impl Workshop {
             let begin = (frames(lo.max(n as f64 * CHUNK_MS)) - frames(n as f64 * CHUNK_MS)) * 4;
             let end = (frames(hi.min((n + 1) as f64 * CHUNK_MS)) - frames(n as f64 * CHUNK_MS)) * 4;
             file.write_all(&bytes[begin as usize..end as usize]).await?;
-            self.job(jid, |j| {
-                j.progress = 0.2 * (n - first + 1) as f64 / (last - first) as f64
-            })?;
+            report(Step::Progress((n - first + 1) as f64 / (last - first) as f64))?;
         }
         file.flush().await?;
         drop(file);
-        let extension = p.output.format.as_str();
-        let output = stage.join(format!("render.{extension}"));
-        if extension == "mp4" {
+        Ok(audio)
+    }
+
+    /// The picture of `p` between `lo` and `hi` (ms) over the mixed sound `audio`, encoded to
+    /// `output` (MP4) and checked: canvas size, a sound track and the length. Progress goes from
+    /// 0 to 1: the clips are prepared up to 0.4, the encoder runs the rest.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn picture_file(
+        &self,
+        p: &CompositionProject,
+        stage: &Path,
+        audio: &Path,
+        output: &Path,
+        lo: f64,
+        hi: f64,
+        cancel: &CancellationToken,
+        report: &(dyn Fn(Step) -> Result<()> + Sync),
+    ) -> Result<()> {
+        let duration = hi - lo;
         let visual = p.video_project();
         let mut clips = vec![];
         for layer in visual.layers.iter().rev() {
@@ -646,19 +645,19 @@ impl Workshop {
         for (n, (s, c)) in clips.iter().enumerate() {
             check(cancel)?;
             if s.image() {
-                self.job(jid, |j| j.detail = format!("准备图片 {}/{}", n + 1, clips.len()))?;
+                report(Step::Detail(format!("准备图片 {}/{}", n + 1, clips.len())))?;
                 self.image_input(s, c, p.canvas.fps, &stage, n, &mut args, cancel).await?;
                 image_graph(&mut graph, n, s, c, p, lo);
-                self.job(jid, |j| j.progress = 0.2 + 0.3 * (n + 1) as f64 / clips.len() as f64)?;
+                report(Step::Progress(0.4 * (n + 1) as f64 / clips.len() as f64))?;
                 continue;
             }
-            self.job(jid, |j| j.detail = format!("准备视频 {}/{}", n + 1, clips.len()))?;
+            report(Step::Detail(format!("准备视频 {}/{}", n + 1, clips.len())))?;
             let probe = verify_source(s, cancel).await?;
             let stream = probe.video().context("素材没有画面")?;
             let (width, height) = media::workshop_video_size(stream)?;
             let hdr = if media::workshop_hdr(stream) {
                 if !hdr_ready {
-                    self.job(jid, |j| j.detail = "准备 HDR 转换".into())?;
+                    report(Step::Detail("准备 HDR 转换".into()))?;
                     media::ensure_tone_mapping(cancel).await?;
                     hdr_ready = true;
                 }
@@ -685,18 +684,21 @@ impl Workshop {
             let pixels = format!("[{n}:{}]trim=duration={},setpts=PTS-STARTPTS,setpts='({})/TB',fps={}:eof_action=pass{hdr}{mask},scale={}:{},setsar=1",
                 stream.index, secs(c.source_out_ms-c.source_in_ms), retime(c), number(p.canvas.fps), number(w), number(h));
             let shift = format!("setpts=PTS+{}/TB[clip{n}]", secs(c.start_ms-lo));
+            // A source with its own transparency (a rendered title, a keyed clip) keeps it under
+            // a fade the way a cropped one keeps its mask: the fade multiplies the alpha.
+            let keeps_alpha = cropped || has_alpha(&stream.pix_fmt);
             if dynamic || c.picture.opacity < 1. {
                 // The envelope is spatially uniform. Evaluate it on four pixels
                 // per frame, then enlarge the alpha plane; never evaluate an
                 // expression for every RGB pixel of a full-resolution frame.
-                if cropped {
+                if keeps_alpha {
                     graph.push(format!("{pixels},format=rgba,split[pixels{n}][sourcealpha{n}]"));
                     graph.push(format!("[sourcealpha{n}]alphaextract[originalalpha{n}]"));
                 } else {
                     graph.push(format!("{pixels},format=yuv420p[pixels{n}]"));
                 }
                 graph.push(format!("color=white:s=2x2:r={}:d={},format=gray,geq=lum='255*{}*{}',scale={}:{}:flags=neighbor[fadealpha{n}]", number(p.canvas.fps), secs(c.duration()), number(c.picture.opacity), envelope(c,false,"T*1000"), number(w), number(h)));
-                if cropped {
+                if keeps_alpha {
                     graph.push(format!("[originalalpha{n}][fadealpha{n}]blend=all_mode=multiply:shortest=1[alpha{n}]"));
                     graph.push(format!("[pixels{n}][alpha{n}]alphamerge=shortest=1,{shift}"));
                 } else {
@@ -709,9 +711,7 @@ impl Workshop {
             // declared clip boundary. Hold that frame inside the interval;
             // enable still removes it at the exact cut and preserves real gaps.
             graph.push(format!("[base{n}][clip{n}]overlay=x='{}':y='{}':eof_action=repeat:repeatlast=1:enable='gte(t,{})*lt(t,{})'[base{}]",picture_axis(c.picture.x, c.picture.crop_auto_fit, "W", "w"),picture_axis(c.picture.y, c.picture.crop_auto_fit, "H", "h"),secs(c.start_ms-lo),secs(c.start_ms-lo+c.duration()),n+1));
-            self.job(jid, |j| {
-                j.progress = 0.2 + 0.3 * (n + 1) as f64 / clips.len() as f64
-            })?;
+            report(Step::Progress(0.4 * (n + 1) as f64 / clips.len() as f64))?;
         }
         args.extend(["-i".into(), audio.to_string_lossy().into_owned()]);
         let graphfile = stage.join("render.ffgraph");
@@ -755,16 +755,12 @@ impl Workshop {
                 let mut last = last_progress.lock().unwrap();
                 if progress > *last {
                     *last = progress;
-                    let _ = self.job(jid, |j| j.progress = 0.5 + v * 0.45);
+                    let _ = report(Step::Progress(0.4 + 0.6 * v));
                 }
             },
-            |encoder| { let _ = self.job(jid, |j| j.detail = format!("合成画面 · {encoder}")); },
+            |encoder| { let _ = report(Step::Detail(format!("合成画面 · {encoder}"))); },
         )
         .await?;
-        self.job(jid, |j| {
-            j.phase = "validating".into();
-            j.progress = 0.96;
-        })?;
         let probe = media::probe(&output, cancel).await?;
         let v = probe.video().context("成品没有画面")?;
         if v.width != p.canvas.width
@@ -774,6 +770,68 @@ impl Workshop {
         {
             bail!("成品尺寸、音轨或时长校验失败")
         }
+        Ok(())
+    }
+
+    pub(super) async fn render_export(
+        &self,
+        p: &CompositionProject,
+        jid: &str,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let _slot = tokio::select! {_=cancel.cancelled()=>bail!("导出已取消"),s=self.export_slots.acquire()=>s?};
+        let work_cancel = cancel.clone();
+        let _work = tokio::task::spawn_blocking(move || {
+            work_scheduler()
+                .acquire(WorkRequest::new(WorkClass::MediaComposition), || {
+                    work_cancel.is_cancelled()
+                })
+                .map_err(|_| anyhow::anyhow!("导出已取消"))
+        })
+        .await??;
+        let directory = PathBuf::from(&p.output.directory);
+        if !directory.is_dir() {
+            bail!("导出目录不存在")
+        }
+        let stage = directory.join(format!(".kdj-composition-vj-{jid}"));
+        std::fs::create_dir(&stage)?;
+        let _scratch = Scratch(stage.clone());
+        let mut owner = std::fs::OpenOptions::new().write(true).create_new(true).open(stage.join(".owner"))?;
+        std::io::Write::write_all(&mut owner, jid.as_bytes())?;
+        owner.sync_all()?;
+        self.job(jid, |j| {
+            j.staging = Some(stage.to_string_lossy().into_owned());
+            j.phase = "rendering".into();
+            j.error.clear();
+            j.detail = "混合声音".into();
+        })?;
+        let lo = p.output.in_ms;
+        let hi = p.output.out_ms.unwrap_or(p.duration());
+        let duration = hi - lo;
+        let report = |step: Step| -> Result<()> {
+            match step {
+                Step::Progress(v) => self.job(jid, |j| j.progress = v).map(|_| ()),
+                Step::Detail(detail) => self.job(jid, |j| j.detail = detail).map(|_| ()),
+            }
+        };
+        let audio = self
+            .mix_file(p, &stage, lo, hi, cancel, &|step| match step {
+                Step::Progress(v) => report(Step::Progress(0.2 * v)),
+                detail => report(detail),
+            })
+            .await?;
+        let extension = p.output.format.as_str();
+        let output = stage.join(format!("render.{extension}"));
+        if extension == "mp4" {
+            self.picture_file(p, &stage, &audio, &output, lo, hi, cancel, &|step| match step {
+                Step::Progress(v) => report(Step::Progress(0.2 + 0.75 * v)),
+                detail => report(detail),
+            })
+            .await?;
+            self.job(jid, |j| {
+                j.phase = "validating".into();
+                j.progress = 0.96;
+            })?;
         } else {
             self.job(jid, |j| { j.detail = "编码音频".into(); j.progress = 0.5; })?;
             if extension == "wav" {

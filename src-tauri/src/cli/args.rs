@@ -90,6 +90,25 @@ pub enum Commands {
         #[command(subcommand)]
         command: LibraryCmd,
     },
+    /// .kdjv 视频工程（docs/kdjv.md）
+    Project {
+        #[command(subcommand)]
+        command: ProjectCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProjectCmd {
+    /// 打开一个 .kdjv 工程：标题、时长、画布、素材，是否已渲染好；不能播放时说明原因
+    Check {
+        /// .kdjv 文件路径
+        path: String,
+    },
+    /// 渲染好一个 .kdjv 工程，之后在 KDJ 里立即播放；全部结束才返回，中断命令不取消渲染
+    Render {
+        /// .kdjv 文件路径
+        path: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

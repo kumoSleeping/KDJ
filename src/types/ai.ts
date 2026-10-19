@@ -24,6 +24,14 @@ export interface AiStatus {
   model: string | null;
   /** pi is running. */
   running: boolean;
+  /** Remotion in the AI's workspace (设置 → AI → 视频), which the video skill renders with. */
+  remotion: {
+    /** Installed version; null when it is not installed. */
+    version: string | null;
+    installing: boolean;
+    /** Why the last install failed. */
+    error: string;
+  };
   web: {
     mode: AiWebMode;
     /** pi-web-access is installed in KDJ's pi directory. */

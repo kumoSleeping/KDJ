@@ -957,6 +957,15 @@ export interface MaintenanceProgress {
  * 但前端已经没有浮层通知了，这条分支故意不在联合类型里：
  * 收到就当没这回事，各 store 的 switch 落到 default 直接忽略。
  */
+/** A `.kdjv` project being rendered for playing (docs/kdjv.md). */
+export interface KdjvProgress {
+  path: string;
+  track_id: number | null;
+  progress: number;
+  detail: string;
+  error: string | null;
+}
+
 export type WsEvent =
   | { type: "connection.open"; payload: Record<string, never> }
   | { type: "library.progress.snapshot"; payload: { events: Array<
@@ -976,6 +985,7 @@ export type WsEvent =
   | { type: "library.updated"; payload: { track_ids: number[] } }
   | { type: "library.folders.updated"; payload: Record<string, never> }
   | { type: "account.changed"; payload: Account }
+  | { type: "kdjv.progress"; payload: KdjvProgress }
   | { type: "ai.event"; payload: import("./types/ai").PiEvent }
   | { type: "ai.status"; payload: import("./types/ai").AiStatus };
 

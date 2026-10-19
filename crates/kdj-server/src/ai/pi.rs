@@ -104,6 +104,18 @@ pub fn child_path(pi: &Path) -> std::ffi::OsString {
     std::env::join_paths(dirs).unwrap_or_default()
 }
 
+/// A program of the node that runs pi (`npm`, `node`), found on the PATH pi's children get.
+pub fn beside(pi: &Path, program: &str) -> Option<PathBuf> {
+    let names: &[String] = &if cfg!(windows) {
+        vec![format!("{program}.cmd"), format!("{program}.exe")]
+    } else {
+        vec![program.to_string()]
+    };
+    std::env::split_paths(&child_path(pi))
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(|path| path.is_file())
+}
+
 pub fn command(pi: &Path) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(pi);
     command.env("PATH", child_path(pi)).kill_on_drop(true);
