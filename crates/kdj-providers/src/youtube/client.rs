@@ -388,14 +388,20 @@ impl YoutubeClient {
         // Since 2026-07 YouTube returns muxed Safari HLS only to a trusted browser session. The
         // authenticated watch page is the source of truth; a hand-built Player request can be
         // internally valid yet still return UNPLAYABLE for the same account.
-        let html = self
-            .protected_page_html(
-                &format!("https://www.youtube.com/watch?v={video_id}"),
-                user_agent,
-            )
-            .await?;
-        let Some(manifest) = extract_json_string_value(&html, "hlsManifestUrl") else {
-            return Err(missing_hls_reason(&html));
+        // A signed-in page for a playable video sometimes comes without the manifest and has it
+        // when asked again (yt-dlp #17143): such a page is asked for again a few times.
+        let page = format!("https://www.youtube.com/watch?v={video_id}");
+        let mut attempt = 0;
+        let (html, manifest) = loop {
+            let html = self.protected_page_html(&page, user_agent).await?;
+            if let Some(manifest) = extract_json_string_value(&html, "hlsManifestUrl") {
+                break (html, manifest);
+            }
+            if attempt >= HLS_PAGE_RETRIES.len() || !hls_missing_by_chance(&html) {
+                return Err(missing_hls_reason(&html));
+            }
+            tokio::time::sleep(HLS_PAGE_RETRIES[attempt]).await;
+            attempt += 1;
         };
         let player_url = extract_player_url(&html).context("YouTube 页面没有播放器脚本地址")?;
         Ok(ProtectedHlsContext {
@@ -767,6 +773,17 @@ async fn read_json(response: reqwest::Response, endpoint: &str) -> Result<Value>
         .into());
     }
     Ok(payload)
+}
+
+/// The waits before asking again for a watch page that came without its HLS manifest.
+const HLS_PAGE_RETRIES: [std::time::Duration; 2] =
+    [std::time::Duration::from_millis(800), std::time::Duration::from_millis(2000)];
+
+/// A page without a manifest that was served signed in, for a video that plays: nothing on the
+/// page explains the missing manifest, so asking again may bring it.
+fn hls_missing_by_chance(html: &str) -> bool {
+    ytcfg_flag(html, "LOGGED_IN") != Some(false)
+        && !matches!(initial_player_response(html).map(|player| ensure_playable(&player)), Some(Err(_)))
 }
 
 /// Why a watch page carries no HLS manifest: the page was served signed out (log in again), the
