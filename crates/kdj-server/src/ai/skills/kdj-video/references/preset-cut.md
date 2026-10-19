@@ -24,20 +24,29 @@
 
 ## 方案（例）
 
-```json
-{
-  "question": "简洁剪辑的方案",
-  "preview": "简洁剪辑：用《FX战士久留美》的 NCED（91 秒，无字）和 NCOP，按小节剪成整首 3:38，不加效果；下载约 300 MB；先给 .kdjv 预览。",
-  "questions": [
-    { "id": "mode", "question": "做法", "options": ["简洁剪辑", "完整 VJ", "音视频合并", "可视化"], "default": ["简洁剪辑"] },
-    { "id": "ratio", "question": "画面比例", "options": ["16:9", "9:16", "1:1", "跟随素材"], "default": ["16:9"] },
-    { "id": "length", "question": "做多长", "options": ["整首", "到第一次副歌后的间奏", "我标的那段"] },
-    { "id": "rest", "question": "NCED 之外的部分", "options": ["用 NCOP 和正片补", "只放 NCED，其余黑屏", "KDJ 可视化"] },
-    { "id": "folder", "question": "素材下到", "options": ["vj", "新建 vj/久留美"] },
-    { "id": "deliver", "question": "交付", "options": ["先给 .kdjv 预览", "做完直接导出 MP4"], "default": ["先给 .kdjv 预览"] }
-  ]
-}
+`body`：
+
+```markdown
+**简洁剪辑**：用《FX战士久留美》的无字 ED 和 OP 按小节剪成整首 3:38，不加效果；下载约 300 MB，先给 .kdjv 预览。
+
+### 素材
+<media q="source" ref="bilibili:BV14ga666EPu"/>
+<media q="source" ref="bilibili:BV16Par6YE7b"/>
+
+### 字幕
+官方 MV 带歌词字幕：
+<shot src="/var/folders/…/kdj-peek/…/frame-03.jpg">0:26 画面下方是歌词字幕</shot>
+<choice q="subtitle" value="crop">裁掉字幕区</choice> <choice q="subtitle" value="keep">接受字幕</choice> <choice q="subtitle" value="skip">不用带字幕的</choice>
+
+### 比例和长度
+<choice q="ratio" value="16:9">16:9</choice> <choice q="ratio" value="9:16">9:16</choice> <choice q="ratio" value="1:1">1:1</choice>
+<choice q="length" value="full">整首</choice> <choice q="length" value="first">到第一次副歌后的间奏</choice>
+
+### 交付
+<choice q="deliver" value="kdjv">先给 .kdjv 预览</choice> <choice q="deliver" value="mp4">做完直接导出 MP4</choice>
 ```
+
+`questions`：`[{"id":"source","multiple":true,"default":["bilibili:BV14ga666EPu"]},{"id":"ratio","default":["16:9"]},{"id":"deliver","default":["kdjv"]}]`
 
 ## 报告（例）
 

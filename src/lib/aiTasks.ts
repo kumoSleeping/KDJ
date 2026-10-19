@@ -186,9 +186,10 @@ export function stepLine(tool: string, args: unknown, state: "running" | "done" 
         const answers = fields(answer.answers);
         const picked = a.questions.map(fields).map(item => {
           const chosen = answers[str(item.id)];
-          return Array.isArray(chosen) && chosen.length ? `${str(item.question)}：${chosen.map(str).join("、")}` : "";
+          return Array.isArray(chosen) && chosen.length ? `${str(item.question) || str(item.id)}：${chosen.map(str).join("、")}` : "";
         }).filter(Boolean);
-        return line(`方案：${str(a.question) || str(a.preview)}`, answer.cancelled === true ? "暂停了" : picked.join("；") || undefined);
+        const headline = str(a.question) || str(a.preview) || str(a.body).split("\n")[0].replace(/[#*`]/g, "").trim();
+        return line(`方案：${headline}`, answer.cancelled === true ? "暂停了" : picked.join("；") || undefined);
       }
       const choices = answer.choices;
       return line(`询问：${str(a.question)}`, Array.isArray(choices) && choices.length ? `选了 ${choices.map(str).join("、")}` : undefined);

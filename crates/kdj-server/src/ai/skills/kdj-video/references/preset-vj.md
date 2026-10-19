@@ -23,17 +23,26 @@
 
 ## 方案（例）
 
-```json
-{
-  "question": "VJ 的方案",
-  "preview": "完整 VJ：用《FX战士久留美》的 NCED、NCOP 和正片按段落剪整首 3:38，副歌进入处做切换；下载约 1 GB；先给 .kdjv 预览。",
-  "questions": [
-    { "id": "source", "question": "素材（可多选）", "options": ["NCED（91 秒，无字）", "NCOP（90 秒，无字）", "第 1–3 话正片", "官方真人 MV（带字幕）"], "multiple": true },
-    { "id": "ratio", "question": "画面比例", "options": ["16:9", "9:16", "1:1", "跟随素材"], "default": ["16:9"] },
-    { "id": "length", "question": "做多长", "options": ["整首", "short", "我标的那段"] },
-    { "id": "subtitle", "question": "带字幕的素材", "options": ["裁掉字幕区", "接受字幕", "不用带字幕的"] },
-    { "id": "effects", "question": "效果", "options": ["只剪拼", "段落处转场", "配合 drop 的强效果"] },
-    { "id": "deliver", "question": "交付", "options": ["先给 .kdjv 预览", "做完直接导出 MP4"], "default": ["先给 .kdjv 预览"] }
-  ]
-}
+`body`：
+
+```markdown
+**完整 VJ**：用《FX战士久留美》的原作画面按段落剪整首 3:38，副歌进入处做切换；下载约 1 GB，先给 .kdjv 预览。
+
+### 素材（可多选）
+<media q="source" ref="bilibili:BV14ga666EPu"/>
+<media q="source" ref="bilibili:BV16Par6YE7b"/>
+<media q="source" ref="bilibili:BV1mUa66CE5h"/>
+
+真人 MV 也有，但风格不同，带字幕：
+<media q="source" ref="youtube:WJ_gcQl1QL0"/>
+<shot src="/var/folders/…/kdj-peek/…/frame-02.jpg">真人出镜，下方有歌词字幕</shot>
+
+### 效果
+<choice q="effects" value="cut">只剪拼</choice> <choice q="effects" value="transitions">段落处转场</choice> <choice q="effects" value="drop">配合 drop 的强效果</choice>
+
+### 比例和交付
+<choice q="ratio" value="16:9">16:9</choice> <choice q="ratio" value="9:16">9:16</choice>
+<choice q="deliver" value="kdjv">先给 .kdjv 预览</choice> <choice q="deliver" value="mp4">做完直接导出 MP4</choice>
 ```
+
+`questions`：`[{"id":"source","multiple":true},{"id":"ratio","default":["16:9"]},{"id":"deliver","default":["kdjv"]}]`

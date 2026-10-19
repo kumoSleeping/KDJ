@@ -145,9 +145,36 @@ const folders = defineTool({
   },
 });
 
-/** What a search found, by ref: a question can offer those songs with their covers. */
-type Song = { ref: string; title: string; artists: string[]; platform: string; cover: string; duration: number | null };
+/**
+ * What a search or the library gave, by ref: a question or a plan can offer those songs and videos
+ * with their covers. Library rows are `library:<id>`.
+ */
+type Song = { ref: string; title: string; artists: string[]; platform: string; cover: string; duration: number | null; kind?: string };
 const songs = new Map<string, Song>();
+function rememberLibrary(data: unknown) {
+  const items = (data as { items?: unknown[] } | null)?.items;
+  if (!Array.isArray(items)) return;
+  for (const raw of items) {
+    const item = raw as { id?: unknown; title?: unknown; artist?: unknown; duration?: unknown; path?: unknown };
+    if (typeof item.id !== "number") continue;
+    const ref = `library:${item.id}`;
+    const path = typeof item.path === "string" ? item.path : "";
+    songs.set(ref, {
+      ref, title: typeof item.title === "string" && item.title ? item.title : basename(path) || ref,
+      artists: typeof item.artist === "string" && item.artist ? [item.artist] : [], platform: "library", cover: "",
+      duration: typeof item.duration === "number" ? item.duration : null,
+      kind: /\.(mp4|mov|m4v|mkv|webm|avi|kdjv)$/i.test(path) ? "video" : "song",
+    });
+  }
+}
+
+/** The frames kdj_peek cut in this pi: the only pictures a plan may show as evidence. */
+const peeked = new Set<string>();
+function rememberFrames(data: unknown) {
+  const cut = data as { sheet?: { path?: unknown }; frames?: { path?: unknown }[] } | null;
+  if (typeof cut?.sheet?.path === "string") peeked.add(cut.sheet.path);
+  for (const frame of cut?.frames ?? []) if (typeof frame.path === "string") peeked.add(frame.path);
+}
 function remember(data: unknown) {
   const items = (data as { items?: unknown[] } | null)?.items;
   if (!Array.isArray(items)) return;
@@ -157,6 +184,7 @@ function remember(data: unknown) {
     songs.set(item.ref, {
       ref: item.ref, title: item.title ?? item.ref, artists: Array.isArray(item.artists) ? item.artists : [],
       platform: item.platform ?? "", cover: item.cover ?? "", duration: typeof item.duration === "number" ? item.duration : null,
+      kind: typeof (item as { type?: unknown }).type === "string" ? (item as { type: string }).type : undefined,
     });
   }
 }
@@ -227,7 +255,9 @@ const libraryList = defineTool({
     offset: Type.Optional(Type.Integer()),
   }),
   async execute(_id, params, signal) {
-    return result(await kdj(["library", "list", ...flags(params)], signal));
+    const data = await kdj(["library", "list", ...flags(params)], signal);
+    rememberLibrary(data);
+    return result(data);
   },
 });
 
@@ -258,6 +288,7 @@ const peek = defineTool({
   }),
   async execute(_id, params, signal, _onUpdate, ctx) {
     const data = await kdj(["peek", params.source, ...flags({ at: params.at, every: params.every, width: params.width })], signal);
+    rememberFrames(data);
     // A model that takes no pictures is not handed pictures it never sees.
     if (blindLine(ctx?.model)) return result({ ...(data as object), blind: "你看不到图片，这些画面没有交给你" });
     const told = result(data);
@@ -329,27 +360,71 @@ function withGaps(data: unknown): unknown {
 }
 
 /**
- * The only way to ask the listener anything: a question with a few choices, shown as a bubble at
- * the bottom right of the KDJ window, with a countdown when `timeout` is given — when it runs
- * out, `default` is taken. A plan asks several questions at once (`questions`, under a `preview`
- * of what will be done), all answered with one 确定.
+ * The only way to ask the listener anything, as a bubble at the bottom right of the KDJ window:
+ * a question with a few choices (a countdown when `timeout` is given — when it runs out,
+ * `default` is taken), or a plan (`body`): Markdown with keys, material cards and evidence
+ * frames in it, every question answered together with one 确定.
+ *
+ * The window draws it from this call's partial result: the songs and videos a search or the
+ * library gave, by ref, and the frames kdj_peek cut, as pictures — the model names them, it never
+ * hands the window a picture or a file of its own. The answer comes back through an editor
+ * dialog titled `kdj:ask:<call id>`, as JSON `{ choices | answers, note, cancelled }`.
  */
-/**
- * The question is drawn by the KDJ window from this call's partial result (the songs with their
- * covers); the answer comes back through an editor dialog titled `kdj:ask:<call id>`, as JSON
- * `{ choices, note }`.
- */
+const PLAN_TAG_ATTRS = /(\w+)="([^"]*)"/g;
+const attrsOf = (raw: string) => Object.fromEntries([...raw.matchAll(PLAN_TAG_ATTRS)].map(match => [match[1], match[2]]));
+/** A frame shown as evidence is at most this large; more frames than these are left out. */
+const SHOT_BYTES = 600 * 1024;
+const SHOTS = 6;
+
+/** What a plan's body names: the questions its keys and cards answer, its cards and its frames. */
+function planParts(body: string) {
+  const ids = new Set<string>();
+  const refs = new Set<string>();
+  const shots = new Set<string>();
+  for (const match of body.matchAll(/<choice\b([^>]*)>/g)) { const a = attrsOf(match[1]); if (a.q) ids.add(a.q); }
+  for (const match of body.matchAll(/<media\b([^>]*)\/?>/g)) {
+    const a = attrsOf(match[1]);
+    if (a.ref) refs.add(a.ref);
+    if (a.q) ids.add(a.q);
+  }
+  for (const match of body.matchAll(/<shot\b([^>]*)>/g)) { const a = attrsOf(match[1]); if (a.src) shots.add(a.src); }
+  return { ids, refs, shots };
+}
+
+async function shotPictures(paths: Iterable<string>) {
+  const out: Record<string, string> = {};
+  for (const path of [...paths].slice(0, SHOTS)) {
+    // Only frames kdj_peek cut: a plan cannot show an arbitrary file.
+    if (!peeked.has(path)) continue;
+    try {
+      const data = await readFile(path);
+      if (data.length <= SHOT_BYTES) out[path] = `data:image/jpeg;base64,${data.toString("base64")}`;
+    } catch { /* A frame that is gone is left out; the plan says what it showed. */ }
+  }
+  return out;
+}
+
 const askUser = defineTool({
   name: "ask_user",
   label: "询问",
-  description: "需要用户决定时调用：KDJ 右下角弹出一句问题，可以给文字选项（options），也可以给歌曲选项（songs：kdj_search 给出的 ref，显示封面、歌名、艺术家和来源），multiple 允许多选。用户还可以写一句补充（note），要照着做。给了 timeout（秒）就显示倒计时，到时没选则按 default。返回 choices（选中的选项文字或 ref）和 note；用户关掉或点「暂停」则 cancelled 为 true，停下。\n一次要定几件事（比如视频方案）时用 questions：每项一个 id、一句问题和它的选项，用户一起看、一起点确定；preview 写在问题上面，说明你打算怎么做（做法、会下什么、大约多大、最后交什么）。返回 answers（每个 id 选中的选项）和 note。",
+  description: "需要用户决定时调用：KDJ 右下角弹出一个气泡。\n" +
+    "一件事：question 加文字选项（options）或歌曲选项（songs：kdj_search 给出的 ref，显示封面、歌名、艺术家和来源），multiple 允许多选；" +
+    "给了 timeout（秒）就显示倒计时，到时没选则按 default。返回 choices（选中的选项文字或 ref）和 note。\n" +
+    "几件事一起定（比如视频方案）：写 body，用 Markdown 写清你打算怎么做（做法、会下什么、大约多大、最后交什么），短句、列表、粗体都可以；" +
+    "要用户选的地方嵌进标签，系统负责画出来：\n" +
+    "- <choice q=\"问题id\" value=\"值\">按钮上的字</choice>：一个按钮，点了就选这个值；\n" +
+    "- <media q=\"问题id\" ref=\"ref\"/>：一张素材卡片（封面、标题、来源、时长、打开链接），ref 是 kdj_search 给的或 kdj_library_list 的 library:<id>；不给 q 只展示；\n" +
+    "- <shot src=\"kdj_peek 给出的帧路径\">这张图说明什么</shot>：你判断时依据的截图（比如能看到字幕），直接贴给用户看。\n" +
+    "同一个问题默认单选；questions 里给 {id, multiple, default} 改成多选或预选。返回 answers（每个问题选中的值）和 note。方案不给 timeout。\n" +
+    "用户还可以写一句补充（note），要照着做。用户关掉或点「暂停」则 cancelled 为 true，停下。",
   parameters: Type.Object({
-    question: Type.Optional(Type.String({ description: "一句问题；用 questions 时是这组问题的标题，可以不给" })),
-    preview: Type.Optional(Type.String({ description: "写在问题上面：你打算怎么做" })),
+    question: Type.Optional(Type.String({ description: "一句问题；写 body 时是标题，可以不给" })),
+    body: Type.Optional(Type.String({ description: "方案：Markdown，嵌 <choice> <media> <shot>" })),
+    preview: Type.Optional(Type.String({ description: "（旧写法）写在问题上面：你打算怎么做" })),
     questions: Type.Optional(Type.Array(Type.Object({
       id: Type.String(),
-      question: Type.String(),
-      options: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }),
+      question: Type.Optional(Type.String({ description: "不写 body 时的问题" })),
+      options: Type.Optional(Type.Array(Type.String(), { maxItems: 8, description: "不写 body 时的选项" })),
       multiple: Type.Optional(Type.Boolean()),
       default: Type.Optional(Type.Array(Type.String())),
     }), { maxItems: 8 })),
@@ -360,22 +435,32 @@ const askUser = defineTool({
     timeout: Type.Optional(Type.Integer({ minimum: 3, maximum: 300 })),
   }),
   async execute(id, params, signal, onUpdate, ctx) {
-    const questions = (params.questions ?? []).map(item => ({
-      id: item.id, question: item.question, options: item.options, multiple: item.multiple ?? false, defaults: item.default ?? [],
-    }));
-    if (!params.question && !params.preview && questions.length === 0) throw new Error("没有要问的：给 question，或 questions");
+    const body = params.body ?? "";
+    const parts = planParts(body);
+    const meta = new Map((params.questions ?? []).map(item => [item.id, item]));
+    // A plan's questions: those its keys and cards answer, then those listed without a body.
+    const ids = body ? [...new Set([...parts.ids, ...meta.keys()])].filter(qid => parts.ids.has(qid)) : [...meta.keys()];
+    const questions = ids.map(qid => {
+      const item = meta.get(qid);
+      return { id: qid, question: item?.question ?? "", options: item?.options ?? [], multiple: item?.multiple ?? false, defaults: item?.default ?? [] };
+    });
+    if (!params.question && !body && !params.preview && questions.length === 0) throw new Error("没有要问的：给 question，或 body");
+    const unknown = [...parts.refs].filter(ref => !songs.has(ref));
     const asked = {
       question: params.question ?? "",
+      body,
       preview: params.preview ?? "",
       questions,
+      media: Object.fromEntries([...parts.refs].filter(ref => songs.has(ref)).map(ref => [ref, songs.get(ref)])),
+      shots: await shotPictures(parts.shots),
       options: params.options ?? [],
       songs: (params.songs ?? []).map(ref => songs.get(ref) ?? { ref, title: ref, artists: [], platform: ref.split(":")[0], cover: "", duration: null }),
       multiple: params.multiple ?? false,
       defaults: params.default ?? [],
-      timeout: params.timeout ?? 0,
+      timeout: body ? 0 : params.timeout ?? 0,
     };
     onUpdate?.({ content: [{ type: "text", text: "等待用户回答" }], details: asked });
-    const timeout = params.timeout ? params.timeout * 1000 : undefined;
+    const timeout = asked.timeout ? asked.timeout * 1000 : undefined;
     const reply = await ctx.ui.editor(`kdj:ask:${id}`, "", { signal, timeout });
     let answer: { choices?: unknown; answers?: unknown; note?: unknown; cancelled?: unknown } = {};
     try { answer = reply ? JSON.parse(reply) : {}; } catch { answer = { note: reply }; }
@@ -383,13 +468,15 @@ const askUser = defineTool({
     const note = typeof answer.note === "string" && answer.note.trim() ? answer.note.trim() : null;
     const timedOut = reply === undefined && Boolean(timeout);
     const cancelled = !timedOut && (reply === undefined || answer.cancelled === true);
+    // Cards the window could not draw: the model is told, so it does not count on them.
+    const unseen = unknown.length > 0 ? { unseen: `这些 ref 不是 kdj_search 或 kdj_library_list 给出的，没有画出来：${unknown.join("、")}` } : {};
     if (questions.length > 0) {
       const given = answer.answers && typeof answer.answers === "object" ? answer.answers as Record<string, unknown> : {};
       const answers = Object.fromEntries(questions.map(item => [item.id, timedOut ? item.defaults : picks(given[item.id])]));
-      return result(cancelled ? { cancelled, answers: {}, note } : { answers, note, ...(timedOut ? { timedOut } : {}) });
+      return result(cancelled ? { cancelled, answers: {}, note, ...unseen } : { answers, note, ...(timedOut ? { timedOut } : {}), ...unseen });
     }
     if (timedOut) return result({ choices: asked.defaults, note: null, timedOut: true });
-    return result(cancelled ? { cancelled, choices: [], note } : { choices: picks(answer.choices), note });
+    return result(cancelled ? { cancelled, choices: [], note, ...unseen } : { choices: picks(answer.choices), note, ...unseen });
   },
 });
 

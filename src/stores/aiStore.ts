@@ -27,7 +27,12 @@ export interface AiRun {
   attached: string[];
   supplements: string[];
   steps: AiStep[];
+  /** The earlier session this request went on in (历史 → 继续), by its title. */
+  resumed?: string;
 }
+
+/** An earlier session the next request goes on in (历史 → 继续); shown as a card in Agent Mode. */
+export interface AiResume { path: string; title: string }
 
 interface AiStore {
   /** The search row takes a request for the AI instead of a search. */
@@ -42,6 +47,12 @@ interface AiStore {
   seed: { text: string; n: number } | null;
   /** What was dragged into the field, as cards above it; sent with the next request (aiAttachments.ts). */
   attachments: AiAttachment[];
+  /** The session the next request continues; null: the next request starts its own. */
+  resume: AiResume | null;
+  /** 历史 → 继续: pi opens that session, Agent Mode comes up with the session as a card. */
+  continueSession(session: AiResume): Promise<void>;
+  /** The card's ×: the next request starts a session of its own again. */
+  dropResume(): Promise<void>;
   /** Adds cards (one per thing) and turns the row to Agent Mode. */
   attach(items: readonly AiAttachment[]): void;
   detach(key: string): void;
@@ -92,6 +103,18 @@ export const useAiStore = create<AiStore>((set, get) => ({
   run: null,
   seed: null,
   attachments: [],
+  resume: null,
+  async continueSession(session) {
+    await aiApi.switchSession(session.path);
+    set({ resume: session, run: null });
+    get().setMode(true);
+  },
+  async dropResume() {
+    if (!get().resume) return;
+    set({ resume: null });
+    // A new session for pi: what 继续 opened is left as it was.
+    await aiApi.reset().catch(() => undefined);
+  },
   attach(items) {
     if (items.length === 0) return;
     set(state => {
@@ -150,8 +173,10 @@ export const useAiStore = create<AiStore>((set, get) => ({
     set({ attachments: [] });
     const module = await events();
     const running = get().running;
-    const task = module.userRequest(text, running, sent, attached.map(item => item.title), images);
-    set({ running: true });
+    // A request (not a supplement) goes on in the session 继续 chose, and the card goes.
+    const resumed = running ? undefined : get().resume?.title;
+    const task = module.userRequest(text, running, sent, attached.map(item => item.title), images, resumed);
+    set(running ? { running: true } : { running: true, resume: null });
     try {
       await aiApi.prompt(sent, images, running);
     } catch (error) {
@@ -180,6 +205,8 @@ export const useAiStore = create<AiStore>((set, get) => ({
       const payload = event.payload;
       if (payload.type === "agent_start") set({ running: true });
       if (payload.type === "agent_settled" || payload.type === "kdj_exit" || payload.type === "kdj_error") set({ running: false });
+      // A pi that ended takes the session 继续 opened with it: the next one starts afresh.
+      if (payload.type === "kdj_exit") set({ resume: null });
       void events().then(module => module.handlePiEvent(payload));
       return;
     }

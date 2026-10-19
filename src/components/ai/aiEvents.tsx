@@ -16,7 +16,7 @@
  *   yet can be taken back;
  * - what goes wrong is an amber bubble at the top.
  */
-import { useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Check, FileVideo, Globe, Library, LoaderCircle, LogIn, Search, Settings2, Sparkles, Wrench } from "lucide-react";
 import { aiApi } from "../../lib/api";
 import { requestAiLibrary, requestAiSearch } from "../../lib/aiSearch";
@@ -31,6 +31,7 @@ import { PLATFORM_LABEL } from "../download/MergedGroupRow";
 import { PlatformMark } from "../download/PlatformMark";
 import { dismissTask, showTask } from "../tasks/taskBubbleStore";
 import { useAiStore, type AiRun } from "../../stores/aiStore";
+import { PlanBody, PlanText, type PlanMedia } from "./AiMarkup";
 import "./AiAsk.css";
 
 /**
@@ -116,7 +117,8 @@ function answer(id: string, body: { value?: string; confirmed?: boolean; cancell
 interface AskSong { ref: string; title: string; artists: string[]; platform: string; cover: string; duration: number | null }
 interface AskQuestion { id: string; question: string; options: string[]; multiple: boolean; defaults: string[] }
 interface Asked {
-  question: string; preview: string; questions: AskQuestion[];
+  question: string; body: string; preview: string; questions: AskQuestion[];
+  media: Record<string, PlanMedia>; shots: Record<string, string>;
   options: string[]; songs: AskSong[]; multiple: boolean; defaults: string[]; timeout: number;
 }
 
@@ -135,12 +137,20 @@ function asked(details: unknown): Asked {
   const data = fields(details);
   return {
     question: str(data.question),
+    body: str(data.body),
     preview: str(data.preview),
+    media: Object.fromEntries(Object.entries(fields(data.media)).map(([ref, raw]) => {
+      const item = fields(raw);
+      return [ref, { ref, title: str(item.title) || ref, artists: strings(item.artists), platform: str(item.platform),
+        cover: str(item.cover), duration: typeof item.duration === "number" ? item.duration : null, kind: str(item.kind) }];
+    })),
+    shots: Object.fromEntries(Object.entries(fields(data.shots)).filter(([, src]) => typeof src === "string" && src.startsWith("data:image/"))
+      .map(([path, src]) => [path, src as string])),
     questions: (Array.isArray(data.questions) ? data.questions : []).map(raw => {
       const item = fields(raw);
       return { id: str(item.id), question: str(item.question), options: strings(item.options),
         multiple: item.multiple === true, defaults: strings(item.defaults) };
-    }).filter(item => item.id && item.options.length > 0),
+    }).filter(item => item.id && (item.options.length > 0 || str(data.body) !== "")),
     options: strings(data.options),
     songs: (Array.isArray(data.songs) ? data.songs : []).map(raw => {
       const song = fields(raw);
@@ -162,23 +172,55 @@ function SongCover({ song }: { song: AskSong }) {
   </span>;
 }
 
-/** Several questions answered together (a plan): what the AI means to do, then each question with
- *  its choices; one 确定 sends them all. */
+/**
+ * The listener's own words under a question: a field that grows with what is written (up to a few
+ * lines), Enter sends, Shift + Enter breaks the line; 暂停 and 确定 beside it.
+ */
+function NoteField({ note, onNote, canSend, onPause }: { note: string; onNote(text: string): void; canSend: boolean; onPause(): void }) {
+  const field = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const element = field.current;
+    if (!element) return;
+    element.style.height = "auto";
+    element.style.height = `${Math.min(element.scrollHeight, 96)}px`;
+  }, [note]);
+  return <div className="kd-ai-note">
+    <textarea ref={field} className="kd-ai-note-field" rows={1} value={note} placeholder="补充（可选）" aria-label="补充说明"
+      onChange={event => onNote(event.target.value)}
+      onKeyDown={event => {
+        if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && canSend) {
+          event.preventDefault();
+          event.currentTarget.form?.requestSubmit();
+        }
+      }} />
+    <span className="kd-ai-note-keys">
+      <button type="button" className="kd-ai-note-key" data-quiet="" title="停下这次任务" onClick={onPause}>暂停</button>
+      <button type="submit" className="kd-ai-note-key" data-send="" disabled={!canSend}>确定</button>
+    </span>
+  </div>;
+}
+
+/**
+ * Several questions answered together (a plan): what the AI means to do, written in Markdown
+ * with its keys, material cards and evidence frames in it (AiMarkup.tsx); or, the older way, a
+ * preview over each question's label and keys. One 确定 sends every answer.
+ */
 function AskPlan({ callId, ask }: { callId: string; ask: Asked }) {
   const [picked, setPicked] = useState<Record<string, ReadonlySet<string>>>(
     () => Object.fromEntries(ask.questions.map(item => [item.id, new Set(item.defaults)])));
   const [note, setNote] = useState("");
-  const toggle = (item: AskQuestion, value: string) => setPicked(before => {
-    const now = before[item.id] ?? new Set<string>();
+  const multiple = (id: string) => ask.questions.find(item => item.id === id)?.multiple ?? false;
+  const pick = (id: string, value: string) => setPicked(before => {
+    const now = before[id] ?? new Set<string>();
     let next: Set<string>;
-    if (item.multiple) {
+    if (multiple(id)) {
       next = new Set(now);
       if (next.has(value)) next.delete(value);
       else next.add(value);
     } else {
       next = now.has(value) ? new Set() : new Set([value]);
     }
-    return { ...before, [item.id]: next };
+    return { ...before, [id]: next };
   });
   const answered = ask.questions.every(item => (picked[item.id]?.size ?? 0) > 0);
   const submit = () => {
@@ -191,25 +233,28 @@ function AskPlan({ callId, ask }: { callId: string; ask: Asked }) {
     dismissTask(`ai-ask:${callId}`);
     void useAiStore.getState().abort();
   };
-  return <div className="kd-ai-ask" data-plan="">
-    {ask.question && <p className="kd-ai-message kd-ai-ask-title">{ask.question}</p>}
-    {ask.preview && <p className="kd-ai-message">{ask.preview}</p>}
-    <div className="kd-ai-ask-questions">
-      {ask.questions.map(item => <div key={item.id} className="kd-ai-ask-question" role="group" aria-label={item.question}>
-        <span className="kd-ai-ask-label">{item.question}{item.multiple ? "（可多选）" : ""}</span>
-        <div className="kd-ai-ask-row">
-          {item.options.map(option => <button key={option} type="button" className="kd-ai-choice"
-            aria-pressed={picked[item.id]?.has(option) ?? false} onClick={() => toggle(item, option)}>{option}</button>)}
-        </div>
-      </div>)}
-    </div>
-    <form className="kd-ai-ask-row" onSubmit={event => { event.preventDefault(); submit(); }}>
-      <span className="kd-ai-ask-label">补充</span>
-      <input className="kd-ai-ask-input" value={note} aria-label="补充说明" onChange={event => setNote(event.target.value)} />
-      <button type="submit" className="kd-ai-choice" data-default="true" disabled={!answered && !note.trim()}>确定</button>
-      <button type="button" className="kd-ai-choice" data-quiet="true" title="停下这次任务" onClick={pause}>暂停</button>
-    </form>
-  </div>;
+  return <form className="kd-ai-ask" data-plan="" onSubmit={event => { event.preventDefault(); submit(); }}>
+    {ask.question && <p className="kd-ai-ask-title">{ask.question}</p>}
+    {ask.body
+      ? <PlanBody body={ask.body} media={ask.media} shots={ask.shots} picked={picked} onPick={pick} />
+      : <>
+          {ask.preview && <PlanText text={ask.preview} />}
+          <div className="kd-ai-ask-questions">
+            {ask.questions.map(item => <div key={item.id} className="kd-ai-ask-question" role="group" aria-label={item.question}>
+              <span className="kd-ai-ask-label">{item.question}{item.multiple ? "（可多选）" : ""}</span>
+              <div className="kd-ai-ask-row">
+                {item.options.map(option => {
+                  const on = picked[item.id]?.has(option) ?? false;
+                  return <button key={option} type="button" className="kd-ai-choice" aria-pressed={on} onClick={() => pick(item.id, option)}>
+                    {on && <Check size={12} aria-hidden="true" />}{option}
+                  </button>;
+                })}
+              </div>
+            </div>)}
+          </div>
+        </>}
+    <NoteField note={note} onNote={setNote} canSend={answered || Boolean(note.trim())} onPause={pause} />
+  </form>;
 }
 
 /** The question's body: songs to pick, text choices, and a line for the listener's own words. */
@@ -234,9 +279,9 @@ function AskPanel({ callId, ask }: { callId: string; ask: Asked }) {
     void useAiStore.getState().abort();
   };
   return <div className="kd-ai-ask">
-    {ask.preview && <p className="kd-ai-message">{ask.preview}</p>}
+    {ask.preview && <PlanText text={ask.preview} />}
     {/* The whole question, not a line that scrolls. */}
-    {ask.question && <p className="kd-ai-message">{ask.question}</p>}
+    {ask.question && <PlanText text={ask.question} />}
     {ask.songs.length > 0 && <ul className="kd-ai-songs" role="group" aria-label={ask.multiple ? "可多选的歌曲" : "歌曲"}>
       {ask.songs.map(song => {
         const on = picked.has(song.ref);
@@ -260,14 +305,11 @@ function AskPanel({ callId, ask }: { callId: string; ask: Asked }) {
       {ask.options.map(option => <button key={option} type="button" className="kd-ai-choice" aria-pressed={choosing ? picked.has(option) : undefined}
         data-default={ask.defaults.includes(option) || undefined}
         onClick={() => { if (choosing) toggle(option); else submit([option]); }}>
-        {option}
+        {choosing && picked.has(option) && <Check size={12} aria-hidden="true" />}{option}
       </button>)}
     </div>}
-    <form className="kd-ai-ask-row" onSubmit={event => { event.preventDefault(); submit([...picked]); }}>
-      <span className="kd-ai-ask-label">补充</span>
-      <input className="kd-ai-ask-input" value={note} aria-label="补充说明" onChange={event => setNote(event.target.value)} />
-      <button type="submit" className="kd-ai-choice" data-default="true" disabled={picked.size === 0 && !note.trim()}>确定</button>
-      <button type="button" className="kd-ai-choice" data-quiet="true" title="停下这次任务" onClick={pause}>暂停</button>
+    <form onSubmit={event => { event.preventDefault(); submit([...picked]); }}>
+      <NoteField note={note} onNote={setNote} canSend={picked.size > 0 || Boolean(note.trim())} onPause={pause} />
     </form>
   </div>;
 }
@@ -420,16 +462,16 @@ function updateRun(change: (run: AiRun) => AiRun) {
   const run = useAiStore.getState().run;
   if (run) useAiStore.setState({ run: change(run) });
 }
-function startRun(line: UserLine, supplements: string[] = []) {
-  useAiStore.setState({ run: { request: line.text, attached: line.attached, supplements, steps: [] } });
+function startRun(line: UserLine, supplements: string[] = [], resumed?: string) {
+  useAiStore.setState({ run: { request: line.text, attached: line.attached, supplements, steps: [], resumed } });
 }
 
 /** The listener sent a request: a task of its own, or a supplement to the one under way. */
-export function userRequest(text: string, running: boolean, sent = text, attached: string[] = [], images: string[] = []): string {
+export function userRequest(text: string, running: boolean, sent = text, attached: string[] = [], images: string[] = [], resumed?: string): string {
   taskSeq += 1;
   if (!mainTask) {
     mainTask = { id: `t${taskSeq}`, text, sent, attached, images, supplements: [], working: running };
-    startRun(mainTask);
+    startRun(mainTask, [], resumed);
     drawMain();
     return mainTask.id;
   }

@@ -20,14 +20,18 @@
 
 ## 方案（例）
 
-```json
-{
-  "question": "可视化的方案",
-  "preview": "可视化：给《$・¥・€》整首出 1920×1080 的 KDJ 可视化（封面 + 频谱），不下载任何东西。",
-  "questions": [
-    { "id": "ratio", "question": "画面比例", "options": ["16:9（1920×1080）", "9:16（810×1440）", "1:1（1080×1080）"], "default": ["16:9（1920×1080）"] },
-    { "id": "range", "question": "范围", "options": ["整首", "我标的那段"], "default": ["整首"] },
-    { "id": "deliver", "question": "交付", "options": ["直接导出 MP4", "放进 .kdjv 先预览"] }
-  ]
-}
+`body`：
+
+```markdown
+**可视化**：给《$・¥・€》出 KDJ 可视化（封面 + 频谱），不下载任何东西。
+
+<media ref="library:13196"/>
+
+### 比例
+<choice q="ratio" value="1920x1080">16:9（1920×1080）</choice> <choice q="ratio" value="810x1440">9:16（810×1440）</choice> <choice q="ratio" value="1080x1080">1:1（1080×1080）</choice>
+
+### 交付
+<choice q="deliver" value="mp4">直接导出 MP4</choice> <choice q="deliver" value="kdjv">放进 .kdjv 先预览</choice>
 ```
+
+`questions`：`[{"id":"ratio","default":["1920x1080"]}]`

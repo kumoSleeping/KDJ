@@ -22,20 +22,27 @@
 
 ## 方案（例）
 
-```json
-{
-  "question": "音视频合并的方案",
-  "preview": "音视频合并：MV 0:00–1:31 对上歌 0:00–1:31（已核实）；1:31–3:38 共 2:07 没有画面。",
-  "questions": [
-    { "id": "gap", "question": "没画面的部分", "options": ["保留黑屏", "填"] },
-    { "id": "amount", "question": "填多少", "options": ["只在开头结尾各留 8 小节冗余", "全部填满"] },
-    { "id": "fill", "question": "用什么填", "options": ["原作动画随机剪辑", "KDJ 可视化", "其他（写在补充里）"] },
-    { "id": "deliver", "question": "交付", "options": ["先给 .kdjv 预览", "做完直接导出 MP4"], "default": ["先给 .kdjv 预览"] }
-  ]
-}
+`body`：
+
+```markdown
+**音视频合并**：MV 0:00–1:31 对上歌 0:00–1:31（已核实）；**1:31–3:38 共 2:07 没有画面**。
+
+<media ref="youtube:OiQo6YyJ_pM"/>
+
+### 没画面的部分
+<choice q="gap" value="black">保留黑屏</choice> <choice q="gap" value="fill">填</choice>
+
+### 填多少
+<choice q="amount" value="edges">开头结尾各留 8 小节冗余</choice> <choice q="amount" value="all">全部填满</choice>
+
+### 用什么填
+<choice q="fill" value="anime">原作动画随机剪辑</choice> <choice q="fill" value="visualizer">KDJ 可视化</choice> <choice q="fill" value="other">其他（写在补充里）</choice>
+
+### 交付
+<choice q="deliver" value="kdjv">先给 .kdjv 预览</choice> <choice q="deliver" value="mp4">直接导出 MP4</choice>
 ```
 
-随机剪辑：从原作素材里取没有字的片段，按小节切，不重复同一段。
+`questions`：`[{"id":"deliver","default":["kdjv"]}]`
 
 ## 报告（例）
 

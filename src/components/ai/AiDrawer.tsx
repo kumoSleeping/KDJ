@@ -22,7 +22,7 @@ function TaskPage() {
   const run = useAiStore(state => state.run);
   return <div className="kd-ai-drawer kd-scroll" data-drawer-scroll>
     {run && <>
-      <Request text={run.request} attached={run.attached} supplements={run.supplements} />
+      <Request text={run.request} attached={run.attached} supplements={run.supplements} resumed={run.resumed} />
       <ol className="kd-ai-steps">
         {run.steps.map(step => <StepRow key={step.id} {...step} />)}
       </ol>

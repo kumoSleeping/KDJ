@@ -109,9 +109,119 @@
   overflow-wrap: anywhere;
 }
 
-/* A plan (several questions answered together): what the AI means to do, then each question's
-   label over its keys. Questions are told apart by spacing; a long plan scrolls inside the bubble. */
-.kd-ai-ask[data-plan] { max-height: min(28rem, 60vh); overflow-y: auto; }
-.kd-ai-ask-title { font-weight: 600; }
+/* A plan (AiMarkup.tsx): the AI's words as Markdown, its keys inline where it wrote them, material
+   as cards, evidence frames at the bubble's width. Blocks are told apart by spacing; picked keys
+   and cards are written in full ink and weight with a tick; nothing is tinted, boxed or lined. A
+   long plan scrolls inside the bubble. */
+.kd-ai-ask[data-plan] { gap: 10px; max-height: min(32rem, 64vh); overflow-y: auto; }
+.kd-ai-ask-title { margin: 0; color: var(--kd-text); font-weight: 600; }
 .kd-ai-ask-questions { display: grid; gap: 10px; }
 .kd-ai-ask-question { display: grid; gap: 2px; min-width: 0; }
+.kd-ai-choice { display: inline-flex; align-items: center; gap: 4px; }
+
+.kd-ai-md { display: grid; gap: 6px; min-width: 0; color: var(--kd-text); font-size: var(--kd-size-sm); line-height: 1.5; }
+.kd-ai-md-heading { margin: 4px 0 0; font-weight: 600; }
+.kd-ai-md-heading[data-level="1"] { font-size: var(--kd-size-md, 1rem); }
+.kd-ai-md-p { display: grid; gap: 4px; min-width: 0; }
+.kd-ai-md-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; overflow-wrap: anywhere; }
+.kd-ai-md ul,
+.kd-ai-md ol { display: grid; gap: 4px; margin: 0; padding-left: 1.2rem; }
+.kd-ai-md li { overflow-wrap: anywhere; }
+.kd-ai-md li > .kd-ai-choice { margin: 1px 2px; }
+.kd-ai-md code { padding: 0 4px; border-radius: 4px; background: color-mix(in srgb, var(--kd-text) 7%, transparent); font-size: 0.92em; }
+.kd-ai-md a { color: var(--kd-text); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.kd-ai-choice[data-static] { cursor: default; }
+
+/* Material: a card per song or video, as wide as the bubble. */
+.kd-ai-media { display: flex; align-items: center; gap: 4px; width: 100%; min-width: 0; }
+.kd-ai-media-main {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 4px 6px 4px 2px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  text-align: left;
+}
+button.kd-ai-media-main { cursor: pointer; }
+button.kd-ai-media-main:hover { background: var(--kd-hover); color: var(--kd-text); }
+.kd-ai-media-main[aria-pressed="true"] { color: var(--kd-text); }
+.kd-ai-media-main[aria-pressed="true"] .kd-ai-media-title { font-weight: 700; }
+.kd-ai-media-cover {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 4.4rem;
+  height: 2.5rem;
+  overflow: hidden;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--kd-text) 6%, transparent);
+  color: var(--kd-muted);
+}
+.kd-ai-media-cover > img { width: 100%; height: 100%; object-fit: cover; }
+.kd-ai-media-cover > .kd-vinyl-placeholder { width: 2.3rem; height: 2.3rem; }
+.kd-ai-media-copy { display: grid; flex: 1 1 auto; gap: 1px; min-width: 0; }
+.kd-ai-media-title,
+.kd-ai-media-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kd-ai-media-title { font-size: var(--kd-size-sm); }
+.kd-ai-media-sub { display: flex; align-items: center; gap: 4px; color: var(--kd-muted); font-size: var(--kd-size-xs); }
+.kd-ai-media-mark { display: grid; flex: none; place-items: center; width: 16px; color: var(--kd-text); }
+.kd-ai-media-open {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+.kd-ai-media-open:hover { background: var(--kd-hover); color: var(--kd-text); }
+
+/* Evidence: a frame the AI looked at, with what it shows. */
+.kd-ai-shot { display: grid; gap: 3px; width: 100%; margin: 2px 0; }
+.kd-ai-shot > img { display: block; width: 100%; height: auto; border-radius: 8px; }
+.kd-ai-shot > figcaption,
+.kd-ai-shot-missing { color: var(--kd-muted); font-size: var(--kd-size-xs); }
+
+/* The listener's own words: a soft field that grows to a few lines, the keys under it. */
+.kd-ai-note { display: grid; gap: 6px; }
+.kd-ai-note-field {
+  width: 100%;
+  min-height: 2rem;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--kd-text) 6%, transparent);
+  color: var(--kd-text);
+  font: inherit;
+  font-size: var(--kd-size-sm);
+  line-height: 1.45;
+  resize: none;
+  outline: none;
+}
+.kd-ai-note-field::placeholder { color: var(--kd-muted); }
+.kd-ai-note-field:focus-visible { outline: 2px solid var(--kd-focus, var(--kd-text)); outline-offset: 0; }
+.kd-ai-note-keys { display: flex; justify-content: flex-end; gap: 6px; }
+.kd-ai-note-key {
+  padding: 4px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-sm);
+  cursor: pointer;
+}
+.kd-ai-note-key:hover { background: var(--kd-hover); color: var(--kd-text); }
+.kd-ai-note-key[data-send] { background: var(--kd-theme); color: var(--kd-theme-ink); font-weight: 600; }
+.kd-ai-note-key[data-send]:hover { background: var(--kd-theme); color: var(--kd-theme-ink); }
+.kd-ai-note-key:disabled { opacity: 0.4; cursor: default; }
+.kd-ai-note-key:focus-visible { outline: 2px solid var(--kd-focus, var(--kd-text)); outline-offset: 1px; }

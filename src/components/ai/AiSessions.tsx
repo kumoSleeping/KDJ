@@ -30,8 +30,9 @@ export function StepRow({ tool, args, state, details, text }: {
   </li>;
 }
 
-export function Request({ text, attached, supplements = [] }: { text: string; attached: string[]; supplements?: string[] }) {
+export function Request({ text, attached, supplements = [], resumed }: { text: string; attached: string[]; supplements?: string[]; resumed?: string }) {
   return <div className="kd-ai-request">
+    {resumed && <small>接着：{resumed}</small>}
     <p>{text}</p>
     {attached.length > 0 && <small>附带：{attached.join("、")}</small>}
     {supplements.map((line, index) => <small key={index}>补充：{line}</small>)}
@@ -68,11 +69,9 @@ export function AiSessions({ page = false }: { page?: boolean }) {
     setOpen(path);
     aiApi.session(path).then(read => setSteps(known => ({ ...known, [path]: read.steps })), cause => setError(message(cause)));
   };
+  // 继续: the session becomes a card in Agent Mode, and the next request goes on in it.
   const goOn = (session: AiSessionSummary) => {
-    aiApi.switchSession(session.path).then(() => {
-      useAiStore.setState({ run: null });
-      load();
-    }, cause => setError(message(cause)));
+    useAiStore.getState().continueSession({ path: session.path, title: session.title }).then(load, cause => setError(message(cause)));
   };
   const list = <>
     <InlineNotice text={error} block onDismiss={error ? () => setError("") : undefined} />

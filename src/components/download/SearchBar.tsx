@@ -9,7 +9,7 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { LoaderCircle, Music, Sparkles, Video, X } from "lucide-react";
+import { History, LoaderCircle, Music, Sparkles, Video, X } from "lucide-react";
 import { AI_DROP_ATTR, fromLocalTracks, fromPastedImage, fromSearchDrag, timeLabel } from "../../lib/aiAttachments";
 import { activeSearchDrag, finishSearchDrop, readSearchDrop } from "../../lib/searchDrag";
 import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
@@ -338,6 +338,7 @@ export function SearchBar({
   }, [rowTurn, offered]);
   const aiRunning = useAiStore(state => state.running);
   const attachments = useAiStore(state => state.attachments);
+  const resume = useAiStore(state => state.resume);
   const thinking = useAiStore(state => state.status?.thinking ?? "high");
   const [request, setRequest] = useState("");
   const seed = useAiStore(state => state.seed);
@@ -645,9 +646,21 @@ export function SearchBar({
             }}
           />
         </div>
-        {/* What was dragged into Agent Mode: a card each, sent with the request (aiAttachments.ts). */}
-        {aiMode && attachments.length > 0 && (
+        {/* What was dragged into Agent Mode: a card each, sent with the request (aiAttachments.ts).
+            First, the earlier session the next request goes on in (历史 → 继续); × lets it go. */}
+        {aiMode && (attachments.length > 0 || resume) && (
           <div className="kd-ai-chips" role="list" aria-label="附带给 AI">
+            {resume && (
+              <span className="kd-ai-chip" role="listitem" data-kd-turn="in" data-resume="" title={`下一句话接着这个会话：${resume.title}`}>
+                <span className="kd-ai-chip-cover" aria-hidden="true"><History size={12} /></span>
+                <span className="kd-ai-chip-time">接着</span>
+                <span className="kd-ai-chip-title">{resume.title}</span>
+                <button type="button" className="kd-ai-chip-remove" aria-label="不接着这个会话"
+                  onClick={() => void useAiStore.getState().dropResume()}>
+                  <X size={11} aria-hidden="true" />
+                </button>
+              </span>
+            )}
             {attachments.map(item => {
               const time = timeLabel(item);
               return (
