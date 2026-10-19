@@ -13,6 +13,7 @@
 - Frontend work belongs in `src/` and must be validated against the Tauri shell.
 - Video scheduling is shared through `src/lib/videoPlaybackEngine.ts`, `videoFrames.ts`, and `videoSeekQueue.ts`. Local playback, online previews and YouTube must use this common scheduling layer; official embedded players adapt their commands to the shared seek queue.
 - Video editing is the AI's: KDJ's own AI (the kdj-video skill) writes `.kdjv` projects that play like videos (`docs/kdjv.md`). There is no hand-operated editor and no VJ projection any more (the workshop and Live VJ were removed; their code is in git history). The workshop's render engine stays, as what plays a project.
+- Every word KDJ's AI is given — the system prompt's parts, each tool's description and parameter descriptions, the kdj-video skill — lives in `crates/kdj-server/src/ai/prompts/` (its `README.md` is the map), where a person can read all of it in one place. Code names that text (`toolText("tool")`, `promptText("file")`) and never writes a model-facing description or instruction itself; a tool's refusal or error stays beside the code that refuses.
 - Prioritize macOS and Windows while retaining Android support. Reuse system decoding; do not introduce a bundled decoder/player dependency merely to unify video controls. Keep native decoding, shared scheduling, and source-specific loading distinct when reporting capabilities.
 
 ## Disabled Legacy Runtime

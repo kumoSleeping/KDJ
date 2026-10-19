@@ -7,7 +7,9 @@
 //! skills and context files are left out. The tools are KDJ's own — the `kdj` CLI's commands
 //! (kdj-tools.ts) — and a web search: pi-web-access, which KDJ installs into its own directory on
 //! request and locks down (web-search.json), or one of KDJ's built-in ways (kdj-web.ts: DeepSeek's
-//! Search / Fetch, DeepSeek with Jina Reader, Jina with a key). The prompt is KDJ's (kdj-prompt.md).
+//! Search / Fetch, DeepSeek with Jina Reader, Jina with a key). Every word the model is given —
+//! the system prompt's parts, each tool's description, the kdj-video skill — is in `prompts/`
+//! (prompts/README.md), and nowhere in the code.
 
 mod pi;
 mod sessions;
@@ -35,18 +37,26 @@ pub use pi::{PiState, PiStatus};
 const TOOLS: &str = include_str!("kdj-tools.ts");
 const WEB: &str = include_str!("kdj-web.ts");
 const FOLDERS: &str = include_str!("kdj-folders.ts");
-const PROMPT: &str = include_str!("kdj-prompt.md");
 const VIDEO: &str = include_str!("kdj-video.ts");
-/// The kdj-video skill (skills/kdj-video), as files under the skill's directory.
-const SKILL: &[(&str, &str)] = &[
-    ("SKILL.md", include_str!("skills/kdj-video/SKILL.md")),
-    ("references/kdjv.md", include_str!("skills/kdj-video/references/kdjv.md")),
-    ("references/ffmpeg.md", include_str!("skills/kdj-video/references/ffmpeg.md")),
-    ("references/remotion.md", include_str!("skills/kdj-video/references/remotion.md")),
-    ("references/preset-vj.md", include_str!("skills/kdj-video/references/preset-vj.md")),
-    ("references/preset-cut.md", include_str!("skills/kdj-video/references/preset-cut.md")),
-    ("references/preset-merge.md", include_str!("skills/kdj-video/references/preset-merge.md")),
-    ("references/preset-visualizer.md", include_str!("skills/kdj-video/references/preset-visualizer.md")),
+const PROMPTS_TS: &str = include_str!("kdj-prompts.ts");
+/// The words the model is given (prompts/README.md), as files under `<pi-agent>/kdj/prompts`.
+const PROMPTS: &[(&str, &str)] = &[
+    ("README.md", include_str!("prompts/README.md")),
+    ("preamble.md", include_str!("prompts/preamble.md")),
+    ("system.md", include_str!("prompts/system.md")),
+    ("blind.md", include_str!("prompts/blind.md")),
+    ("tools.md", include_str!("prompts/tools.md")),
+    ("skills/kdj-video/SKILL.md", include_str!("prompts/skills/kdj-video/SKILL.md")),
+    ("skills/kdj-video/references/kdjv.md", include_str!("prompts/skills/kdj-video/references/kdjv.md")),
+    ("skills/kdj-video/references/ffmpeg.md", include_str!("prompts/skills/kdj-video/references/ffmpeg.md")),
+    ("skills/kdj-video/references/remotion.md", include_str!("prompts/skills/kdj-video/references/remotion.md")),
+    ("skills/kdj-video/references/preset-vj.md", include_str!("prompts/skills/kdj-video/references/preset-vj.md")),
+    ("skills/kdj-video/references/preset-cut.md", include_str!("prompts/skills/kdj-video/references/preset-cut.md")),
+    ("skills/kdj-video/references/preset-merge.md", include_str!("prompts/skills/kdj-video/references/preset-merge.md")),
+    (
+        "skills/kdj-video/references/preset-visualizer.md",
+        include_str!("prompts/skills/kdj-video/references/preset-visualizer.md"),
+    ),
 ];
 /// What the Remotion project holds: Remotion's packages move in lockstep, so `latest` of each
 /// is one release.
@@ -153,15 +163,23 @@ impl Paths {
     fn folders(&self) -> PathBuf {
         self.agent.join("kdj").join("kdj-folders.ts")
     }
-    fn prompt(&self) -> PathBuf {
-        self.agent.join("kdj").join("kdj-prompt.md")
-    }
     fn video(&self) -> PathBuf {
         self.agent.join("kdj").join("kdj-video.ts")
     }
+    fn prompts_ts(&self) -> PathBuf {
+        self.agent.join("kdj").join("kdj-prompts.ts")
+    }
+    /// What PROMPTS holds, read by kdj-prompts.ts (`KDJ_PROMPTS`) and by pi.
+    fn prompts(&self) -> PathBuf {
+        self.agent.join("kdj").join("prompts")
+    }
+    /// The system prompt's body, after the preamble (`--append-system-prompt`).
+    fn prompt(&self) -> PathBuf {
+        self.prompts().join("system.md")
+    }
     /// The kdj-video skill: the only skill pi is given (`--skill`; `--no-skills` keeps out the rest).
     fn skill(&self) -> PathBuf {
-        self.agent.join("kdj").join("skills").join("kdj-video")
+        self.prompts().join("skills").join("kdj-video")
     }
     /// The Remotion project the AI renders with, its packages installed by KDJ.
     fn remotion(&self) -> PathBuf {
@@ -446,18 +464,21 @@ impl AiBridge {
         Ok(process)
     }
 
-    /// KDJ's extension, prompt and skill, written into its pi directory where they differ.
+    /// KDJ's extension and its prompts, written into its pi directory where they differ.
     fn write_extension(&self) -> anyhow::Result<()> {
         let paths = &self.paths;
         write_if_changed(&paths.tools(), TOOLS)?;
         write_if_changed(&paths.web(), WEB)?;
         write_if_changed(&paths.folders(), FOLDERS)?;
         write_if_changed(&paths.video(), VIDEO)?;
-        write_if_changed(&paths.prompt(), PROMPT)?;
+        write_if_changed(&paths.prompts_ts(), PROMPTS_TS)?;
         write_if_changed(&paths.agent.join("web-search.json"), ACCESS_CONFIG)?;
-        for (name, contents) in SKILL {
-            write_if_changed(&paths.skill().join(name), contents)?;
+        for (name, contents) in PROMPTS {
+            write_if_changed(&paths.prompts().join(name), contents)?;
         }
+        // Where the prompt and the skill were written before they moved into prompts/.
+        let _ = std::fs::remove_file(paths.agent.join("kdj").join("kdj-prompt.md"));
+        let _ = std::fs::remove_dir_all(paths.agent.join("kdj").join("skills"));
         Ok(())
     }
 
@@ -524,6 +545,8 @@ impl AiBridge {
             // The video tools (kdj-video.ts): where they may read and write, and KDJ's FFmpeg.
             .env("KDJ_WORKSPACE", &paths.workspace)
             .env("KDJ_SKILLS", paths.skill())
+            // Every word the tools give the model (kdj-prompts.ts).
+            .env("KDJ_PROMPTS", paths.prompts())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1217,13 +1240,80 @@ mod tests {
     fn the_video_skill_and_tools_are_written_beside_the_others() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = bridge_in(dir.path());
+        // What an earlier version wrote outside prompts/.
+        let kdj = bridge.paths.agent.join("kdj");
+        std::fs::create_dir_all(kdj.join("skills").join("kdj-video")).unwrap();
+        std::fs::write(kdj.join("kdj-prompt.md"), "old").unwrap();
         bridge.write_extension().unwrap();
         let skill = std::fs::read_to_string(bridge.paths.skill().join("SKILL.md")).unwrap();
         assert!(skill.starts_with("---\nname: kdj-video\n"), "{skill}");
         for reference in ["kdjv.md", "ffmpeg.md", "remotion.md"] {
             assert!(bridge.paths.skill().join("references").join(reference).is_file(), "{reference}");
         }
-        assert!(bridge.paths.agent.join("kdj").join("kdj-video.ts").is_file());
+        assert!(bridge.paths.skill().starts_with(bridge.paths.prompts()));
+        for prompt in ["README.md", "preamble.md", "system.md", "blind.md", "tools.md"] {
+            assert!(bridge.paths.prompts().join(prompt).is_file(), "{prompt}");
+        }
+        assert_eq!(bridge.paths.prompt(), bridge.paths.prompts().join("system.md"));
+        assert!(kdj.join("kdj-video.ts").is_file());
+        assert!(kdj.join("kdj-prompts.ts").is_file());
+        assert!(!kdj.join("kdj-prompt.md").exists() && !kdj.join("skills").exists(), "the old places are cleared");
+    }
+
+    /// prompts/tools.md: each `## tool` with the parameters listed under its `### 参数`.
+    fn documented_tools() -> HashMap<&'static str, Vec<&'static str>> {
+        let mut tools: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut current = None;
+        let mut params = false;
+        for line in include_str!("prompts/tools.md").lines() {
+            if let Some(name) = line.strip_prefix("## ") {
+                current = Some(name.trim());
+                tools.entry(name.trim()).or_default();
+                params = false;
+            } else if line.starts_with("# ") {
+                current = None;
+            } else if line.trim() == "### 参数" {
+                params = true;
+            } else if let (Some(tool), true) = (current, params) {
+                if let Some((key, _)) = line.strip_prefix("- `").and_then(|rest| rest.split_once("`：")) {
+                    tools.get_mut(tool).unwrap().push(key);
+                }
+            }
+        }
+        tools
+    }
+
+    #[test]
+    fn every_word_a_tool_gives_the_model_is_in_prompts() {
+        let code = [TOOLS, VIDEO, WEB].concat();
+        assert!(!code.contains("description: \""), "a tool's text is written in prompts/tools.md, not in the code");
+        let documented = documented_tools();
+        let defined: std::collections::HashSet<&str> = regex::Regex::new(r#"defineTool\(\{\s*name: "(\w+)""#)
+            .unwrap()
+            .captures_iter(&code)
+            .map(|found| found.get(1).unwrap().as_str())
+            .collect();
+        let listed: std::collections::HashSet<&str> = documented.keys().copied().collect();
+        assert_eq!(defined, listed, "the tools in the code and in prompts/tools.md");
+        let lookup = regex::Regex::new(r#"toolText\("(\w+)"\)\.(description|param\("([^"]+)"\))"#).unwrap();
+        let mut used: std::collections::HashSet<(String, String)> = Default::default();
+        for found in lookup.captures_iter(&code) {
+            let tool = found.get(1).unwrap().as_str();
+            let key = found.get(3).map_or("", |key| key.as_str());
+            assert!(key.is_empty() || documented[tool].contains(&key), "prompts/tools.md: {tool} has no {key}");
+            used.insert((tool.to_string(), key.to_string()));
+        }
+        for (tool, params) in &documented {
+            assert!(used.contains(&(tool.to_string(), String::new())), "{tool}'s description is never used");
+            for key in params {
+                assert!(used.contains(&(tool.to_string(), key.to_string())), "{tool}.{key} is never used");
+            }
+        }
+        let files: Vec<&str> = PROMPTS.iter().map(|(name, _)| *name).collect();
+        for found in regex::Regex::new(r#"promptText\("([^"]+)"\)"#).unwrap().captures_iter(&code) {
+            assert!(files.contains(&found.get(1).unwrap().as_str()), "{}", &found[0]);
+        }
+        assert!(include_str!("prompts/blind.md").contains("{model}"));
     }
 
     #[test]

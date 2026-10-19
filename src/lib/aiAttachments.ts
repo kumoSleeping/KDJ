@@ -1,7 +1,7 @@
 /**
  * What the listener drags or pastes into Agent Mode (docs/ai-dock.md): songs and videos from the
  * library, the search results, the computer's own files, and pictures. Each becomes a card above the field and goes
- * to the AI with the request, in a `<kdj-attachments>` block (kdj-prompt.md): where the thing
+ * to the AI with the request, in a `<kdj-attachments>` block (prompts/system.md): where the thing
  * is, how long it is, and the time the listener marked on it — the range held on the waveform
  * (Shift + drag, playRange.ts) or, for the song that is playing, where it is now.
  */

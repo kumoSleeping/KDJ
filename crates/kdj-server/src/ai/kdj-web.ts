@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { toolText } from "./kdj-prompts.ts";
 
 const MODE = process.env.KDJ_WEB_MODE ?? "access";
 const PAGE_LIMIT = 12_000;
@@ -104,9 +105,9 @@ function result(data: { [key: string]: unknown }) {
 const webSearch = defineTool({
   name: "kdj_web_search",
   label: "网页搜索",
-  description: "搜索网页，返回标题、链接和摘要。用来确认歌名、出处、版本等。",
+  description: toolText("kdj_web_search").description,
   parameters: Type.Object({
-    query: Type.String({ description: "搜索词，最多 128 字" }),
+    query: Type.String({ description: toolText("kdj_web_search").param("query") }),
     count: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
   }),
   async execute(_id, params, signal) {
@@ -119,7 +120,7 @@ const webSearch = defineTool({
 const webFetch = defineTool({
   name: "kdj_web_fetch",
   label: "读取网页",
-  description: "读取一个网页的正文（Markdown，过长会截断）。",
+  description: toolText("kdj_web_fetch").description,
   parameters: Type.Object({ url: Type.String() }),
   async execute(_id, params, signal) {
     const url = webUrl(params.url);

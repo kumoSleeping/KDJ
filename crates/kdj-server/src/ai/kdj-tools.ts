@@ -4,9 +4,10 @@
  * `{"ok":false,"error":{…}}`. `data` goes to the model as text and to KDJ's AI corner as the
  * result's `details`, where the step is drawn from it.
  *
- * The model is not told that a CLI is behind them: the descriptions name what KDJ does, and
- * what the CLI says about itself (its commands, notes and usage hints) is left out of what the
- * model gets. KDJ's own AI uses KDJ's tools; the CLI is for AIs outside KDJ.
+ * The model is not told that a CLI is behind them: the descriptions (prompts/tools.md, read
+ * through kdj-prompts.ts) name what KDJ does, and what the CLI says about itself (its commands,
+ * notes and usage hints) is left out of what the model gets. KDJ's own AI uses KDJ's tools; the
+ * CLI is for AIs outside KDJ.
  *
  * Beside them: a web search, pi-web-access's or one of KDJ's built-in ways (kdj-web.ts).
  *
@@ -14,19 +15,20 @@
  */
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { basename, relative } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { folderScore, walk } from "./kdj-folders.ts";
+import { promptText, toolText } from "./kdj-prompts.ts";
 import { blindLine, registerVideo, videoHeight } from "./kdj-video.ts";
 import { registerWeb } from "./kdj-web.ts";
 
 /** The opening of the system prompt, in place of pi's coding-assistant one. */
-const PREAMBLE = "你是 KDJ 里的 AI 助手，在用户自己的电脑上替用户完成音乐和视频的事。" +
-  "你可以使用 KDJ 工具和 bash 执行本机命令；只做用户授权的操作，遵守下文的文件与路径规则。";
+const PREAMBLE = promptText("preamble.md");
 
 const CLI = process.env.KDJ_CLI || "kdj";
 const DATA_DIR = process.env.KDJ_DATA_DIR;
+const WORKSPACE = resolve(process.env.KDJ_WORKSPACE || process.cwd());
 
 type Progress = { event: "progress"; done: number; total: number; detail?: string };
 
@@ -101,7 +103,7 @@ function flags(values: Record<string, string | number | boolean | string[] | und
 const status = defineTool({
   name: "kdj_status",
   label: "KDJ 状态",
-  description: "KDJ 的状态：各平台登录状态与登录方式、本机浏览器、账号歌单 ref、下载位置。",
+  description: toolText("kdj_status").description,
   parameters: Type.Object({}),
   async execute(_id, _params, signal) {
     // What the CLI says about itself is for AIs outside KDJ.
@@ -128,9 +130,9 @@ async function libraryRoots(signal?: AbortSignal): Promise<string[]> {
 const folders = defineTool({
   name: "kdj_folders",
   label: "找文件夹",
-  description: "在曲库根目录和它们的全部子文件夹里按名字找文件夹（不分空格、分隔符，八=8，yue=月），按相似度排序，返回绝对路径 path、相对路径和歌曲数。下到某个文件夹前先用它找到准确的 path，不要自己猜路径。query 留空则列出全部文件夹。",
+  description: toolText("kdj_folders").description,
   parameters: Type.Object({
-    query: Type.Optional(Type.String({ description: "用户说的文件夹名" })),
+    query: Type.Optional(Type.String({ description: toolText("kdj_folders").param("query") })),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
   }),
   async execute(_id, params, signal) {
@@ -196,14 +198,12 @@ function remember(data: unknown) {
 const search = defineTool({
   name: "kdj_search",
   label: "搜索",
-  description: "在 KDJ 的聚合搜索里搜索，搜索页同时显示这次搜索。text 可以是关键词、分享链接或之前给出的 ref；集合 ref 会直接展开。结果里的 ref 交给 kdj_download。" +
-    "只用来找要下载的东西（新歌、别的版本、视频素材）。曲库里已有的歌（用户拖进来的、kdj_library_list 找到的）不要搜它本身：" +
-    "歌名、歌手、专辑、出自哪部作品看 kdj_library_get，段落看它的小节线和段落，还不清楚用网页搜索。",
+  description: toolText("kdj_search").description,
   parameters: Type.Object({
-    text: Type.String({ description: "关键词、链接或 ref" }),
+    text: Type.String({ description: toolText("kdj_search").param("text") }),
     kind: Type.Optional(Type.Union([Type.Literal("song"), Type.Literal("playlist"), Type.Literal("album"), Type.Literal("artist"), Type.Literal("radio")])),
-    platforms: Type.Optional(Type.Array(Type.String(), { description: "只搜这些平台：wyy qqm soundcloud ytm youtube bilibili；默认用 KDJ 设置" })),
-    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "每个平台的结果数" })),
+    platforms: Type.Optional(Type.Array(Type.String(), { description: toolText("kdj_search").param("platforms") })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: toolText("kdj_search").param("limit") })),
   }),
   async execute(_id, params, signal) {
     const data = await kdj(["search", params.text, ...flags({ kind: params.kind, platform: params.platforms, limit: params.limit })], signal);
@@ -237,15 +237,13 @@ async function withHeights(data: unknown, asked: number, signal?: AbortSignal): 
 const download = defineTool({
   name: "kdj_download",
   label: "下载",
-  description: "立即下载 kdj_search 给出的 ref（或链接），用户能在下载栏看到，全部结束才返回路径和 track_id。" +
-    "视频默认按 1080p 下载（height 可改）；没有 1080p 时自动取最接近的较低画质（通常 720p），返回里每个视频带 height，" +
-    "画质低于要的会有 note：照常使用，在给用户的报告里写明。",
+  description: toolText("kdj_download").description,
   parameters: Type.Object({
     refs: Type.Array(Type.String(), { minItems: 1 }),
-    to: Type.Optional(Type.String({ description: "目标文件夹的绝对路径，须在曲库根目录内；默认下载文件夹" })),
+    to: Type.Optional(Type.String({ description: toolText("kdj_download").param("to") })),
     quality: Type.Optional(Type.Union([Type.Literal("flac"), Type.Literal("320"), Type.Literal("128")])),
-    as: Type.Optional(Type.Union([Type.Literal("audio"), Type.Literal("video")], { description: "视频只要音轨（audio）或保留画面（video，默认）" })),
-    height: Type.Optional(Type.Integer({ description: "视频最高画面高度，默认 1080" })),
+    as: Type.Optional(Type.Union([Type.Literal("audio"), Type.Literal("video")], { description: toolText("kdj_download").param("as") })),
+    height: Type.Optional(Type.Integer({ description: toolText("kdj_download").param("height") })),
   }),
   async execute(_id, params, signal, onUpdate) {
     const height = params.as === "audio" ? undefined : params.height ?? VIDEO_HEIGHT;
@@ -262,7 +260,7 @@ const download = defineTool({
 const login = defineTool({
   name: "kdj_login",
   label: "登录",
-  description: "登录平台。wyy/qqm/bilibili 默认扫码，二维码会在用户屏幕上打开；youtube/ytm/soundcloud 或给了 browser 时从本机浏览器导入（见 kdj_status 的 browsers）。完成才返回。",
+  description: toolText("kdj_login").description,
   parameters: Type.Object({
     platform: Type.String(),
     browser: Type.Optional(Type.String()),
@@ -276,7 +274,7 @@ const login = defineTool({
 const libraryList = defineTool({
   name: "kdj_library_list",
   label: "曲库",
-  description: "按文本、调性、BPM 区间（如 124..130）、能量或文件夹（绝对路径）筛选本地曲库，不触发分析；KDJ 的曲库页同时显示这次筛选。",
+  description: toolText("kdj_library_list").description,
   parameters: Type.Object({
     q: Type.Optional(Type.String()),
     key: Type.Optional(Type.String()),
@@ -296,12 +294,12 @@ const libraryList = defineTool({
 const libraryGet = defineTool({
   name: "kdj_library_get",
   label: "曲目",
-  description: "曲目详情（bpm、调性、小节线、段落、cue），缺分析时当场补齐（可能要几十秒）。按 id、文件路径或唯一匹配的文本取。时间单位都是秒，grid.downbeats 是小节线。",
+  description: toolText("kdj_library_get").description,
   parameters: Type.Object({
     id: Type.Optional(Type.Array(Type.Integer())),
     path: Type.Optional(Type.String()),
     q: Type.Optional(Type.String()),
-    beats: Type.Optional(Type.Boolean({ description: "同时返回每一拍的时间" })),
+    beats: Type.Optional(Type.Boolean({ description: toolText("kdj_library_get").param("beats") })),
   }),
   async execute(_id, params, signal) {
     return result(await kdj(["library", "get", ...flags({ id: params.id?.map(String), path: params.path, q: params.q, beats: params.beats })], signal));
@@ -311,9 +309,8 @@ const libraryGet = defineTool({
 const addRoot = defineTool({
   name: "kdj_library_add_root",
   label: "加入曲库",
-  description: "把本机一个已有的文件夹加进 KDJ 曲库（和设置里「添加文件夹」一样）：导入其中的歌，并把它登记为曲库根目录，之后它和它的子文件夹会出现在曲库里。" +
-    "用户说「导入到 KDJ」「加进曲库」指的就是这个。已经在某个曲库根目录里的文件夹不用加。只在用户要求时用。",
-  parameters: Type.Object({ path: Type.String({ description: "文件夹的绝对路径" }) }),
+  description: toolText("kdj_library_add_root").description,
+  parameters: Type.Object({ path: Type.String({ description: toolText("kdj_library_add_root").param("path") }) }),
   async execute(_id, params, signal) {
     const data = await kdj(["library", "add", params.path], signal);
     roots = null; // The new root is asked for again on the next folder lookup.
@@ -324,7 +321,7 @@ const addRoot = defineTool({
 const peek = defineTool({
   name: "kdj_peek",
   label: "截帧",
-  description: "看视频的画面：从曲库视频、文件路径、bilibili ref 或链接截帧（只有在线 B 站不用下载；YouTube 等其它在线视频截不了，先 kdj_download 下载再截），截下的画面直接给你看（多张时是按时间顺序拼好的一张）。at 是逗号分隔的时间（75,1:30），或用 every 秒数均匀截取。画面只用来核对内容，判断不了音画是否同步。",
+  description: toolText("kdj_peek").description,
   parameters: Type.Object({
     source: Type.String(),
     at: Type.Optional(Type.String()),
@@ -359,15 +356,33 @@ async function pictures(data: unknown) {
 const align = defineTool({
   name: "kdj_align",
   label: "对齐",
-  description: "把视频按声音对齐到参考曲（音视频合并的核心；short 版 MV/NCED 对整首歌也用它），返回几套定位方案 plans：segments 里 ref = ref_at + (video - video_in) / speed（秒）；ref_bar 是参考曲的小节号。每个 segment 原样写成工程里的一个片段（at=ref_at、in=video_in、out=video_out、speed），不拆成镜头重排、不另调速度；ref_at 是参考曲文件里的时间，歌在工程里不是从 0 秒、从头放时，at 再加上歌片段的 at − in。evidence 为 verified 的经过声学核实，auto=true 的可以直接采用；melody / partial 只是候选，auto=false 的方案照样铺好请用户试听确认，不要因为相似度低就换成自己算的位置。一个方案只管它 segments 覆盖的那一段，几套方案可以各管一段。只有部分对得上时用「裁切匹配段」（sections）。每套方案的 gaps 是参考曲里没有画面的空档（start、end、length，秒）：空档怎么填照用户在方案里选的办法（简洁剪辑按小节从同一素材里剪；完整 VJ 和音视频合并在方案里问过用户），不要拉和歌无关的素材填。matched 为 false 是对不上，告诉用户，不要硬拼。",
+  description: toolText("kdj_align").description,
   parameters: Type.Object({
-    ref: Type.String({ description: "参考曲：曲库 id 或文件路径" }),
-    video: Type.String({ description: "视频：曲库 id、文件路径、bilibili ref 或链接（YouTube 在线视频对不了，先 kdj_download）" }),
+    ref: Type.String({ description: toolText("kdj_align").param("ref") }),
+    video: Type.String({ description: toolText("kdj_align").param("video") }),
   }),
   async execute(_id, params, signal) {
+    for (const side of [params.ref, params.video]) {
+      if (workspaceFile(side)) {
+        throw new Error(`${side} 在工作目录里：对齐只用曲库里的歌和视频，或用户给的文件。每个视频对一次就是结论，` +
+          "不截取歌的片段、不变调变速后再对；plans 没覆盖到的部分就是 gaps");
+      }
+    }
     return result(withGaps(await kdj(["align", ...flags({ ref: params.ref, video: params.video })], signal)));
   },
 });
+
+/**
+ * A file the AI made in its workspace — a cut of the song, a re-pitched copy of the video. An
+ * alignment is asked once of the song and the footage as they are; probing the song piece by
+ * piece only turns up matches the whole-song plans already rule out (docs/ai-dock.md, 工具).
+ * Library ids, refs and links are never files of the workspace.
+ */
+function workspaceFile(value: string): boolean {
+  if (/^\d+$/.test(value.trim()) || /^[a-z][a-z0-9+.-]+:/i.test(value)) return false;
+  const rel = relative(WORKSPACE, resolve(WORKSPACE, value));
+  return !rel.startsWith("..") && !isAbsolute(rel);
+}
 
 /** Gaps shorter than this are seams between segments, not a stretch without picture. */
 const GAP_MIN_SECONDS = 0.5;
@@ -452,32 +467,22 @@ async function shotPictures(paths: Iterable<string>) {
 const askUser = defineTool({
   name: "ask_user",
   label: "询问",
-  description: "需要用户决定时调用：KDJ 右下角弹出一个气泡。\n" +
-    "一件事：question 加文字选项（options）或歌曲选项（songs：kdj_search 给出的 ref，显示封面、歌名、艺术家和来源），multiple 允许多选；" +
-    "给了 timeout（秒）就显示倒计时，到时没选则按 default。返回 choices（选中的选项文字或 ref）和 note。\n" +
-    "几件事一起定（比如视频方案）：写 body，用 Markdown 写清你打算怎么做（做法、会下什么、大约多大、最后交什么），短句、列表、粗体都可以；" +
-    "要用户选的地方嵌进标签，系统负责画出来：\n" +
-    "- <choice q=\"问题id\" value=\"值\">按钮上的字</choice>：一个按钮，点了就选这个值；\n" +
-    "- <media q=\"问题id\" ref=\"ref\"/>：一张素材卡片（封面、标题、来源、时长、打开链接），ref 是 kdj_search 给的或 kdj_library_list 的 library:<id>；不给 q 只展示；\n" +
-    "- <shot src=\"kdj_peek 给出的帧路径\">这张图说明什么</shot>：你看过的画面，贴给用户自己判断（字幕、水印、是不是原作）。" +
-    "方案里有视频素材时必须给：每个推荐的视频素材至少一张；能截帧的（在线 B 站、曲库视频）没贴截图，方案会被退回。\n" +
-    "同一个问题默认单选；questions 里给 {id, multiple, default} 改成多选或预选。返回 answers（每个问题选中的值）和 note。方案不给 timeout。\n" +
-    "用户还可以写一句补充（note），要照着做。用户关掉或点「暂停」则 cancelled 为 true，停下。",
+  description: toolText("ask_user").description,
   parameters: Type.Object({
-    question: Type.Optional(Type.String({ description: "一句问题；写 body 时是标题，可以不给" })),
-    body: Type.Optional(Type.String({ description: "方案：Markdown，嵌 <choice> <media> <shot>" })),
-    preview: Type.Optional(Type.String({ description: "（旧写法）写在问题上面：你打算怎么做" })),
+    question: Type.Optional(Type.String({ description: toolText("ask_user").param("question") })),
+    body: Type.Optional(Type.String({ description: toolText("ask_user").param("body") })),
+    preview: Type.Optional(Type.String({ description: toolText("ask_user").param("preview") })),
     questions: Type.Optional(Type.Array(Type.Object({
       id: Type.String(),
-      question: Type.Optional(Type.String({ description: "不写 body 时的问题" })),
-      options: Type.Optional(Type.Array(Type.String(), { maxItems: 8, description: "不写 body 时的选项" })),
+      question: Type.Optional(Type.String({ description: toolText("ask_user").param("questions[].question") })),
+      options: Type.Optional(Type.Array(Type.String(), { maxItems: 8, description: toolText("ask_user").param("questions[].options") })),
       multiple: Type.Optional(Type.Boolean()),
       default: Type.Optional(Type.Array(Type.String())),
     }), { maxItems: 8 })),
     options: Type.Optional(Type.Array(Type.String(), { maxItems: 6 })),
-    songs: Type.Optional(Type.Array(Type.String(), { maxItems: 8, description: "kdj_search 给出的 ref" })),
+    songs: Type.Optional(Type.Array(Type.String(), { maxItems: 8, description: toolText("ask_user").param("songs") })),
     multiple: Type.Optional(Type.Boolean()),
-    default: Type.Optional(Type.Array(Type.String(), { description: "选项文字或 ref" })),
+    default: Type.Optional(Type.Array(Type.String(), { description: toolText("ask_user").param("default") })),
     timeout: Type.Optional(Type.Integer({ minimum: 3, maximum: 300 })),
   }),
   async execute(id, params, signal, onUpdate, ctx) {
@@ -535,7 +540,7 @@ const askUser = defineTool({
 const tellUser = defineTool({
   name: "tell_user",
   label: "告诉用户",
-  description: "做事中途给用户发一条消息，显示在 KDJ 顶部。少用：结果和报告写在最后收尾的那段话里，不用它发。seconds 是停留秒数，不给则一直停留到用户关掉。",
+  description: toolText("tell_user").description,
   parameters: Type.Object({
     message: Type.String(),
     seconds: Type.Optional(Type.Integer({ minimum: 3, maximum: 600 })),
@@ -549,7 +554,7 @@ const tellUser = defineTool({
 const play = defineTool({
   name: "kdj_play",
   label: "播放",
-  description: "在 KDJ 里播放曲库中的一首歌：用 kdj_download 或 kdj_library_list 给出的 track_id。",
+  description: toolText("kdj_play").description,
   parameters: Type.Object({ track_id: Type.Integer() }),
   async execute(_id, params) {
     return result({ track_id: params.track_id, playing: true });
@@ -565,7 +570,7 @@ export default function (pi: ExtensionAPI) {
   registerVideo(pi, { kdj, libraryRoots });
   pi.on("before_agent_start", (event, ctx) => {
     // pi's own opening line calls the model a coding assistant that runs commands and edits code;
-    // this one has neither, and says what it is instead (kdj-prompt.md has the rest).
+    // this one has neither, and says what it is instead (prompts/system.md has the rest).
     event.systemPromptOptions.customPrompt = PREAMBLE;
     // A model that takes no pictures is told so at the start of every run, and turns video work
     // down; an empty section is left out, so a model changed in 设置 is judged afresh.

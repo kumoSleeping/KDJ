@@ -7,7 +7,7 @@ KDJ 剪视频的方式：AI 写一个 `.kdjv` 工程，放进曲库文件夹，�
 ## 格式
 
 UTF-8 JSON，扩展名 `.kdjv`，`"kdjv": 1`。字段说明写给 AI 看，在技能里：
-`crates/kdj-server/src/ai/skills/kdj-video/references/kdjv.md`（这一份是格式的唯一说明，改格式先改它）。
+`crates/kdj-server/src/ai/prompts/skills/kdj-video/references/kdjv.md`（这一份是格式的唯一说明，改格式先改它）。
 
 要点：时间都是秒；`tracks` 的第一条在最上层；`src` 可以是绝对路径或相对 `.kdjv` 所在文件夹；`out` 必填，所以曲库不打开
 任何素材就能算出时长；不认识的字段（例如 AI 记录生成片段做法的 `generated`）一律保留。

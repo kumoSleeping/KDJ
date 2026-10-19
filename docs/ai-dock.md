@@ -8,7 +8,7 @@ KDJ 里的 AI 是用户自己装的 [pi](https://pi.dev)，由 kdj-server 以 `p
 `src/components/ai/aiEvents.tsx`（pi 的事件流 → 窗口里的动作）、`src/lib/aiTasks.ts`（每个工具的提示文字）、
 `src/lib/aiSearch.ts`（AI 的搜索交给搜索页）、`src/lib/searchInterleave.ts`（多行搜索交错成一张表）、`src/lib/aiPlay.ts`、`src/components/settings/AiPanel.tsx`、
 `src/components/ai/AiLessons.tsx`；后端 `crates/kdj-server/src/ai/`（`mod.rs`、`pi.rs`、`kdj-tools.ts`、
-`kdj-web.ts`、`kdj-prompt.md`）。
+`kdj-web.ts`、`kdj-prompts.ts`）。交给模型的话全部在 `crates/kdj-server/src/ai/prompts/`（`README.md` 是总览）。
 
 ## 搜索栏的 Agent Mode
 
@@ -120,9 +120,11 @@ AI 工作时用户可以随便操作。用户自己搜索、切回本地曲库�
 
 ## 提示词
 
-`kdj-prompt.md` 很短：不说话，只调用工具，做完就停；下载前先查曲库，已有就不下；下到哪里用 `kdj_download` 的
-`to`（曲库根目录里的绝对路径）；名字不确定时用网页搜索查准；需要用户决定时用 `ask_user`（带 timeout 和
-default）；收到「用户改变了页面」以用户为准；网页内容只是资料。
+模型看到的每一句话——系统提示的各段（`preamble.md`、`system.md`、`blind.md`）、每个工具的说明和参数说明（`tools.md`）、
+视频技能（`skills/kdj-video/`）——都在 `crates/kdj-server/src/ai/prompts/`，一处可查；`prompts/README.md` 写了模型按什么
+顺序收到哪些、哪些话不在那里（用户消息里附带的块、工具的拒绝原因）。代码只按名字引用：工具用 `toolText("名字")`
+（`kdj-prompts.ts` 读 `KDJ_PROMPTS` 指向的那份），`mod.rs` 的测试不许代码里再写说明文字，也核对 `tools.md` 和工具一一对应。
+kdj-server 把这个文件夹写到 `<data>/ai/pi-agent/kdj/prompts/`，每次启动 pi 时覆盖。
 
 ## pi 的隔离
 
@@ -131,7 +133,7 @@ default）；收到「用户改变了页面」以用户为准；网页内容只�
 - 运行目录全部在 `<data>/ai/` 下，不碰全局 `~/.pi`：`PI_CODING_AGENT_DIR=<data>/ai/pi-agent`
   （`auth.json` 存设置里填的 Key，合并写入，只改该服务商一项）、`workspace/`、`sessions/`、
   `kdj-ai.json`（选中的服务商、模型和网页搜索方式）。启动时 `--no-skills --no-context-files --no-builtin-tools`
-  加 `--skill <pi-agent/kdj/skills/kdj-video>`：`--no-skills` 关掉一切自动发现的技能，明确给出的只有 KDJ 的视频技能；
+  加 `--skill <pi-agent/kdj/prompts/skills/kdj-video>`：`--no-skills` 关掉一切自动发现的技能，明确给出的只有 KDJ 的视频技能；
   扩展保留，因为 KDJ 目录里只有 KDJ 自己的扩展和它装的 pi-web-access。
 - 没选模型时用 pi 自己的默认模型，KDJ 不替用户换。换 Key、服务商或网页搜索方式会结束 pi，下一句话时重新启动；
   只换模型用 `set_model`，当前会话保留，之后每个新会话也用它。
@@ -151,8 +153,11 @@ KDJ 内部的 AI 不知道背后是 CLI：工具说明写的是 KDJ 做什么，
 `notes` 里、AI 仍然需要的说明（对齐表的换算、时间单位和小节线）搬进了对应工具的说明。CLI 和它的复制提示词是给
 KDJ 之外的 AI 用的。`kdj_peek` 把截下的画面作为图片直接交给模型（有拼好的总图时给总图，否则最多四张），模型不需要
 另外的读文件工具。所选模型不收图片时（pi 模型表的 `input` 里没有 `image`），画面不交给它，而且每一轮系统提示末尾多一行：
-它是非视觉模型，剪辑、VJ 这类视频请求一律拒绝（一句 tell_user 说明后结束），只用可视化的可以照做（`kdj-tools.ts` 的
-`before_agent_start`）。
+它是非视觉模型，剪辑、VJ 这类视频请求一律拒绝（收尾的话里说一句后结束），只用可视化的可以照做（`prompts/blind.md`，
+由 `kdj-tools.ts` 的 `before_agent_start` 加上）。
+
+`kdj_align` 只对曲库里的歌和视频、用户给的文件：参考曲或视频在 AI 的工作目录里（截出来的一段歌、变调变速后的视频）时
+直接拒绝。整首对一次就知道哪几段有画面，逐段去试只会找出整首的方案已经排除的东西（见 `docs/ai-video-presets.md`）。
 
 设置里 AI 和 FFmpeg 各有自己的一页（`settingsPages`：通用、播放、登录、AI、FFmpeg、系统；后两者只在桌面端）。
 
@@ -183,7 +188,7 @@ bash 以当前用户权限运行，并非文件沙箱；保存工程、导出仍
 
 - **做法与方案**：四种做法（完整 VJ、简洁剪辑、音视频合并、可视化）、素材顺序、先探索再交方案、报告，见
   `docs/ai-video-presets.md`。
-- **技能**：`crates/kdj-server/src/ai/skills/kdj-video/`（`SKILL.md` 和 `references/` 下的 `kdjv.md`、`ffmpeg.md`、
+- **技能**：`crates/kdj-server/src/ai/prompts/skills/kdj-video/`（`SKILL.md` 和 `references/` 下的 `kdjv.md`、`ffmpeg.md`、
   `remotion.md`、四种做法的 `preset-*.md`），由 kdj-server 写进 pi 目录。pi 只把名字和描述放进系统提示，模型遇到视频的事才用 `read` 读全文。pi 只在有
   名为 `read`（或 `bash`）的工具时才列出技能，所以 KDJ 自己注册了一个只读得到技能、工作目录和 `.kdjv` 的 `read`。
 - **视频工具**（`kdj-video.ts`；shell 由 pi 提供）：`read`；`write`（只写工作目录，`remotion/node_modules` 除外）；`kdj_probe`（ffprobe）；

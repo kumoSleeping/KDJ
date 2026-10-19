@@ -22,6 +22,7 @@ import { copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from "node:
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { promptText, toolText } from "./kdj-prompts.ts";
 
 const WORKSPACE = resolve(process.env.KDJ_WORKSPACE || process.cwd());
 const SKILLS = process.env.KDJ_SKILLS ? resolve(process.env.KDJ_SKILLS) : null;
@@ -62,9 +63,7 @@ function writable(path: string): boolean {
  */
 export function blindLine(model: { id?: unknown; input?: unknown } | undefined): string | null {
   if (!model || !Array.isArray(model.input) || model.input.includes("image")) return null;
-  return `你是非视觉模型（${String(model.id ?? "")}），看不到图片和视频画面。剪辑、拼接、做 VJ、配画面、换画面这类视频请求一律拒绝：` +
-    `用 tell_user 说一句「当前模型看不到画面，请在 设置 → AI 换一个能看图的模型」，然后结束，不搜索、不下载。` +
-    `只用 KDJ 可视化出画面的请求不需要看画面，可以照做。`;
+  return promptText("blind.md").replace("{model}", String(model.id ?? ""));
 }
 
 const text = (value: unknown) => ({
@@ -117,10 +116,10 @@ const tail = (log: string, lines = 12) => log.trim().split("\n").slice(-lines).j
 const read = defineTool({
   name: "read",
   label: "读取",
-  description: "读取文件：技能（skill）的文件、你的工作目录里的文件（相对路径以工作目录为准）、以及 .kdjv 工程。目录则列出其中的文件；图片直接给你看。",
+  description: toolText("read").description,
   parameters: Type.Object({
-    path: Type.String({ description: "文件或目录路径" }),
-    offset: Type.Optional(Type.Integer({ minimum: 0, description: "从第几个字符读起" })),
+    path: Type.String({ description: toolText("read").param("path") }),
+    offset: Type.Optional(Type.Integer({ minimum: 0, description: toolText("read").param("offset") })),
   }),
   async execute(_id, params) {
     const path = at(params.path);
@@ -146,9 +145,9 @@ const read = defineTool({
 const write = defineTool({
   name: "write",
   label: "写入",
-  description: "在你的工作目录里写一个文本文件（整份覆盖；需要的目录会自动建立）。Remotion 工程在工作目录的 remotion/ 下，组件写在 remotion/src/。",
+  description: toolText("write").description,
   parameters: Type.Object({
-    path: Type.String({ description: "工作目录里的路径（相对或绝对）" }),
+    path: Type.String({ description: toolText("write").param("path") }),
     content: Type.String(),
   }),
   async execute(_id, params) {
@@ -165,8 +164,8 @@ const write = defineTool({
 const probe = defineTool({
   name: "kdj_probe",
   label: "媒体信息",
-  description: "读出一个媒体文件的时长、画面（宽高、帧率、编码）和声音（采样率、声道）。",
-  parameters: Type.Object({ path: Type.String({ description: "媒体文件的绝对路径，或工作目录里的相对路径" }) }),
+  description: toolText("kdj_probe").description,
+  parameters: Type.Object({ path: Type.String({ description: toolText("kdj_probe").param("path") }) }),
   async execute(_id, params, signal) {
     const path = at(params.path);
     const { code, out, err } = await run(FFPROBE, ["-v", "error", "-show_format", "-show_streams", "-of", "json", path], { cwd: WORKSPACE, signal });
@@ -196,12 +195,10 @@ function outputPath(output: string): string {
 const ffmpeg = defineTool({
   name: "kdj_ffmpeg",
   label: "FFmpeg",
-  description:
-    "运行一次 FFmpeg。args 是输出文件之前的全部参数（输入、滤镜、编码），不要写输出文件，也不要写 -y；" +
-    "output 是输出文件（相对路径放进工作目录的 renders/，已存在会覆盖）。返回输出路径和时长；失败时返回 FFmpeg 的最后几行。",
+  description: toolText("kdj_ffmpeg").description,
   parameters: Type.Object({
     args: Type.Array(Type.String(), { minItems: 1 }),
-    output: Type.String({ description: "输出文件，例如 intro.mp4" }),
+    output: Type.String({ description: toolText("kdj_ffmpeg").param("output") }),
   }),
   async execute(_id, params, signal, onUpdate) {
     const output = outputPath(params.output);
@@ -230,16 +227,13 @@ const remotionCli = () => join(REMOTION, "node_modules", "@remotion", "cli", "re
 const remotion = defineTool({
   name: "kdj_remotion_render",
   label: "Remotion",
-  description:
-    "用 Remotion 渲染一段画面（标题、动态图形、转场、遮罩）。工程在工作目录的 remotion/（KDJ 装好的 remotion、@remotion/cli、" +
-    "@remotion/transitions、react），入口和组件用 write 写在 remotion/src/。entry 是相对 remotion/ 的入口文件，composition 是要渲染的 id，" +
-    "output 是输出文件（相对路径放进 renders/），props 会作为 inputProps 传入。",
+  description: toolText("kdj_remotion_render").description,
   parameters: Type.Object({
-    entry: Type.String({ description: "例如 src/index.ts" }),
+    entry: Type.String({ description: toolText("kdj_remotion_render").param("entry") }),
     composition: Type.String(),
-    output: Type.String({ description: "例如 title.mp4；要透明底就用 .mov 或 .webm，并在 args 里给编码" }),
+    output: Type.String({ description: toolText("kdj_remotion_render").param("output") }),
     props: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-    args: Type.Optional(Type.Array(Type.String(), { description: "其它 remotion render 参数，例如 --codec=prores --prores-profile=4444" })),
+    args: Type.Optional(Type.Array(Type.String(), { description: toolText("kdj_remotion_render").param("args") })),
   }),
   async execute(_id, params, signal, onUpdate) {
     if (!existsSync(remotionCli())) throw new Error("Remotion 还没有安装：请用户在 设置 → AI → 视频 里安装");
@@ -300,11 +294,7 @@ function projectTools(deps: VideoDeps) {
   const save = defineTool({
     name: "kdj_project_save",
     label: "保存工程",
-    description:
-      "把一个 .kdjv 视频工程（格式见 kdj-video 技能的 references/kdjv.md）写进曲库里的文件夹，KDJ 曲库里会出现这一行，标着「工程」。" +
-      "path 是 .kdjv 文件的绝对路径，必须在曲库根目录内一个已有的文件夹里（用 kdj_folders 找文件夹；它不建文件夹）；document 是整份工程。改已有的工程先用 read 读出整份，" +
-      "改完整份写回：原有的顶层字段一个都不能少。旧版本会先备份到工作目录的 backups/。写入前先检查：不能播放（区间越界、淡入淡出过长、素材不存在…）时不写，" +
-      "直接报错说明原因，改好再保存；通过了才写进曲库，返回时长、画布和素材。",
+    description: toolText("kdj_project_save").description,
     parameters: Type.Object({
       path: Type.String(),
       document: Type.Record(Type.String(), Type.Unknown()),
@@ -351,9 +341,8 @@ function projectTools(deps: VideoDeps) {
   const render = defineTool({
     name: "kdj_project_render",
     label: "预渲染工程",
-    description: "把一个已保存的 .kdjv 工程整片渲染进 KDJ 的缓存。播放不需要它：KDJ 点开工程就实时预览，改了工程也一样，保存后直接 kdj_play。" +
-      "只在用户要求预先渲染时用；改了工程要重新渲染。全部结束才返回（长工程可能要几分钟）。",
-    parameters: Type.Object({ path: Type.String({ description: ".kdjv 文件的绝对路径" }) }),
+    description: toolText("kdj_project_render").description,
+    parameters: Type.Object({ path: Type.String({ description: toolText("kdj_project_render").param("path") }) }),
     async execute(_id, params, signal, onUpdate) {
       // The render's percentage, for the AI corner and the drawer's step.
       return text(await deps.kdj(["project", "render", resolve(params.path)], signal, ({ done, total, detail }) => onUpdate?.({
@@ -366,12 +355,11 @@ function projectTools(deps: VideoDeps) {
   const exportProject = defineTool({
     name: "kdj_project_export",
     label: "导出工程",
-    description: "把一个已保存的 .kdjv 工程导出成一个 MP4 文件，放进曲库里的文件夹（to，绝对路径，必须在曲库根目录内；不给就放在工程旁边）。" +
-      "只在用户同意导出后用：默认先给 .kdjv 让用户预览。不覆盖已有文件，同名时换一个 name。全部结束才返回。",
+    description: toolText("kdj_project_export").description,
     parameters: Type.Object({
-      path: Type.String({ description: ".kdjv 文件的绝对路径" }),
-      to: Type.Optional(Type.String({ description: "放 MP4 的文件夹" })),
-      name: Type.Optional(Type.String({ description: "文件名（不含 .mp4），默认和工程同名" })),
+      path: Type.String({ description: toolText("kdj_project_export").param("path") }),
+      to: Type.Optional(Type.String({ description: toolText("kdj_project_export").param("to") })),
+      name: Type.Optional(Type.String({ description: toolText("kdj_project_export").param("name") })),
     }),
     async execute(_id, params, signal, onUpdate) {
       const project = resolve(params.path);
@@ -397,16 +385,13 @@ function projectTools(deps: VideoDeps) {
   const visualizer = defineTool({
     name: "kdj_visualizer_render",
     label: "可视化",
-    description: "可视化做法用：给曲库里的一首歌渲染整首的 KDJ 可视化（歌曲封面 + 频谱，默认样式，不是用户在可视化编辑器里调过的样子），30 fps。" +
-      "也可以用来填剪辑或音视频合并里的空档（在 .kdjv 里用 in/out 取需要的一段）。" +
-      "不给 to 时文件在工作目录的 renders/，用它的路径作为 .kdjv 片段的 src；给了 to（曲库里的文件夹，绝对路径）就直接导出成一个 MP4。" +
-      "宽高是偶数，320×180 至 2560×1440（竖屏最多 810×1440）。歌曲要有内嵌封面。全部结束才返回。",
+    description: toolText("kdj_visualizer_render").description,
     parameters: Type.Object({
       track_id: Type.Integer(),
       width: Type.Optional(Type.Integer({ minimum: 320, maximum: 2560 })),
       height: Type.Optional(Type.Integer({ minimum: 180, maximum: 1440 })),
-      to: Type.Optional(Type.String({ description: "直接导出时放 MP4 的曲库文件夹" })),
-      name: Type.Optional(Type.String({ description: "文件名（不含 .mp4）" })),
+      to: Type.Optional(Type.String({ description: toolText("kdj_visualizer_render").param("to") })),
+      name: Type.Optional(Type.String({ description: toolText("kdj_visualizer_render").param("name") })),
     }),
     async execute(_id, params, signal) {
       let folder = RENDERS;
