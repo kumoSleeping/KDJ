@@ -652,11 +652,12 @@
   to { opacity: 0; }
 }
 
-/* —— AI mode (docs/ai-dock.md) ——
-   A key at the end of the row turns the field into a request for the AI: the kind turns over
-   into "AI" by its own roll, the sources fold away on the large-surface clock, and the field
-   keeps its place. While the AI works, its mark is the moving bars of the work rail and the key
-   stops it. Ink only: the key that is on is full ink and heavier, like any selected control. */
+/* —— Agent Mode (docs/ai-dock.md) ——
+   A key at the end of the row turns the field into a request for the agent: the kind turns over
+   into "Agent Mode" by its own roll, the sources fold away on the large-surface clock, and the
+   field keeps its place. While the agent works, a short light runs round the field's edge and
+   the key stops it. Ink only: the key that is on is full ink and heavier, like any selected
+   control. */
 .kd-searchbar[data-has-ai] { grid-template-columns: auto minmax(0, 1fr) auto; }
 .kd-searchbar .kd-plats {
   max-width: 40rem;
@@ -668,9 +669,37 @@
   opacity: 0;
   pointer-events: none;
 }
-.kd-searchbar[data-ai] .kd-search-kind { color: var(--kd-text); font-weight: 700; cursor: default; }
-.kd-search-ai-work { display: grid; place-items: center; height: 1.5rem; color: var(--kd-text); }
-.kd-search-ai-work svg { width: 15px; height: 15px; }
+.kd-searchbar[data-ai] .kd-search-kind { min-width: max-content; color: var(--kd-text); font-weight: 700; cursor: default; }
+/* The running edge: one soft arc of ink, a hairline wide, going round the field once every few
+   seconds. Drawn on the field's own outline (a masked ring), so nothing moves or is laid out. */
+@property --kd-agent-sweep {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.kd-searchbar[data-ai-running] .kd-searchbar-copy::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: conic-gradient(from var(--kd-agent-sweep),
+    transparent 0deg,
+    color-mix(in srgb, var(--kd-text) 18%, transparent) 60deg,
+    color-mix(in srgb, var(--kd-text) 62%, transparent) 110deg,
+    transparent 150deg,
+    transparent 360deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  animation: kd-agent-sweep 2.8s linear infinite;
+}
+@keyframes kd-agent-sweep {
+  from { --kd-agent-sweep: 0deg; }
+  to { --kd-agent-sweep: 360deg; }
+}
 .kd-search-ai {
   appearance: none;
   display: grid;
@@ -703,4 +732,9 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .kd-searchbar .kd-plats { transition: none; }
+  /* Still: the edge stays lit instead of running. */
+  .kd-searchbar[data-ai-running] .kd-searchbar-copy::after {
+    animation: none;
+    background: color-mix(in srgb, var(--kd-text) 30%, transparent);
+  }
 }

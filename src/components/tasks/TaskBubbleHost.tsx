@@ -416,7 +416,8 @@ function layStack(place: TaskPlacement, entries: readonly TaskBubbleEntry[], siz
  *
  * At the top they drop from behind the bottom edge of the search row, at the top right where
  * the drawer hangs, and leave upwards; several stack downwards with the newest nearest that
- * edge, and the drawer's panel is pushed down by what the stack takes (--kd-info-drop).
+ * edge. They lie over the drawer's panel, which stays where it is: notices above, settings
+ * below.
  *
  * `sources` names the app's own activities this window reports (see taskSources.ts).
  */
@@ -520,25 +521,7 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
     if (lift > 0) document.documentElement.style.setProperty("--kd-info-lift", `${lift}px`);
     else document.documentElement.style.removeProperty("--kd-info-lift");
   }, [lift]);
-  // The top stack has the drawer's own place, so every bubble that is staying there pushes
-  // the panel down, kept up or not, and the panel comes back as the last one starts to leave
-  // (see --kd-info-drop in Drawer.css). One value per change of the stack, like the lift.
-  // Pushed, the panel moves with the bubble that arrives, on the arriving clock. Released, it
-  // follows the bubble that leaves on the leaving clock (--kd-info-drop-clock), so the two go
-  // up together instead of the panel running in under a bubble that has hardly set off.
-  const drop = Math.round(top.reach);
-  const dropWas = useRef(0);
-  useEffect(() => {
-    const style = document.documentElement.style;
-    if (drop > 0) style.setProperty("--kd-info-drop", `${drop}px`);
-    else style.removeProperty("--kd-info-drop");
-    if (drop < dropWas.current) style.setProperty("--kd-info-drop-clock", "var(--kd-motion-out) var(--kd-ease-in)");
-    else style.removeProperty("--kd-info-drop-clock");
-    dropWas.current = drop;
-  }, [drop]);
-  useEffect(() => () => {
-    for (const name of ["--kd-info-lift", "--kd-info-drop", "--kd-info-drop-clock"]) document.documentElement.style.removeProperty(name);
-  }, []);
+  useEffect(() => () => { document.documentElement.style.removeProperty("--kd-info-lift"); }, []);
 
   if (entries.length === 0) return null;
   // The stay waits while the pointer or the focus is in a stack: that stack's, not the other's.

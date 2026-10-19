@@ -4,14 +4,14 @@
  * `{"ok":false,"error":{…}}`. `data` goes to the model as text and to KDJ's AI corner as the
  * result's `details`, where the step is drawn from it.
  *
- * Beside them: a browser that only reads pages, to look things up (kdj-browser.ts).
+ * Beside them: a web search, pi-web-access's or one of KDJ's built-in ways (kdj-web.ts).
  *
  * Written into KDJ's own pi directory by kdj-server; edits here, not there.
  */
 import { spawn } from "node:child_process";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import * as browser from "./kdj-browser.ts";
+import { registerWeb } from "./kdj-web.ts";
 
 const CLI = process.env.KDJ_CLI || "kdj";
 const DATA_DIR = process.env.KDJ_DATA_DIR;
@@ -239,41 +239,9 @@ const play = defineTool({
   },
 });
 
-const browserProbe = defineTool({
-  name: "browser_probe",
-  label: "探测网络",
-  description: "用本机浏览器探测网络：能否访问 Google、必应。上网查资料前先调用一次。",
-  parameters: Type.Object({}),
-  async execute(_id, _params, signal) {
-    return result(await browser.probe(signal));
-  },
-});
-
-const browserSearch = defineTool({
-  name: "browser_search",
-  label: "网页搜索",
-  description: "用本机浏览器搜索网页，返回标题、链接和摘要。engine 按 browser_probe 的结果选：能访问 Google 用 google，否则用 bing（国际版）。",
-  parameters: Type.Object({
-    query: Type.String(),
-    engine: Type.Optional(Type.Union([Type.Literal("google"), Type.Literal("bing")])),
-  }),
-  async execute(_id, params, signal) {
-    return result(await browser.search(params.query, params.engine, signal));
-  },
-});
-
-const browserOpen = defineTool({
-  name: "browser_open",
-  label: "打开网页",
-  description: "用本机浏览器打开网页，返回标题、正文（截断）和页面上的链接。",
-  parameters: Type.Object({ url: Type.String() }),
-  async execute(_id, params, signal) {
-    return result(await browser.open(params.url, signal));
-  },
-});
-
 export default function (pi: ExtensionAPI) {
-  for (const tool of [status, search, download, login, libraryList, libraryGet, peek, align, play, askUser, browserProbe, browserSearch, browserOpen]) {
+  for (const tool of [status, search, download, login, libraryList, libraryGet, peek, align, play, askUser]) {
     pi.registerTool(tool);
   }
+  registerWeb(pi);
 }

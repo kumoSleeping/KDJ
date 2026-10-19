@@ -17,6 +17,7 @@ const KINDS: readonly SearchKind[] = ["song", "playlist", "album", "artist", "ra
 const PLATFORMS: readonly Platform[] = ["wyy", "qqm", "soundcloud", "ytm", "youtube", "bilibili"];
 
 export function requestAiSearch(args: Record<string, unknown>): void {
+  // Several keywords arrive one per line: the pane searches them together (searchInterleave.ts).
   const query = typeof args.text === "string" ? args.text.trim() : "";
   if (!query) return;
   const kind = KINDS.find(item => item === args.kind);

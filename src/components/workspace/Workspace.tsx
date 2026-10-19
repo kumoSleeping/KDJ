@@ -171,6 +171,7 @@ import {
 } from "../download/SearchBar";
 import { SearchTipsPanel } from "../download/SearchTipsPanel";
 import { AI_SEARCH_EVENT, type AiSearchDetail } from "../../lib/aiSearch";
+import { interleaveSearches } from "../../lib/searchInterleave";
 import { useAiStore } from "../../stores/aiStore";
 import { shownTipsPages, useTipsPage, type TipsPage } from "../../lib/tipsPages";
 import { useTipsNudge } from "../../lib/tipsNudge";
@@ -1073,7 +1074,8 @@ export function Workspace() {
       // The list on screen stayed there while this search ran; its answer replaces it as a new
       // list, from its top. Reset its controls here, not while the retained list is still on
       // screen: clearing collapsedItems early would unfold old packages during the request.
-      setItems(response.items);
+      // Several keyword lines are one list, interleaved (searchInterleave.ts).
+      setItems(interleaveSearches(response.items));
       setChosen(new Set());
       setExpandedGroups(new Set());
       setCollapsedItems(new Set());

@@ -24,7 +24,20 @@ export interface AiStatus {
   model: string | null;
   /** pi is running. */
   running: boolean;
+  web: {
+    mode: AiWebMode;
+    /** pi-web-access is installed in KDJ's pi directory. */
+    access: boolean;
+    installing: boolean;
+    /** Why the last install failed. */
+    error: string;
+    /** A Jina key is kept. */
+    jina: boolean;
+  };
 }
+
+/** How the AI searches the web: pi-web-access, or one of KDJ's own ways. */
+export type AiWebMode = "access" | "deepseek" | "deepseek-jina" | "jina";
 
 export interface AiModel {
   provider: string;

@@ -12,7 +12,6 @@ import {
 import { LoaderCircle, Sparkles } from "lucide-react";
 import type { Platform, SearchKind, TrackSummary } from "../../types";
 import { aiOffered, useAiStore } from "../../stores/aiStore";
-import { AnalysisGlyph } from "../chrome/ActivityRail";
 import { useSearchPresets } from "./useSearchPresets";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import {
@@ -445,14 +444,12 @@ export function SearchBar({
               className="kd-search-kind"
               data-kind={aiMode ? "ai" : searchKind}
               disabled={aiMode}
-              aria-label={aiMode ? (aiRunning ? "AI 工作中" : "AI") : `搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              aria-label={aiMode ? (aiRunning ? "Agent Mode，工作中" : "Agent Mode") : `搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
               title={aiMode ? undefined : `${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
               onClick={() => onSearchKindChange(nextSearchKind)}
             >
-              {/* The kind turns over into AI, and the AI's mark moves while it works. */}
-              {aiMode && aiRunning
-                ? <span className="kd-search-ai-work" aria-hidden="true"><AnalysisGlyph /></span>
-                : <RollText text={aiMode ? "AI" : SEARCH_KIND_LABEL[searchKind]} className="kd-search-kind-text" />}
+              {/* The kind turns over into Agent Mode; while the agent works the field's edge runs. */}
+              <RollText text={aiMode ? "Agent Mode" : SEARCH_KIND_LABEL[searchKind]} className="kd-search-kind-text" />
             </button>
           )}
           <SearchPlatforms

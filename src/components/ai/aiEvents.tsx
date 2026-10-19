@@ -34,6 +34,30 @@ type Fields = Record<string, unknown>;
 const fields = (value: unknown): Fields => (value && typeof value === "object" && !Array.isArray(value) ? value as Fields : {});
 const str = (value: unknown): string => (typeof value === "string" ? value : "");
 
+/**
+ * The searches the AI starts together (one turn calls several at once) are shown as one: their
+ * keywords, one per line, run as a single search, whose answers the pane interleaves.
+ */
+const SEARCH_GATHER_MS = 200;
+let gathered: Fields[] = [];
+let gatherTimer: ReturnType<typeof setTimeout> | null = null;
+function gatherSearch(args: Fields) {
+  gathered.push(args);
+  if (gatherTimer) return;
+  gatherTimer = setTimeout(() => {
+    const searches = gathered;
+    gathered = [];
+    gatherTimer = null;
+    const texts = [...new Set(searches.map(search => str(search.text).trim()).filter(Boolean))];
+    const same = (key: string) => searches.every(search => JSON.stringify(search[key] ?? null) === JSON.stringify(searches[0][key] ?? null));
+    requestAiSearch({
+      text: texts.join("\n"),
+      kind: same("kind") ? searches[0].kind : undefined,
+      platforms: same("platforms") ? searches[0].platforms : undefined,
+    });
+  }, SEARCH_GATHER_MS);
+}
+
 /** The calls under way: their tool and arguments, for the line their end writes. */
 const calls = new Map<string, { tool: string; args: Fields }>();
 /** The arguments of the `ask_user` call under way: the dialog it opens carries no default. */
@@ -130,7 +154,7 @@ export function handlePiEvent(event: PiEvent) {
       const id = str(event.toolCallId), tool = str(event.toolName), args = fields(event.args);
       if (!id) return;
       calls.set(id, { tool, args });
-      if (tool === "kdj_search") requestAiSearch(args);
+      if (tool === "kdj_search") gatherSearch(args);
       if (tool === "kdj_play") {
         const trackId = Number(args.track_id);
         void import("../../lib/aiPlay").then(module => module.playLibraryTrack(trackId));

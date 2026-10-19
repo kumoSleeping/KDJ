@@ -1331,6 +1331,9 @@ export const aiApi = {
   reset: () => request<void>("/ai/reset", { method: "POST" }, null),
   answer: (body: { id: string; value?: string; confirmed?: boolean; cancelled?: boolean }) =>
     request<void>("/ai/answer", { method: "POST", body: JSON.stringify(body) }, null),
+  installAccess: () => request<import("../types/ai").AiStatus>("/ai/web/install", { method: "POST" }, null),
+  setWeb: (body: { mode?: import("../types/ai").AiWebMode; jina_key?: string }) =>
+    request<import("../types/ai").AiStatus>("/ai/web", { method: "PUT", body: JSON.stringify(body) }, null),
   globalLogins: () => request<{ path?: string; logins: import("../types/ai").AiGlobalLogin[] }>("/ai/global", {}, null),
   importLogin: (provider: string) =>
     request<import("../types/ai").AiStatus>("/ai/import", { method: "POST", body: JSON.stringify({ provider }) }, null),

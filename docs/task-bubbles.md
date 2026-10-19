@@ -24,8 +24,10 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
 - **The place.** `placement` is `bottom` (the default) or `top`. It is chosen by where the
   listener is looking when the task reports, not by what the task is: `top` is for the answer to
   something pressed or dropped in the top row (the drawer's entries, the list's work rail), which
-  would not be seen at the other end of the window. What an activity reports by itself — a
-  download, an export, an import, the song, the player's messages — stays at the bottom.
+  would not be seen at the other end of the window. Downloads, which the search row and the
+  AI (`docs/ai-dock.md`) start, and the AI's own steps report at the top too. What any other
+  activity reports by itself — an export, an import, the song, the player's messages — stays
+  at the bottom.
   - A top bubble drops from behind the bottom edge of the search row to a place at the top right,
     under the drawer's entries, and leaves upwards behind the same edge. Its key points up.
     Everything else — surface, sizes, tones, ring, hold, Esc, keys, the caption bar of a theme
@@ -166,14 +168,9 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   the new one, and it is registered as a surface of the song.
 - **The drawer.** `--kd-info-lift` is published only for a bottom bubble that is kept up, so the
   drawer over the list ends above it; a bubble that leaves by itself may cover the drawer's
-  bottom for its stay. The top stack has the drawer's own place, so there every bubble that is
-  staying counts: `--kd-info-drop` is how far the stack reaches down from the search row (its
-  gap, the bubbles and the gap after the last), and the panel is pushed down by that — a
-  `translate`, nothing laid out or measured again (`docs/drawer-schema.md`) — and comes back as
-  the last bubble starts to leave. The panel goes down with the arriving bubble on the arriving
-  clock and follows the leaving one up on the leaving clock (`--kd-info-drop-clock`, set with
-  the drop), so the two move as one. These are written once per change of a stack, never per
-  frame.
+  bottom for its stay. The top stack lies over the drawer's panel, which stays where it is:
+  notices are the upper layer, settings and the other apps the lower one, and a top bubble is
+  its own width (24rem at most), not the panel's.
 - **The bar put away.** The player bar can slide down out of the window
   (`src/lib/playerBarAway.ts`). The stack then stands on the window's bottom edge; bubbles that
   are up when the slide starts ride the bar's top edge while it slides. A bubble that leaves
@@ -243,7 +240,7 @@ Name the source in the `sources` of the window's `<TaskBubbleHost>`.
 | Task | Bubble | Place | Where |
 | --- | --- | --- | --- |
 | A song starts (not pause/resume) | `now-playing`: cover, title, artist (two lines, no figures); 歌词, 小窗, 歌曲色彩; the mini transport while the bar is away; the song's colours as its backdrop while 歌曲色彩 is on | bottom, the base | `NowPlayingTask.tsx` |
-| Downloads started / progress / ended / failed | `downloads`: one bubble per run | bottom | source `downloads` |
+| Downloads started / progress / ended / failed | `downloads`: one bubble per run | top | source `downloads` |
 | Exports added / started / ended / failed (mixing and visualizer) | `exports` | bottom | source `exports` |
 | A folder import ended or failed | `import` | bottom | source `imports` |
 | The player's own message (playback, transition and deck errors, "下一首已替换为…") | `player-notice` | bottom | `PlayerBar.tsx` `setNotice` |

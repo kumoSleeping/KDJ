@@ -54,6 +54,8 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/ai/answer", post(crate::ai::answer))
         .route("/api/ai/global", get(crate::ai::global_logins))
         .route("/api/ai/import", post(crate::ai::import_login))
+        .route("/api/ai/web", axum::routing::put(crate::ai::set_web))
+        .route("/api/ai/web/install", post(crate::ai::install_access))
         .route("/api/cli/status", get(crate::cli_api::status))
         .route("/api/cli/search", post(crate::cli_api::search))
         .route("/api/cli/download", post(crate::cli_api::download))

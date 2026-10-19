@@ -22,9 +22,11 @@ test("a failure says so in amber with its first line, even for a silent tool", (
   assert.equal(end?.detail, "引用不存在或已过期：wyy:1");
 });
 
-test("the network probe tells which engine is used", () => {
-  assert.equal(noticeOnEnd("browser_probe", {}, { google: false, bing: true }, false, "")?.detail, "使用必应");
-  assert.equal(noticeOnEnd("browser_probe", {}, { google: true, bing: true }, false, "")?.detail, "Google 可用");
+test("web searches say what they look for, whichever tool runs them", () => {
+  assert.equal(noticeOnStart("kdj_web_search", { query: "ギリギリ愛" })?.title, "网页搜索“ギリギリ愛”");
+  assert.equal(noticeOnStart("web_search", { queries: ["a", "b"] })?.title, "网页搜索“a、b”");
+  assert.equal(noticeOnEnd("kdj_web_search", {}, { engine: "deepseek", results: [{}, {}] }, false, "")?.detail, "DeepSeek · 2 条");
+  assert.equal(noticeOnStart("fetch_content", { urls: ["https://www.example.com/a", "https://b.org"] })?.title, "读取 example.com 等 2 个网页");
 });
 
 test("tool results read only their text blocks", () => {

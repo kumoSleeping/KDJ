@@ -61,12 +61,22 @@ function running(tool: string, args: Fields): Omit<AiNotice, "tone"> {
       return { icon: "video", title: `截帧 ${sourceName(args.source)}` };
     case "kdj_align":
       return { icon: "video", title: `对齐 ${sourceName(args.video)}` };
-    case "browser_probe":
-      return { icon: "web", title: "探测网络" };
-    case "browser_search":
-      return { icon: "web", title: `网页搜索“${str(args.query)}”` };
-    case "browser_open":
-      return { icon: "web", title: `打开 ${hostOf(str(args.url))}` };
+    // KDJ's own web tools (kdj-web.ts) and pi-web-access's.
+    case "kdj_web_search":
+    case "web_search": {
+      const queries = Array.isArray(args.queries) ? args.queries.map(str).filter(Boolean) : [];
+      return { icon: "web", title: `网页搜索“${str(args.query) || queries.join("、")}”` };
+    }
+    case "kdj_web_fetch":
+    case "fetch_content": {
+      const urls = Array.isArray(args.urls) ? args.urls.map(str).filter(Boolean) : [];
+      const first = str(args.url) || urls[0] || "";
+      return { icon: "web", title: `读取 ${hostOf(first)}${urls.length > 1 ? ` 等 ${urls.length} 个网页` : ""}` };
+    }
+    case "get_search_content":
+      return { icon: "web", title: "读取搜索结果" };
+    case "source_check":
+      return { icon: "web", title: "核对来源" };
     default:
       return { icon: "tool", title: tool };
   }
@@ -87,13 +97,11 @@ function outcome(tool: string, details: Fields): string | undefined {
       return `${count(details.frames)} 张`;
     case "kdj_align":
       return details.matched === true ? `${count(details.plans)} 个方案` : "没有对上";
-    case "browser_probe":
-      return details.google === true ? "Google 可用" : details.bing === true ? "使用必应" : "Google 和必应都无法访问";
-    case "browser_search": {
-      const engine = details.engine === "google" ? "Google" : details.engine === "bing" ? "必应" : "";
+    case "kdj_web_search": {
+      const engine = details.engine === "deepseek" ? "DeepSeek" : details.engine === "jina" ? "Jina" : "";
       return [engine, `${count(details.results)} 条`].filter(Boolean).join(" · ");
     }
-    case "browser_open":
+    case "kdj_web_fetch":
       return str(details.title) || undefined;
     default:
       return undefined;

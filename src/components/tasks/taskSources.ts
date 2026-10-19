@@ -31,7 +31,8 @@ function watchDownloads(): () => void {
   const since = Date.now() / 1000 - 3;
   const states = new Map<string, string>();
   const reporter = createBatchReporter({
-    id: "downloads", kind: "download", unit: "首",
+    // Downloads report at the top, with every other notice the search row's work brings.
+    id: "downloads", kind: "download", unit: "首", placement: "top",
     started: "开始下载", running: "下载中", finished: "下载完成", failed: "下载失败",
     listed: () => tasksShow("downloads"),
     open: finished => openTasks(finished ? "history" : "downloads"),

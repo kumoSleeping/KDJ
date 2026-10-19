@@ -4,9 +4,10 @@
 //! pi runs in KDJ's own directory, never the user's global one: `PI_CODING_AGENT_DIR` is
 //! `<data>/ai/pi-agent` (its `auth.json` holds the key the listener gave in 设置 → AI), the work
 //! directory is `<data>/ai/workspace`, sessions go to `<data>/ai/sessions`, and the global
-//! extensions, skills and context files are left out. The only tools are KDJ's own — the `kdj`
-//! CLI's commands and a browser that only reads pages (kdj-tools.ts, kdj-browser.ts) — under KDJ's
-//! prompt (kdj-prompt.md).
+//! skills and context files are left out. The tools are KDJ's own — the `kdj` CLI's commands
+//! (kdj-tools.ts) — and a web search: pi-web-access, which KDJ installs into its own directory on
+//! request and locks down (web-search.json), or one of KDJ's built-in ways (kdj-web.ts: DeepSeek's
+//! Search / Fetch, DeepSeek with Jina Reader, Jina with a key). The prompt is KDJ's (kdj-prompt.md).
 
 mod pi;
 
@@ -31,7 +32,7 @@ use crate::state::AppState;
 pub use pi::{PiState, PiStatus};
 
 const TOOLS: &str = include_str!("kdj-tools.ts");
-const BROWSER: &str = include_str!("kdj-browser.ts");
+const WEB: &str = include_str!("kdj-web.ts");
 const PROMPT: &str = include_str!("kdj-prompt.md");
 /// How long a command waits for pi's response. `prompt` answers when the run is accepted, not
 /// when it ends.
@@ -39,6 +40,36 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a detected pi stays detected before `status` looks again.
 const STATUS_TTL: Duration = Duration::from_secs(60);
 const STDERR_LINES: usize = 20;
+/// How long installing pi-web-access may take.
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// pi-web-access, the default web search: installed by pi into KDJ's own directory.
+const ACCESS_PACKAGE: &str = "npm:pi-web-access";
+/// Its tools, hidden while another way of searching is chosen.
+const ACCESS_TOOLS: &str = "web_search,fetch_content,get_search_content,source_check";
+/// The ways of searching the web: pi-web-access, or KDJ's own (kdj-web.ts).
+const WEB_MODES: &[&str] = &["access", "deepseek", "deepseek-jina", "jina"];
+
+/// pi-web-access with everything but searching and reading pages turned off: no browser cookies,
+/// no video, GitHub clones, PDFs or commands, and no requests to this machine.
+const ACCESS_CONFIG: &str = r#"{
+  "allowBrowserCookies": false,
+  "video": { "enabled": false },
+  "youtube": { "enabled": false },
+  "githubClone": { "enabled": false },
+  "githubPrIssue": { "enabled": false },
+  "pdf": { "enabled": false },
+  "workflow": "none",
+  "fetchRouting": { "allowRemoteHostedProviders": true },
+  "fetchContent": { "domainPolicy": { "deny": ["localhost", "127.0.0.1", "0.0.0.0", "::1"] } },
+  "commands": {
+    "websearch": { "enabled": false },
+    "curator": { "enabled": false },
+    "search": { "enabled": false },
+    "google-account": { "enabled": false }
+  }
+}
+"#;
 
 /// The providers offered in 设置 → AI: pi's own ids (pi-ai `env-api-keys.ts`), those usable from
 /// China first.
@@ -86,8 +117,8 @@ impl Paths {
     fn tools(&self) -> PathBuf {
         self.agent.join("kdj").join("kdj-tools.ts")
     }
-    fn browser(&self) -> PathBuf {
-        self.agent.join("kdj").join("kdj-browser.ts")
+    fn web(&self) -> PathBuf {
+        self.agent.join("kdj").join("kdj-web.ts")
     }
     fn prompt(&self) -> PathBuf {
         self.agent.join("kdj").join("kdj-prompt.md")
@@ -206,6 +237,9 @@ struct AiBridge {
     paths: Paths,
     process: tokio::sync::Mutex<Option<Arc<PiProcess>>>,
     detected: Mutex<Option<(Instant, PiStatus)>>,
+    /// pi-web-access is being installed; and why the last try failed.
+    installing: AtomicBool,
+    install_error: Mutex<String>,
 }
 
 fn bridge(state: &AppState) -> &'static AiBridge {
@@ -214,6 +248,8 @@ fn bridge(state: &AppState) -> &'static AiBridge {
         paths: Paths::new(&state.config.data_dir),
         process: tokio::sync::Mutex::new(None),
         detected: Mutex::new(None),
+        installing: AtomicBool::new(false),
+        install_error: Mutex::new(String::new()),
     })
 }
 
@@ -240,6 +276,28 @@ impl AiBridge {
             }
         })?;
         Ok(())
+    }
+
+    /// How the AI searches the web (`web` in kdj-ai.json); pi-web-access when nothing was chosen.
+    fn web_mode(&self) -> String {
+        read_object(&self.paths.config)
+            .ok()
+            .and_then(|config| config.get("web").and_then(Value::as_str).map(str::to_string))
+            .filter(|mode| WEB_MODES.contains(&mode.as_str()))
+            .unwrap_or_else(|| "access".into())
+    }
+
+    /// pi-web-access is in KDJ's pi directory: pi lists it in that directory's settings.json.
+    fn access_installed(&self) -> bool {
+        read_object(&self.paths.agent.join("settings.json"))
+            .ok()
+            .and_then(|settings| settings.get("packages").cloned())
+            .and_then(|packages| packages.as_array().cloned())
+            .is_some_and(|packages| {
+                packages.iter().any(|package| {
+                    package.as_str().or_else(|| package["source"].as_str()).is_some_and(|source| source.contains("pi-web-access"))
+                })
+            })
     }
 
     fn configured(&self) -> Vec<String> {
@@ -272,12 +330,21 @@ impl AiBridge {
         for id in configured.iter().filter(|id| !PROVIDERS.iter().any(|(known, _)| known == id)) {
             providers.push(json!({ "id": id, "label": id, "configured": true }));
         }
+        // Jina's key lives beside the providers' in auth.json but is not one of them.
+        providers.retain(|provider| provider["id"] != "jina");
         json!({
             "pi": pi,
             "providers": providers,
             "provider": choice.provider,
             "model": choice.model,
             "running": running,
+            "web": {
+                "mode": self.web_mode(),
+                "access": self.access_installed(),
+                "installing": self.installing.load(Ordering::Relaxed),
+                "error": self.install_error.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+                "jina": configured.iter().any(|id| id == "jina"),
+            },
         })
     }
 
@@ -291,7 +358,6 @@ impl AiBridge {
         *slot = Some(process.clone());
         drop(slot);
         state.hub.publish("ai.status", &self.status(false).await);
-        self.settle_model(&process).await;
         Ok(process)
     }
 
@@ -305,8 +371,13 @@ impl AiBridge {
             std::fs::create_dir_all(dir).map_err(anyhow::Error::from)?;
         }
         write_if_changed(&paths.tools(), TOOLS)?;
-        write_if_changed(&paths.browser(), BROWSER)?;
+        write_if_changed(&paths.web(), WEB)?;
         write_if_changed(&paths.prompt(), PROMPT)?;
+        write_if_changed(&paths.agent.join("web-search.json"), ACCESS_CONFIG)?;
+        // The browser earlier versions drove is gone, with what it left behind.
+        let _ = std::fs::remove_file(paths.agent.join("kdj").join("kdj-browser.ts"));
+        let _ = std::fs::remove_dir_all(paths.data.join("ai").join("browser-profile"));
+        let web_mode = self.web_mode();
 
         let choice = self.choice();
         let cli = std::env::var_os("KDJ_CLI_PATH")
@@ -315,7 +386,8 @@ impl AiBridge {
             .unwrap_or_else(|| PathBuf::from("kdj"));
         let mut command = pi::command(&path);
         command
-            .args(["--mode", "rpc", "--no-extensions", "--no-skills", "--no-context-files", "--no-builtin-tools"])
+            // Extensions stay on: the only package in KDJ's directory is the one KDJ installs.
+            .args(["--mode", "rpc", "--no-skills", "--no-context-files", "--no-builtin-tools"])
             .arg("--session-dir")
             .arg(&paths.sessions)
             .arg("--extension")
@@ -325,6 +397,9 @@ impl AiBridge {
         if let (Some(provider), Some(model)) = (&choice.provider, &choice.model) {
             command.args(["--provider", provider.as_str(), "--model", model.as_str()]);
         }
+        if web_mode != "access" && self.access_installed() {
+            command.args(["--exclude-tools", ACCESS_TOOLS]);
+        }
         command
             .current_dir(&paths.workspace)
             .env("PI_CODING_AGENT_DIR", &paths.agent)
@@ -332,6 +407,7 @@ impl AiBridge {
             .env("PI_TELEMETRY", "0")
             .env("KDJ_CLI", &cli)
             .env("KDJ_DATA_DIR", &paths.data)
+            .env("KDJ_WEB_MODE", &web_mode)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -412,27 +488,6 @@ impl AiBridge {
             state.hub.publish("ai.status", &bridge.status(false).await);
         });
         Ok(process)
-    }
-
-    /// With a provider chosen and no model yet, the first model pi offers for it is taken and
-    /// remembered.
-    async fn settle_model(&self, process: &PiProcess) {
-        let choice = self.choice();
-        let (Some(provider), None) = (choice.provider.clone(), choice.model.as_ref()) else { return };
-        let Ok(data) = process.send(json!({ "type": "get_available_models" })).await else { return };
-        let Some(model) = data["models"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|model| model["provider"] == provider.as_str())
-            .and_then(|model| model["id"].as_str())
-            .map(str::to_string)
-        else {
-            return;
-        };
-        if process.send(json!({ "type": "set_model", "provider": provider, "modelId": model })).await.is_ok() {
-            let _ = self.save_choice(&Choice { provider: Some(provider), model: Some(model) });
-        }
     }
 
     async fn stop(&self) {
@@ -589,6 +644,79 @@ pub async fn answer(State(state): State<Arc<AppState>>, Json(body): Json<AnswerB
     Ok(Json(json!({})))
 }
 
+// ---------------------------------------------------------------- the web search
+
+/// Installs pi-web-access into KDJ's pi directory, in the background; `ai.status` tells when it
+/// is done or why it failed.
+pub async fn install_access(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
+    let bridge = bridge(&state);
+    let pi = bridge.pi(false).await;
+    let Some(path) = pi.path.filter(|_| pi.state == PiState::Ready).map(PathBuf::from) else {
+        return Err(ApiError::bad_request("请先安装 pi"));
+    };
+    if bridge.installing.swap(true, Ordering::Relaxed) {
+        return Ok(Json(bridge.status(false).await));
+    }
+    *bridge.install_error.lock().unwrap_or_else(|e| e.into_inner()) = String::new();
+    std::fs::create_dir_all(&bridge.paths.agent).map_err(anyhow::Error::from)?;
+    let state = state.clone();
+    tokio::spawn(async move {
+        let mut command = pi::command(&path);
+        command
+            .args(["install", ACCESS_PACKAGE])
+            .current_dir(&bridge.paths.agent)
+            .env("PI_CODING_AGENT_DIR", &bridge.paths.agent)
+            .env("PI_SKIP_VERSION_CHECK", "1")
+            .env("PI_TELEMETRY", "0")
+            .stdin(Stdio::null());
+        let error = match tokio::time::timeout(INSTALL_TIMEOUT, command.output()).await {
+            Ok(Ok(output)) if output.status.success() && bridge.access_installed() => String::new(),
+            Ok(Ok(output)) => {
+                let text = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+                text.trim().lines().last().unwrap_or("安装失败").to_string()
+            }
+            Ok(Err(error)) => error.to_string(),
+            Err(_) => "安装超时".to_string(),
+        };
+        *bridge.install_error.lock().unwrap_or_else(|e| e.into_inner()) = error;
+        bridge.installing.store(false, Ordering::Relaxed);
+        // pi picks the package up when it starts again.
+        bridge.stop().await;
+        state.hub.publish("ai.status", &bridge.status(false).await);
+    });
+    Ok(Json(bridge.status(false).await))
+}
+
+#[derive(Deserialize)]
+pub struct WebBody {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    jina_key: Option<String>,
+}
+
+/// Chooses how the AI searches the web, and keeps Jina's key.
+pub async fn set_web(State(state): State<Arc<AppState>>, Json(body): Json<WebBody>) -> ApiResult<Json<Value>> {
+    let bridge = bridge(&state);
+    if let Some(mode) = &body.mode {
+        if !WEB_MODES.contains(&mode.as_str()) {
+            return Err(ApiError::bad_request(format!("未知的搜索方式：{mode}")));
+        }
+        update_object(&bridge.paths.config, |config| {
+            config.insert("web".into(), json!(mode));
+        })?;
+    }
+    if let Some(key) = body.jina_key.as_deref().map(str::trim).filter(|key| !key.is_empty()) {
+        update_object(&bridge.paths.auth(), |auth| {
+            auth.insert("jina".into(), json!({ "type": "api_key", "key": key }));
+        })?;
+    }
+    bridge.stop().await;
+    let status = bridge.status(false).await;
+    state.hub.publish("ai.status", &status);
+    Ok(Json(status))
+}
+
 // ---------------------------------------------------------------- the global pi's logins
 
 /// The user's own pi directory: `PI_CODING_AGENT_DIR` when KDJ was started with one, else
@@ -677,6 +805,40 @@ mod tests {
         .unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"provider\":\"deepseek\",\"extra\":true}");
+    }
+
+    fn bridge_in(dir: &Path) -> AiBridge {
+        AiBridge {
+            paths: Paths::new(dir),
+            process: tokio::sync::Mutex::new(None),
+            detected: Mutex::new(None),
+            installing: AtomicBool::new(false),
+            install_error: Mutex::new(String::new()),
+        }
+    }
+
+    #[test]
+    fn pi_web_access_is_found_in_kdjs_own_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = bridge_in(dir.path());
+        assert!(!bridge.access_installed());
+        std::fs::create_dir_all(&bridge.paths.agent).unwrap();
+        std::fs::write(bridge.paths.agent.join("settings.json"), r#"{"packages":["npm:pi-web-access"]}"#).unwrap();
+        assert!(bridge.access_installed());
+        std::fs::write(bridge.paths.agent.join("settings.json"), r#"{"packages":[{"source":"npm:pi-web-access@0.42.0"}]}"#).unwrap();
+        assert!(bridge.access_installed());
+    }
+
+    #[test]
+    fn the_web_search_is_pi_web_access_unless_another_is_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = bridge_in(dir.path());
+        assert_eq!(bridge.web_mode(), "access");
+        std::fs::create_dir_all(dir.path().join("ai")).unwrap();
+        std::fs::write(&bridge.paths.config, r#"{"web":"deepseek-jina"}"#).unwrap();
+        assert_eq!(bridge.web_mode(), "deepseek-jina");
+        std::fs::write(&bridge.paths.config, r#"{"web":"browser"}"#).unwrap();
+        assert_eq!(bridge.web_mode(), "access");
     }
 
     #[test]
