@@ -25,6 +25,7 @@ use crate::provider::{
     MusicProvider, ProgressSink, ProviderContext, VideoPreviewStream, VideoPreviewTrack,
     VideoProvider,
 };
+use crate::ffmpeg;
 use crate::tags;
 use crate::youtubemusic::auth::YoutubeAuth;
 
@@ -297,12 +298,12 @@ impl YoutubeProvider {
             bail!("下载已取消");
         }
         // A prepared video already has an authenticated, proof-bound source. Do not gate it
-        // on an unrelated iOS/WEB player request: that client may be rejected even while the
+        // on an unrelated player request: that client may be rejected even while the
         // exact same video plays through protected HLS. Only direct-format downloads need it.
         let info = if protected_hls.is_some() && !req.audio_only {
             None
         } else {
-            Some(self.client.video_info(&video_id).await?)
+            Some(self.client.download_info(&video_id).await?)
         };
         if cancel.is_cancelled() {
             bail!("下载已取消");
@@ -342,16 +343,12 @@ impl YoutubeProvider {
         // A playable fMP4 grows here before the final rename. Give it a non-media
         // extension as defense in depth against filesystem watchers importing it.
         let staged = temp.join("output.part");
-        // 桌面队列使用与原生播放相同的受保护 HLS 会话。上游 URL、proof 与固定
-        // Safari 身份都留在本地服务里；纯 Rust 封装器只读取一次性的回环
-        // capability，不会接触或泄露上游授权参数。
         if req.audio_only {
-            let format = native_audio_format(formats).context(
-                "YouTube 没有返回可直接保存的 AAC/M4A 音轨；该视频可能需要重新连接浏览器",
-            )?;
-            self.fetch_format(&format, &staged, cancel, progress)
+            self.download_direct_audio(formats, &temp, &staged, cancel, progress)
                 .await?;
         } else if let Some(hls) = protected_hls {
+            // 一个已经准备好的受保护 HLS 会话（旧任务/外部准备）仍按原路径封装。上游
+            // URL、proof 与固定 Safari 身份都留在本地服务里。
             // HLS 没有可靠 Content-Length，但从这里开始已经不再是解析。先报告
             // 未知总量的下载起点，让任务条切到「解析完成 → 下载中」。
             progress(0, 0);
@@ -361,10 +358,7 @@ impl YoutubeProvider {
                 .unwrap_or(0);
             progress(size, size);
         } else {
-            let format = native_progressive_mp4(formats, req.max_height).context(
-                "YouTube 没有返回可直接保存的 H.264/AAC MP4，且受保护 HLS 尚未就绪；请重试",
-            )?;
-            self.fetch_format(&format, &staged, cancel, progress)
+            self.download_direct_video(formats, req.max_height, &temp, &staged, cancel, progress)
                 .await?;
         }
         if cancel.is_cancelled() {
@@ -395,26 +389,35 @@ impl YoutubeProvider {
         let mut file = crate::net::create_download_writer(output)
             .await
             .context("创建 YouTube 暂存文件失败")?;
-        for _ in 0..2048 {
+        for _ in 0..4096 {
+            // googlevideo throttles one long open range to roughly real-time speed; bounded
+            // ranges of this size come at full speed (26 MB: 108 s open, 15 s in 10 MB ranges).
+            let range_end = downloaded + RANGE_CHUNK - 1;
             let mut request = self
                 .client
                 .http()
                 .get(&format.url)
                 .header(reqwest::header::REFERER, "https://www.youtube.com/")
-                .header(reqwest::header::RANGE, format!("bytes={downloaded}-"));
+                .header(reqwest::header::RANGE, format!("bytes={downloaded}-{range_end}"));
             if let Some(session) = self.auth.snapshot() {
                 request = request.header(reqwest::header::COOKIE, session.cookie);
             }
             let response = request.send().await.context("YouTube 流请求失败")?;
-            if response.status() == reqwest::StatusCode::FORBIDDEN {
-                bail!(
-                    "YouTube 返回 403：请重新连接已登录的浏览器；若仍失败，该视频当前需要 PO Token"
-                )
-            }
             let status = response.status();
+            if status == reqwest::StatusCode::FORBIDDEN {
+                return Err(StreamForbidden.into());
+            }
+            if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE
+                && downloaded > 0
+                && expected_total == 0
+            {
+                // The previous range ended exactly at the end of a stream of unknown length.
+                break;
+            }
             anyhow::ensure!(status.is_success(), "YouTube 流请求返回 {status}");
+            let partial = status == reqwest::StatusCode::PARTIAL_CONTENT;
             anyhow::ensure!(
-                downloaded == 0 || status == reqwest::StatusCode::PARTIAL_CONTENT,
+                downloaded == 0 || partial,
                 "YouTube 续传请求被错误地从头返回"
             );
             let range_total = response
@@ -424,12 +427,11 @@ impl YoutubeProvider {
                 .and_then(|value| value.rsplit_once('/'))
                 .and_then(|(_, total)| total.parse::<u64>().ok())
                 .unwrap_or(0);
-            expected_total = expected_total.max(range_total).max(
-                response
-                    .content_length()
-                    .unwrap_or(0)
-                    .saturating_add(downloaded),
-            );
+            expected_total = expected_total.max(range_total);
+            if !partial {
+                // The whole body, whatever range was asked for.
+                expected_total = expected_total.max(response.content_length().unwrap_or(0));
+            }
             progress(downloaded, expected_total);
             let segment_start = downloaded;
             let mut stream = response.bytes_stream();
@@ -444,7 +446,10 @@ impl YoutubeProvider {
                 downloaded += chunk.len() as u64;
                 progress(downloaded, expected_total.max(downloaded));
             }
-            if expected_total == 0 || downloaded >= expected_total {
+            if !partial
+                || (expected_total > 0 && downloaded >= expected_total)
+                || (expected_total == 0 && downloaded - segment_start < RANGE_CHUNK)
+            {
                 break;
             }
             anyhow::ensure!(downloaded > segment_start, "YouTube 流续传没有取得新数据");
@@ -456,6 +461,122 @@ impl YoutubeProvider {
         file.flush().await.context("提交 YouTube 暂存缓冲失败")?;
         Ok(())
     }
+
+    /// 不经 HLS 的视频下载：分轨 H.264 + AAC 下完后用 FFmpeg 原样封装成 MP4（与 B 站相同）。
+    /// 分轨被拒（音乐类视频在没有 GVS PO Token 时一律 403），或没有 FFmpeg（Android），
+    /// 改下单文件 H.264/AAC MP4（itag 18，360p）。
+    async fn download_direct_video(
+        &self,
+        formats: &[VideoFormat],
+        max_height: i64,
+        temp: &Path,
+        staged: &Path,
+        cancel: &CancellationToken,
+        progress: &ProgressSink,
+    ) -> Result<()> {
+        if ffmpeg::available() {
+            if let Some((video, audio)) = adaptive_h264_aac_pair(formats, max_height) {
+                match self
+                    .fetch_and_mux(&video, &audio, temp, staged, cancel, progress)
+                    .await
+                {
+                    Ok(()) => return Ok(()),
+                    Err(error) if is_stream_forbidden(&error) => tracing::info!(
+                        video_itag = video.itag,
+                        audio_itag = audio.itag,
+                        "YouTube 分轨下载被拒绝，改用单文件 MP4"
+                    ),
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        let format = native_progressive_mp4(formats, max_height)
+            .or_else(|| native_progressive_mp4(formats, i64::MAX))
+            .context("YouTube 没有返回可下载的 H.264/AAC 视频流")?;
+        self.fetch_format(&format, staged, cancel, progress).await
+    }
+
+    async fn fetch_and_mux(
+        &self,
+        video: &VideoFormat,
+        audio: &VideoFormat,
+        temp: &Path,
+        staged: &Path,
+        cancel: &CancellationToken,
+        progress: &ProgressSink,
+    ) -> Result<()> {
+        let audio_path = temp.join("audio.m4s");
+        let video_path = temp.join("video.m4s");
+        let total = match (audio.content_length, video.content_length) {
+            (Some(audio), Some(video)) => audio + video,
+            _ => 0,
+        };
+        // The small audio track first: a refused stream is then known before the large one.
+        self.fetch_format(audio, &audio_path, cancel, &offset_progress(progress, 0, total))
+            .await?;
+        let audio_size = std::fs::metadata(&audio_path).map(|meta| meta.len()).unwrap_or(0);
+        self.fetch_format(
+            video,
+            &video_path,
+            cancel,
+            &offset_progress(progress, audio_size, total),
+        )
+        .await?;
+        let muxed = temp.join("muxed.mp4");
+        let height = video.height.unwrap_or(0) as i64;
+        let args = ffmpeg::mux_args(&[video_path, audio_path], &muxed, false, height, 0);
+        ffmpeg::run(&args, &temp.join("ffmpeg.log"), cancel).await?;
+        std::fs::rename(&muxed, staged).context("提交 YouTube 封装结果失败")
+    }
+
+    /// 只要音轨：直接保存 AAC 分轨；被拒时从单文件 MP4 里原样抽出 AAC（需要 FFmpeg）。
+    async fn download_direct_audio(
+        &self,
+        formats: &[VideoFormat],
+        temp: &Path,
+        staged: &Path,
+        cancel: &CancellationToken,
+        progress: &ProgressSink,
+    ) -> Result<()> {
+        const NO_AUDIO: &str =
+            "YouTube 没有返回可直接保存的 AAC/M4A 音轨；该视频可能需要重新连接浏览器";
+        if let Some(format) = native_audio_format(formats) {
+            match self.fetch_format(&format, staged, cancel, progress).await {
+                Ok(()) => return Ok(()),
+                Err(error) if is_stream_forbidden(&error) && ffmpeg::available() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        anyhow::ensure!(ffmpeg::available(), "{NO_AUDIO}");
+        let progressive = native_progressive_mp4(formats, i64::MAX).context(NO_AUDIO)?;
+        let source = temp.join("progressive.m4s");
+        self.fetch_format(&progressive, &source, cancel, progress)
+            .await?;
+        let extracted = temp.join("audio.m4a");
+        let args = ffmpeg::extract_audio_args(&source, &extracted, true, 0);
+        ffmpeg::run(&args, &temp.join("ffmpeg.log"), cancel).await?;
+        std::fs::rename(&extracted, staged).context("提交 YouTube 音轨失败")
+    }
+}
+
+/// googlevideo answers a stream URL without the PO token it requires with 403.
+#[derive(Debug, thiserror::Error)]
+#[error("YouTube 返回 403：请重新连接已登录的浏览器；若仍失败，该视频当前需要 PO Token")]
+struct StreamForbidden;
+
+fn is_stream_forbidden(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<StreamForbidden>().is_some()
+}
+
+const RANGE_CHUNK: u64 = 10 * 1024 * 1024;
+
+/// One task bar over several sequential streams: each stream's bytes count after `offset`.
+fn offset_progress(progress: &ProgressSink, offset: u64, total: u64) -> ProgressSink {
+    let progress = progress.clone();
+    Arc::new(move |done, _| {
+        let done = offset + done;
+        progress(done, if total > 0 { total.max(done) } else { 0 });
+    })
 }
 
 #[async_trait]
@@ -470,7 +591,9 @@ impl MusicProvider for YoutubeProvider {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            external_download_preparation: true,
+            // Video downloads are direct (ANDROID streams, muxed by FFmpeg); nothing has to be
+            // prepared by the webview any more.
+            external_download_preparation: false,
             search_kinds: YOUTUBE_SEARCH_KINDS,
             ..Capabilities::VIDEO
         }
@@ -1309,6 +1432,33 @@ fn native_audio_format(formats: &[VideoFormat]) -> Option<VideoFormat> {
         .cloned()
 }
 
+fn is_h264(format: &VideoFormat) -> bool {
+    format.mime_type.video_codec.as_deref().is_some_and(|codec| {
+        let codec = codec.to_ascii_lowercase();
+        codec.starts_with("avc1") || codec.starts_with("avc3")
+    })
+}
+
+/// The tallest H.264 MP4 video track within `max_height` and the best AAC track, for a stream
+/// copy into one MP4. VP9/AV1 tracks are not taken: the result must play through the system
+/// decoders on every platform, and YouTube offers H.264 up to 1080p.
+fn adaptive_h264_aac_pair(
+    formats: &[VideoFormat],
+    max_height: i64,
+) -> Option<(VideoFormat, VideoFormat)> {
+    let ceiling = max_height.max(1) as u64;
+    let video = formats
+        .iter()
+        .filter(|format| !format.url.is_empty() && !format.is_live)
+        .filter(|format| format.has_video && !format.has_audio)
+        .filter(|format| format.mime_type.container.eq_ignore_ascii_case("mp4"))
+        .filter(|format| is_h264(format))
+        .filter(|format| format.height.unwrap_or(0) <= ceiling)
+        .max_by_key(|format| (format.height.unwrap_or(0), format.bitrate))
+        .cloned()?;
+    Some((video, native_audio_format(formats)?))
+}
+
 fn native_progressive_mp4(formats: &[VideoFormat], max_height: i64) -> Option<VideoFormat> {
     let usable = |format: &&VideoFormat| !format.url.is_empty() && !format.is_live;
     let ceiling = max_height.max(1) as u64;
@@ -1384,9 +1534,9 @@ impl VideoProvider for YoutubeProvider {
         progress: &ProgressSink,
         prepared_source_url: Option<&str>,
     ) -> Result<PathBuf> {
-        let prepared_source_url =
-            prepared_source_url.context("YouTube 下载授权尚未就绪，请重试")?;
-        self.download_video_with_source(request, cancel, progress, Some(prepared_source_url))
+        // Downloads are no longer prepared outside (the Safari HLS manifest is gone); a source
+        // that still arrives, from an older task, is used as before.
+        self.download_video_with_source(request, cancel, progress, prepared_source_url)
             .await
     }
 }
@@ -1787,5 +1937,175 @@ mod tests {
             Some(720)
         );
         assert_eq!(native_audio_format(&formats).unwrap().bitrate, 30);
+    }
+
+    fn stream(itag: u64, mime: &str, height: Option<u64>, bitrate: u64) -> VideoFormat {
+        let (container, codecs) = mime.split_once(' ').unwrap();
+        let codec = |prefixes: &[&str]| {
+            codecs
+                .split(',')
+                .find(|codec| prefixes.iter().any(|prefix| codec.starts_with(prefix)))
+                .map(str::to_string)
+        };
+        let video_codec = codec(&["avc", "vp", "av01"]);
+        let audio_codec = codec(&["mp4a", "opus"]);
+        VideoFormat {
+            itag,
+            mime_type: MediaMime {
+                container: container.into(),
+                video_codec: video_codec.clone(),
+                audio_codec: audio_codec.clone(),
+            },
+            bitrate,
+            height,
+            url: format!("https://cdn.example/{itag}"),
+            has_video: video_codec.is_some(),
+            has_audio: audio_codec.is_some(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn direct_download_pairs_the_tallest_h264_track_within_the_ceiling_with_aac() {
+        let formats = vec![
+            stream(18, "mp4 avc1.42001E,mp4a.40.2", Some(360), 500),
+            stream(137, "mp4 avc1.640028", Some(1080), 4000),
+            stream(299, "mp4 avc1.64002a", Some(1080), 6000),
+            stream(136, "mp4 avc1.4d401f", Some(720), 2000),
+            stream(248, "webm vp9", Some(1080), 3000),
+            stream(313, "webm vp9", Some(2160), 9000),
+            stream(140, "mp4 mp4a.40.2", None, 128),
+            stream(139, "mp4 mp4a.40.5", None, 48),
+            stream(251, "webm opus", None, 160),
+        ];
+        let (video, audio) = adaptive_h264_aac_pair(&formats, 1080).unwrap();
+        assert_eq!((video.itag, audio.itag), (299, 140), "60 fps beats 30 fps at one height");
+        let (video, _) = adaptive_h264_aac_pair(&formats, 2160).unwrap();
+        assert_eq!(video.itag, 299, "VP9 is never taken, however tall");
+        let (video, _) = adaptive_h264_aac_pair(&formats, 720).unwrap();
+        assert_eq!(video.itag, 136);
+        assert!(adaptive_h264_aac_pair(&formats, 480).is_none());
+        // Without an AAC track there is nothing to pair; the progressive file remains.
+        let no_aac: Vec<_> = formats.iter().filter(|f| f.itag != 140 && f.itag != 139).cloned().collect();
+        assert!(adaptive_h264_aac_pair(&no_aac, 1080).is_none());
+        assert_eq!(native_progressive_mp4(&no_aac, 1080).unwrap().itag, 18);
+        // A track whose URL could not be recovered is never chosen.
+        let mut unusable = formats.clone();
+        unusable.iter_mut().filter(|f| f.itag == 299).for_each(|f| f.url.clear());
+        assert_eq!(adaptive_h264_aac_pair(&unusable, 1080).unwrap().0.itag, 137);
+    }
+
+    fn test_provider(root: &Path) -> YoutubeProvider {
+        use crate::provider::ProviderLiveSettings;
+        let ctx = ProviderContext::new(
+            root.to_path_buf(),
+            ProviderLiveSettings {
+                download_dir: root.join("downloads"),
+                filename_template: "{title}".into(),
+                default_quality: kdj_core::models::Quality::Q128,
+                netease_use_download_api: false,
+                soundcloud_enabled: false,
+                soundcloud_client_id: String::new(),
+                soundcloud_client_secret: String::new(),
+                ytm_enabled: false,
+                youtube_enabled: true,
+                video_dir: None,
+                video_format: "mp4".into(),
+            },
+        );
+        let auth = Arc::new(YoutubeAuth::new(&ctx, Platform::Youtube).unwrap());
+        let mut provider = YoutubeProvider::new(ctx, auth).unwrap();
+        provider
+            .client
+            .set_test_http(reqwest::Client::builder().no_proxy().build().unwrap());
+        provider
+    }
+
+    /// Serves `/progressive` as ranged 206 responses and answers every other path with 403.
+    async fn stream_fixture(body: Vec<u8>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::AsyncReadExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let mut buffer = [0; 8192];
+                let length = socket.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..length]).into_owned();
+                let line = request.lines().next().unwrap_or_default().to_string();
+                let range = request
+                    .lines()
+                    .find_map(|line| line.to_ascii_lowercase().strip_prefix("range: bytes=").map(str::to_string))
+                    .unwrap_or_default();
+                seen.lock().unwrap().push(format!("{line} {range}"));
+                if !line.starts_with("GET /progressive ") {
+                    let _ = socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                    continue;
+                }
+                let (start, end) = range.split_once('-').unwrap();
+                let start: usize = start.parse().unwrap();
+                let end = end.parse::<usize>().map_or(body.len() - 1, |end| end.min(body.len() - 1));
+                let head = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/{}\r\nConnection: close\r\n\r\n",
+                    end + 1 - start,
+                    body.len()
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(&body[start..=end]).await;
+            }
+        });
+        (origin, requests)
+    }
+
+    #[tokio::test]
+    async fn refused_tracks_fall_back_to_the_progressive_file_in_bounded_ranges() {
+        let root = std::env::temp_dir().join(format!(
+            "kdj-youtube-fallback-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let _cleanup = TempDirGuard(root.clone());
+        std::fs::create_dir_all(&root).unwrap();
+        let provider = test_provider(&root);
+        let body: Vec<u8> = (0..300_000u32).map(|n| n as u8).collect();
+        let (origin, requests) = stream_fixture(body.clone()).await;
+        let mut formats = vec![
+            stream(137, "mp4 avc1.640028", Some(1080), 4000),
+            stream(140, "mp4 mp4a.40.2", None, 128),
+            stream(18, "mp4 avc1.42001E,mp4a.40.2", Some(360), 500),
+        ];
+        formats[0].url = format!("{origin}/video");
+        formats[1].url = format!("{origin}/audio");
+        formats[2].url = format!("{origin}/progressive");
+        let staged = root.join("output.part");
+        let last = Arc::new(std::sync::Mutex::new((0, 0)));
+        let report = last.clone();
+        let progress: ProgressSink = Arc::new(move |done, total| *report.lock().unwrap() = (done, total));
+        provider
+            .download_direct_video(&formats, 1080, &root, &staged, &CancellationToken::new(), &progress)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&staged).unwrap(), body);
+        assert_eq!(*last.lock().unwrap(), (300_000, 300_000));
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(
+            requests.last().unwrap(),
+            &format!("GET /progressive HTTP/1.1 0-{}", RANGE_CHUNK - 1),
+            "a stream is asked for in bounded ranges: {requests:?}"
+        );
+        if ffmpeg::available() {
+            // The small audio track goes first, so a refusal costs no video bytes.
+            assert!(requests[0].starts_with("GET /audio "), "{requests:?}");
+            assert_eq!(requests.len(), 2, "{requests:?}");
+        }
+
+        // A refusal is typed, so the caller can fall back instead of failing.
+        let error = provider
+            .fetch_format(&formats[1], &root.join("a.part"), &CancellationToken::new(), &progress)
+            .await
+            .unwrap_err();
+        assert!(is_stream_forbidden(&error));
     }
 }

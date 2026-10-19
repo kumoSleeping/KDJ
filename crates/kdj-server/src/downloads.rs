@@ -324,13 +324,6 @@ impl PersistedEntry {
                 }
             }
         }
-        // 旧 journal 没有视频外部准备字段。普通 YouTube 的直接 HLS/DASH 已失效，
-        // 恢复后的失败项也必须走当前受保护 HLS 路径，不能因升级而继续撞 403。
-        if self.task.platform == Platform::Youtube {
-            if let Some(retry) = &mut self.video_retry {
-                retry.external_preparation = true;
-            }
-        }
         self.task.progress = if self.task.progress.is_finite() {
             self.task.progress.clamp(0.0, 1.0)
         } else {
@@ -2885,6 +2878,13 @@ async fn run_video(
         external_preparation,
     } = retry;
     let platform = req.platform;
+    // A task saved while its provider still needed outside preparation (YouTube's retired Safari
+    // HLS) follows what the provider needs now, or a retry would wait for a webview that no
+    // longer prepares anything.
+    let external_preparation = external_preparation
+        && state
+            .provider(platform)
+            .is_some_and(|provider| provider.capabilities().external_download_preparation);
     let explicit_dest = !req.dest_dir.trim().is_empty();
     if let Err(message) = validate_download_target(Path::new(&dest_dir)) {
         worker.settle(TaskState::Failed, &message);
