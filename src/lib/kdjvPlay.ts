@@ -36,7 +36,7 @@ export function playProject(track: PlayableTrack, play: Play, autoPlay = true, p
   const title = track.title || track.filename;
   pending.set(track.id, title);
   const shown = window.setTimeout(() => {
-    if (pending.has(track.id)) showTask({ id: bubbleId(track.id), kind: "render", title, detail: "准备工程", progress: 0, stay: 0 });
+    if (pending.has(track.id)) showTask({ id: bubbleId(track.id), kind: "render", title, detail: "预渲染工程", progress: 0, stay: 0 });
   }, BUBBLE_DELAY_MS);
   void api
     .renderKdjv(track.id)
@@ -60,15 +60,43 @@ export function playProject(track: PlayableTrack, play: Play, autoPlay = true, p
     });
 }
 
+const exportId = (trackId: number) => `kdjv-export:${trackId}`;
+/** Rows being exported, by id, with their titles. */
+const exporting = new Map<number, string>();
+
+/**
+ * The library's 导出 MP4 for a project row: the render (the same one playing uses), copied
+ * beside the project as an MP4, with the work shown as an export bubble.
+ */
+export function exportProject(track: { id: number; title: string; filename: string }): void {
+  if (exporting.has(track.id)) return;
+  const title = track.title || track.filename;
+  exporting.set(track.id, title);
+  showTask({ id: exportId(track.id), kind: "export", title, detail: "导出 MP4", progress: 0, stay: 0 });
+  void api
+    .exportKdjv(track.id)
+    .then(({ path }) => {
+      showTask({ id: exportId(track.id), kind: "export", title, detail: `已导出 ${path.split(/[\\/]/).pop() ?? path}`, progress: null, tone: "success" });
+    })
+    .catch((error: unknown) => {
+      showTask({ id: exportId(track.id), kind: "export", title: `${title} 导出失败`, detail: error instanceof Error ? error.message : String(error), progress: null, tone: "error" });
+    })
+    .finally(() => exporting.delete(track.id));
+}
+
 /** The server's word on a render under way (`kdjv.progress`). */
 export function handleKdjvProgress(payload: KdjvProgress): void {
   const id = payload.track_id;
+  if (id !== null && exporting.has(id) && !payload.error && payload.progress < 1) {
+    showTask({ id: exportId(id), kind: "export", title: exporting.get(id) ?? "", detail: payload.detail || "导出 MP4",
+      progress: Math.max(0, Math.min(1, payload.progress)), stay: 0 });
+  }
   if (id === null || !pending.has(id) || payload.error) return;
   showTask({
     id: bubbleId(id),
     kind: "render",
     title: pending.get(id) ?? "",
-    detail: payload.detail || "准备工程",
+    detail: payload.detail || "预渲染工程",
     progress: Math.max(0, Math.min(1, payload.progress)),
     stay: 0,
   });

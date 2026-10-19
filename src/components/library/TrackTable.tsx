@@ -84,6 +84,7 @@ import {
 } from "../../lib/folderDrop";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
+import { exportProject } from "../../lib/kdjvPlay";
 import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isImageTrack, isProjectTrack, isVideoTrack, thumbUrl } from "../../lib/format";
 import { playClickForLayout, useTrackClickPrefs } from "../../lib/trackClickPrefs";
 import type { LayoutMode } from "../../lib/useLayoutMode";
@@ -2644,6 +2645,13 @@ export const TrackTable = memo(function TrackTable({
               <Pencil size={12} />
               编辑 Meta
             </button>
+          )}
+          {isProjectTrack(rowMenu.track.format) && (
+            <button type="button" disabled={menuIds.length !== 1} onClick={() => {
+              const track = rowMenu.track;
+              setRowMenu(null);
+              exportProject(track);
+            }}><Download size={12} />导出 MP4</button>
           )}
           <button type="button" disabled={menuIds.length !== 1 || !canVisualizeTrack(rowMenu.track)} onClick={event => {
             const track = rowMenu.track;

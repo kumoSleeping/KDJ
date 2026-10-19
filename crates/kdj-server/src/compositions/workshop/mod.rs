@@ -35,6 +35,7 @@ impl Workshop {
     pub fn new(state: Arc<AppState>) -> Result<Arc<Self>> {
         let cache = state.config.data_dir.join("cache").join("vj-workshop");
         std::fs::create_dir_all(&cache)?;
+        let _ = kdjv::INDEX.set(cache.join("kdjv-index"));
         for entry in std::fs::read_dir(&cache)?.flatten() {
             let path = entry.path();
             if entry.file_type().is_ok_and(|t| t.is_file())

@@ -90,6 +90,27 @@ impl Doc {
             .map(|c| c.at + (c.out - c.from) / c.speed)
             .fold(0., f64::max)
     }
+    /// The frame a library row shows for the project: the video playing a third of the way in
+    /// (the opening is often a fade from black), else the first video clip; its file and the
+    /// second in it. None when no clip is a video.
+    fn cover_frame(&self, base: &Path) -> Option<(PathBuf, f64)> {
+        let video = |c: &&DocClip| {
+            let ext = Path::new(&c.src).extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+            kdj_providers::tags::VIDEO_EXTENSIONS.contains(&ext.as_str()) && c.speed > 0.
+        };
+        let at = self.duration() / 3.;
+        let clips: Vec<&DocClip> = self.tracks.iter().flat_map(|t| &t.clips).filter(video).collect();
+        let playing = clips.iter().find(|c| c.at <= at && at < c.at + (c.out - c.from) / c.speed);
+        let first = clips.iter().min_by(|a, b| a.at.total_cmp(&b.at));
+        let (clip, second) = match playing {
+            Some(c) => (*c, c.from + (at - c.at) * c.speed),
+            None => {
+                let c = *first?;
+                (c, c.from + (c.out - c.from) / 2.)
+            }
+        };
+        Some((source_path(base, &clip.src), second.max(0.)))
+    }
     fn sources(&self, base: &Path) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = vec![];
         for clip in self.tracks.iter().flat_map(|t| &t.clips) {
@@ -256,19 +277,50 @@ pub fn project(doc: &Doc, base: &Path, probed: &HashMap<PathBuf, Probed>) -> Res
 
 pub use kdj_providers::tags::is_project_path;
 
+/// The file and second a library row's cover is cut from (see `Doc::cover_frame`).
+pub fn cover_frame(file: &Path) -> Option<(PathBuf, f64)> {
+    let doc = parse(&std::fs::read_to_string(file).ok()?).ok()?;
+    doc.cover_frame(file.parent().unwrap_or(Path::new(".")))
+}
+
 /// Which render each project file plays from, as last rendered. The window asks for the render
 /// (POST /api/kdjv/render) before it plays a project; the library's media routes only look here.
 static RENDERED: std::sync::OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = std::sync::OnceLock::new();
+/// Where the renders are remembered across restarts (`<cache>/kdjv-index`): one small file per
+/// project, named by its path, holding the project's mtime and its render. Set by Workshop::new.
+pub(super) static INDEX: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn index_file(file: &Path) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    file.hash(&mut h);
+    Some(INDEX.get()?.join(format!("{:016x}", h.finish())))
+}
+
+fn mtime(file: &Path) -> u64 {
+    crate::waveform::file_mtime(file)
+}
 
 fn remember(file: &Path, render: &Path) {
     let Ok(file) = std::fs::canonicalize(file) else { return };
+    if let Some(index) = index_file(&file) {
+        let _ = std::fs::create_dir_all(index.parent().unwrap_or(Path::new(".")));
+        let _ = std::fs::write(index, format!("{}\n{}", mtime(&file), render.display()));
+    }
     RENDERED.get_or_init(Default::default).lock().unwrap().insert(file, render.to_path_buf());
 }
 
-/// The render a project file last got, while it is still in the cache.
+/// The render a project file last got, while it is still in the cache — remembered across
+/// restarts as long as the project file has not changed since.
 pub fn rendered(file: &Path) -> Option<PathBuf> {
     let file = std::fs::canonicalize(file).ok()?;
-    RENDERED.get_or_init(Default::default).lock().unwrap().get(&file).filter(|path| path.is_file()).cloned()
+    let known = RENDERED.get_or_init(Default::default).lock().unwrap().get(&file).filter(|path| path.is_file()).cloned();
+    known.or_else(|| {
+        let text = std::fs::read_to_string(index_file(&file)?).ok()?;
+        let (stamp, render) = text.split_once('\n')?;
+        let render = PathBuf::from(render);
+        (stamp.parse::<u64>().ok()? == mtime(&file) && render.is_file()).then_some(render)
+    })
 }
 
 /// What a check of a document found, for whoever wrote it.
@@ -448,6 +500,23 @@ mod kdjv_tests {
         assert_eq!(p.canvas.width, 1280, "the canvas follows the first video, evened");
         assert_eq!(p.duration(), 15_000.);
         assert_eq!(doc.duration(), 15.);
+    }
+
+    #[test]
+    fn the_cover_is_the_video_playing_a_third_of_the_way_in() {
+        let doc = parse(
+            r#"{"kdjv":1,"tracks":[{"clips":[
+                {"src":"intro.mp4","at":0,"in":0,"out":10},
+                {"src":"/media/ed.mp4","at":10,"in":30,"out":50},
+                {"src":"logo.png","at":0,"in":0,"out":30}
+            ]}]}"#,
+        )
+        .unwrap();
+        let (path, second) = doc.cover_frame(Path::new("/projects")).unwrap();
+        assert_eq!(path, PathBuf::from("/media/ed.mp4"));
+        assert!((second - 30.).abs() < 1e-9, "{second}");
+        let stills = parse(r#"{"kdjv":1,"tracks":[{"clips":[{"src":"a.png","at":0,"in":0,"out":5}]}]}"#).unwrap();
+        assert!(stills.cover_frame(Path::new("/")).is_none(), "no video, no frame");
     }
 
     #[test]

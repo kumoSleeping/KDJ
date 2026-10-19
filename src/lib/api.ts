@@ -943,6 +943,8 @@ export const api = {
 
   /** A `.kdjv` project's render (docs/kdjv.md): found in the cache, or made now (can take minutes). */
   renderKdjv: (trackId: number) => post<{ path: string; track_id: number | null }>("/kdjv/render", { track_id: trackId }),
+  /** A `.kdjv` project written out as one MP4 beside it, never over an existing file. */
+  exportKdjv: (trackId: number) => post<{ path: string; track_id: number | null }>("/kdjv/export", { track_id: trackId }),
   downloads: () => request<DownloadTask[]>("/downloads"),
   enqueue: async (body: DownloadRequest) => {
     // 目录选择先乐观更新 UI、再异步落盘。入队若抢在落盘前，后端会冻结上一个目录。

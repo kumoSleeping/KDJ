@@ -107,7 +107,7 @@ fn run_inner(cli: Cli) -> Result<()> {
         Commands::Library { command } => library(&http, command)?,
         Commands::Project { command } => match command {
             ProjectCmd::Check { path } => http.post_json_long("/api/kdjv/check", &json!({ "path": absolute(&path) }))?,
-            ProjectCmd::Render { path } => http.post_json_long("/api/kdjv/render", &json!({ "path": absolute(&path) }))?,
+            ProjectCmd::Render { path } => project_render(&http, &path)?,
         },
         Commands::Visualizer { command } => match command {
             VisualizerCmd::Render { id, out, width, height } => http.post_json_long(
@@ -239,6 +239,19 @@ fn download(
         return Err(CliError::new("failed", "KDJ 在下载结束前断开了连接").into());
     }
     Ok(json!({ "complete": result["complete"], "items": result["items"] }))
+}
+
+/// 渲染进度逐行进 stderr（`{"event":"progress","done","total":100,"detail"}`），stdout 只留结果。
+/// 不认识 `stream` 的旧 KDJ 直接回结果，同样接受。
+fn project_render(http: &HttpClient, path: &str) -> Result<Value> {
+    let result = http.post_ndjson("/api/kdjv/render", &json!({ "path": absolute(path), "stream": true }))?;
+    match result["event"].as_str() {
+        Some("error") => Err(CliError::new("failed", result["message"].as_str().unwrap_or("渲染失败")).into()),
+        Some("result") | None if result.get("path").is_some() => {
+            Ok(json!({ "path": result["path"], "track_id": result["track_id"] }))
+        }
+        _ => Err(CliError::new("failed", "KDJ 在渲染结束前断开了连接").into()),
+    }
 }
 
 /// 曲库 id 和引用原样交给 KDJ；本地存在的相对路径换成绝对路径。

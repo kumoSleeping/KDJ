@@ -63,7 +63,7 @@ import {
   announceAudioFocus,
   type AudioFocusDetail,
 } from "../../lib/audioFocus";
-import { formatDuration, isVideoTrack, thumbUrl } from "../../lib/format";
+import { formatDuration, isProjectTrack, isVideoTrack, thumbUrl } from "../../lib/format";
 import {
   MEDIA_SYNC_EVENT,
   broadcastMediaSync,
@@ -4208,6 +4208,9 @@ export function PlayerBar() {
       return;
     }
     if (predicted.id === track.id) return;
+    // A `.kdjv` project plays from its render, made when it is played (kdjvPlay.ts); the file
+    // itself is not sound, and prewarming it only fails.
+    if (isProjectTrack(predicted.format)) return;
     const currentRate = nativePlayer.state().rate || 1;
     const effectiveFromBpm = track.bpm ? track.bpm * currentRate : null;
     // Prewarm and final prepare must agree exactly. Otherwise `same_source` rejects the warm Deck

@@ -18,7 +18,7 @@
  */
 import { spawn } from "node:child_process";
 import { constants, existsSync, statSync } from "node:fs";
-import { copyFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -95,6 +95,18 @@ function run(program: string, args: string[], options: { cwd: string; signal?: A
       resolveRun({ code, out, err });
     });
   });
+}
+
+/** The picture height of a video file (ffprobe), or null when it has no picture or cannot be read. */
+export async function videoHeight(path: string, signal?: AbortSignal): Promise<number | null> {
+  try {
+    const { code, out } = await run(FFPROBE, ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height", "-of", "csv=p=0", path],
+      { cwd: WORKSPACE, signal });
+    const height = Number(out.trim().split("\n")[0]);
+    return code === 0 && Number.isFinite(height) && height > 0 ? height : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The end of a long log: where a failure says why. */
@@ -258,8 +270,24 @@ const remotion = defineTool({
 
 /** What kdj-tools.ts lends: KDJ's own commands and the library's roots. */
 export interface VideoDeps {
-  kdj(args: string[], signal?: AbortSignal): Promise<unknown>;
+  kdj(args: string[], signal?: AbortSignal, onProgress?: (progress: { done: number; total: number; detail?: string }) => void): Promise<unknown>;
   libraryRoots(signal?: AbortSignal): Promise<string[]>;
+}
+
+/**
+ * A copy of `document` that can be checked from the workspace: every relative `src` made
+ * absolute against the folder the project will be saved in, where KDJ would resolve it.
+ */
+function checkable(document: Record<string, unknown>, folder: string): Record<string, unknown> {
+  const copy = structuredClone(document) as { tracks?: unknown };
+  for (const track of Array.isArray(copy.tracks) ? copy.tracks : []) {
+    const clips = (track as { clips?: unknown } | null)?.clips;
+    for (const clip of Array.isArray(clips) ? clips : []) {
+      const item = clip as { src?: unknown } | null;
+      if (item && typeof item.src === "string" && !isAbsolute(item.src)) item.src = resolve(folder, item.src);
+    }
+  }
+  return copy as Record<string, unknown>;
 }
 
 /** Every top-level key of `was` that `now` leaves out: a save must not hold less than it read. */
@@ -275,7 +303,8 @@ function projectTools(deps: VideoDeps) {
     description:
       "把一个 .kdjv 视频工程（格式见 kdj-video 技能的 references/kdjv.md）写进曲库里的文件夹，KDJ 曲库里会出现这一行，标着「工程」。" +
       "path 是 .kdjv 文件的绝对路径，必须在曲库根目录内（用 kdj_folders 找文件夹）；document 是整份工程。改已有的工程先用 read 读出整份，" +
-      "改完整份写回：原有的顶层字段一个都不能少。旧版本会先备份到工作目录的 backups/。保存后立即检查，返回时长、画布和素材，或不能播放的原因。",
+      "改完整份写回：原有的顶层字段一个都不能少。旧版本会先备份到工作目录的 backups/。写入前先检查：不能播放（区间越界、淡入淡出过长、素材不存在…）时不写，" +
+      "直接报错说明原因，改好再保存；通过了才写进曲库，返回时长、画布和素材。",
     parameters: Type.Object({
       path: Type.String(),
       document: Type.Record(Type.String(), Type.Unknown()),
@@ -286,6 +315,19 @@ function projectTools(deps: VideoDeps) {
       const roots = await deps.libraryRoots(signal);
       if (!roots.some(root => inside(resolve(root), path))) throw new Error(`工程要放在曲库根目录内：${roots.join("、")}`);
       if (params.document.kdjv !== 1) throw new Error("document 需要 \"kdjv\": 1");
+      // Checked before it is written: a project that cannot play never reaches the library.
+      const checks = join(WORKSPACE, "checks");
+      await mkdir(checks, { recursive: true });
+      const trial = join(checks, `${process.pid}-${Date.now()}.kdjv`);
+      await writeFile(trial, `${JSON.stringify(checkable(params.document, dirname(path)), null, 2)}\n`, "utf8");
+      let check: unknown;
+      try {
+        check = await deps.kdj(["project", "check", trial], signal);
+      } catch (error) {
+        throw new Error(`工程没有保存，检查没通过：${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        await rm(trial, { force: true });
+      }
       if (existsSync(path)) {
         const old = await readFile(path, "utf8");
         let parsed: unknown = null;
@@ -301,21 +343,21 @@ function projectTools(deps: VideoDeps) {
       const temporary = `${path}.${process.pid}.tmp`;
       await writeFile(temporary, `${JSON.stringify(params.document, null, 2)}\n`, "utf8");
       await rename(temporary, path);
-      try {
-        return text({ saved: path, check: await deps.kdj(["project", "check", path], signal) });
-      } catch (error) {
-        return text({ saved: path, problem: error instanceof Error ? error.message : String(error) });
-      }
+      return text({ saved: path, check });
     },
   });
 
   const render = defineTool({
     name: "kdj_project_render",
-    label: "渲染工程",
+    label: "预渲染工程",
     description: "预先渲染好一个已保存的 .kdjv 工程，之后用户在 KDJ 里点它立即就能播放；全部结束才返回（长工程可能要几分钟）。",
     parameters: Type.Object({ path: Type.String({ description: ".kdjv 文件的绝对路径" }) }),
-    async execute(_id, params, signal) {
-      return text(await deps.kdj(["project", "render", resolve(params.path)], signal));
+    async execute(_id, params, signal, onUpdate) {
+      // The render's percentage, for the AI corner and the drawer's step.
+      return text(await deps.kdj(["project", "render", resolve(params.path)], signal, ({ done, total, detail }) => onUpdate?.({
+        content: [{ type: "text", text: `${done}/${total}` }],
+        details: { done, total, detail },
+      })));
     },
   });
 
@@ -329,7 +371,7 @@ function projectTools(deps: VideoDeps) {
       to: Type.Optional(Type.String({ description: "放 MP4 的文件夹" })),
       name: Type.Optional(Type.String({ description: "文件名（不含 .mp4），默认和工程同名" })),
     }),
-    async execute(_id, params, signal) {
+    async execute(_id, params, signal, onUpdate) {
       const project = resolve(params.path);
       if (extname(project).toLowerCase() !== ".kdjv") throw new Error("要导出的是 .kdjv 工程");
       const folder = resolve(params.to ?? dirname(project));
@@ -339,7 +381,10 @@ function projectTools(deps: VideoDeps) {
       if (!name) throw new Error("文件名为空");
       const target = join(folder, `${name}.mp4`);
       if (existsSync(target)) throw new Error(`已经有这个文件，换一个 name：${target}`);
-      const rendered = await deps.kdj(["project", "render", project], signal) as { path?: unknown };
+      const rendered = await deps.kdj(["project", "render", project], signal, ({ done, total, detail }) => onUpdate?.({
+        content: [{ type: "text", text: `${done}/${total}` }],
+        details: { done, total, detail },
+      })) as { path?: unknown };
       if (typeof rendered?.path !== "string") throw new Error("渲染没有给出文件");
       await mkdir(folder, { recursive: true });
       await copyFile(rendered.path, target, constants.COPYFILE_EXCL);

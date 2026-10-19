@@ -58,6 +58,15 @@ pub fn frames(ms: f64) -> u64 {
 fn has_alpha(pix_fmt: &str) -> bool {
     ["yuva", "rgba", "bgra", "argb", "abgr", "gbrap", "ya8", "ya16"].iter().any(|prefix| pix_fmt.starts_with(prefix))
 }
+/// What a video input reads past its clip's end: a frame or two of headroom for the
+/// retiming and frame-rate conversion; `trim` still cuts at the exact boundary.
+const INPUT_SLACK_MS: f64 = 500.;
+/// Threads of the picture graph (scaling, fades, overlays). It was one so a render never took
+/// the CPU from playing; half the cores, at most four, keeps that margin and lets a project of
+/// many clips render well above real time.
+fn picture_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get() / 2).clamp(1, 4)
+}
 pub(super) struct Scratch(pub(super) PathBuf);
 impl Drop for Scratch {
     fn drop(&mut self) {
@@ -255,6 +264,8 @@ async fn audio_args(
         args.extend([
             "-ss".into(),
             secs(shifted.max(0.)),
+            "-t".into(),
+            secs(clip.source_out_ms - clip.source_in_ms + INPUT_SLACK_MS),
             "-i".into(),
             s.path.clone(),
         ]);
@@ -530,8 +541,8 @@ impl Workshop {
             "pipe:1",
             "-nostats",
             "-filter_complex_threads",
-            "1",
         ]);
+        args.push(picture_threads().to_string());
         let mut graph = vec![format!(
             "color=c=black:s={}x{}:r={}:d={},format=yuv420p[base0]",
             p.canvas.width,
@@ -563,7 +574,10 @@ impl Workshop {
             } else { String::new() };
             // Decode directly into the final graph. A full-length intermediate
             // used to encode every video twice and delay all visible progress.
+            // `-t` ends the input with the clip: trim alone left every input decoding to the
+            // end of its file, so thirty clips of one video decoded it thirty times over.
             args.extend(["-threads".into(), "1".into(), "-ss".into(), secs(c.source_in_ms),
+                "-t".into(), secs(c.source_out_ms - c.source_in_ms + INPUT_SLACK_MS),
                 "-i".into(), s.path.clone()]);
             let keep_position = c.picture.crop_keep_position && !c.picture.crop_auto_fit;
             let (fit_width, fit_height) = if keep_position {
