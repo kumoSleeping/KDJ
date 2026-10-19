@@ -359,7 +359,7 @@ async function pictures(data: unknown) {
 const align = defineTool({
   name: "kdj_align",
   label: "对齐",
-  description: "把视频按声音对齐到参考曲（音视频合并的核心；short 版 MV/NCED 对整首歌也用它），返回几套定位方案 plans：segments 里 ref = ref_at + (video - video_in) / speed（秒）；ref_bar 是参考曲的小节号。evidence 为 verified 的经过声学核实，auto=true 的可以直接采用；melody / partial 只是候选，auto=false 的方案需要用户试听确认。只有部分对得上时用「裁切匹配段」（sections）。每套方案的 gaps 是参考曲里没有画面的空档（start、end、length，秒）：空档要问用户怎么处理，不要自己拉别的素材填。matched 为 false 是对不上，告诉用户，不要硬拼。",
+  description: "把视频按声音对齐到参考曲（音视频合并的核心；short 版 MV/NCED 对整首歌也用它），返回几套定位方案 plans：segments 里 ref = ref_at + (video - video_in) / speed（秒）；ref_bar 是参考曲的小节号。每个 segment 原样写成工程里的一个片段（at=ref_at、in=video_in、out=video_out、speed），不拆成镜头重排、不另调速度。evidence 为 verified 的经过声学核实，auto=true 的可以直接采用；melody / partial 只是候选，auto=false 的方案照样铺好请用户试听确认，不要因为相似度低就换成自己算的位置。一个方案只管它 segments 覆盖的那一段，几套方案可以各管一段。只有部分对得上时用「裁切匹配段」（sections）。每套方案的 gaps 是参考曲里没有画面的空档（start、end、length，秒）：空档怎么填照用户在方案里选的办法（完整 VJ、简洁剪辑按小节从同一素材里剪；音视频合并要先问用户），不要拉和歌无关的素材填。matched 为 false 是对不上，告诉用户，不要硬拼。",
   parameters: Type.Object({
     ref: Type.String({ description: "参考曲：曲库 id 或文件路径" }),
     video: Type.String({ description: "视频：曲库 id、文件路径、bilibili ref 或链接" }),

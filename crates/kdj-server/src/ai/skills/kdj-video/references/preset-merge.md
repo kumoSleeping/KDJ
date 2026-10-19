@@ -6,11 +6,12 @@
 
 ## 你要意识到
 
-- 对齐靠声音比对，不靠时长。`kdj_align` 的 evidence 是 verified 才算对上；对不上（matched 为 false）就告诉用户，不要硬拼。
+- 对齐靠声音比对，不靠时长。`kdj_align` 的 evidence 是 verified 的直接用；melody / partial 是候选，铺好请用户试听确认，
+  不要换成自己算的位置（SKILL.md「对齐」）。对不上（matched 为 false）就告诉用户，不要硬拼。
 - 视频常常比歌短（TV size、剪过的 MV），对上之后会有没画面的空档（`kdj_align` 每套方案的 gaps）。空档不是错误，是用户要做的决定。
 - DJ 接歌时开头和结尾需要画面：哪怕中间全都对上，头尾也可能需要几小节冗余。
 - 为了填满而拉无关素材，比黑屏更糟。
-- 翻唱、remix 和原版 MV 的声音基本对不上：这时这种做法不合适，在方案里建议改成简洁剪辑或完整 VJ。
+- 翻唱、remix 先对一次：只是整体变速的（方案的 speed 不是 1）照样能合并；matched 为 false 才建议改成简洁剪辑或完整 VJ。
 
 ## 你会做的
 
