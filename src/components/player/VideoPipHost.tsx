@@ -42,6 +42,9 @@ import {
   VideoTransportEchoGuard,
 } from "../../lib/videoPlaybackEngine";
 import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
+import { useKdjvLive } from "../../lib/kdjvPlay";
+import { KdjvLivePicture } from "./KdjvLivePicture";
+import type { KdjvLive } from "../../types";
 import {
   YoutubeEmbedController,
   type YoutubeEmbedBounds,
@@ -240,6 +243,11 @@ function youtubeBounds(node: HTMLElement | null): YoutubeEmbedBounds | null {
   };
 }
 
+/** The project a local session plays live, while it plays from its sound (kdjvPlay.ts). */
+function liveProject(session: VideoPipSession | null): KdjvLive | undefined {
+  return session?.source === "local" ? useKdjvLive.getState().live[session.trackId] : undefined;
+}
+
 function mediaUrl(session: VideoPipSession): string {
   return session.source === "network"
     ? api.videoPreviewUrl(session.platform, session.bvid, session.page)
@@ -372,6 +380,13 @@ export function VideoPipHost() {
   const showSurface = Boolean(hostActive && !systemPip && panelReady);
   const showFloating = showSurface && !docked;
   const isLocal = session?.source === "local";
+  // A project playing from its sound: its picture is drawn live, in the canvas's shape.
+  const live = useKdjvLive(state => session?.source === "local" ? state.live[session.trackId] : undefined);
+  useEffect(() => {
+    if (!live) return;
+    setSourceRatio(live.width / live.height);
+    useVideoPip.getState().setDuration(live.duration);
+  }, [live]);
   const shouldUsePlatformPlayer = (candidate: VideoPipSession | null | undefined): boolean =>
     usesPlatformPlayer(candidate) &&
     Boolean(candidate && platformFallbackSessionKeyRef.current !== sessionKey(candidate));
@@ -738,6 +753,8 @@ export function VideoPipHost() {
         : desiredPlayingRef.current || next.source === "network" || next.autoPlay;
     desiredPlayingRef.current = shouldPlay;
     useVideoPip.getState().setError("");
+    // A live project follows the player's clock by itself; there is no video here to start.
+    if (liveProject(next)) return;
     if (next.source === "network" && shouldUsePlatformPlayer(next)) {
       if (loadedKeyRef.current !== nextKey) {
         youtubeEmbedRef.current?.dispose();
@@ -1239,6 +1256,11 @@ export function VideoPipHost() {
       const current = useVideoPip.getState().session;
       const pip = useVideoPip.getState();
       if (!current || !pip.active) return;
+      if (current.source === "local" && liveProject(current)) {
+        // A live project's picture follows the player: the key only starts or stops the player.
+        broadcastMediaSync({ owner: "local-video", action: pip.playing ? "pause" : "play", trackId: current.trackId });
+        return;
+      }
       if (current.source === "network" && pip.failed) {
         networkRetryRef.current = { key: "", count: 0 };
         desiredPlayingRef.current = true;
@@ -1832,6 +1854,13 @@ export function VideoPipHost() {
             preload={isLocal ? "auto" : "none"}
             muted
           />
+          {live && showSurface && session?.source === "local" && (
+            <KdjvLivePicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
+              const pip = useVideoPip.getState();
+              if (pendingScrubRef.current === null) pip.setPosition(position);
+              if (pip.playing !== playing) pip.setPlaying(playing);
+            }} />
+          )}
           <canvas ref={pipCanvasRef} className="kd-pip-compositor" aria-hidden="true" />
           <video
             ref={pipVideoRef}

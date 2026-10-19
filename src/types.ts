@@ -957,6 +957,26 @@ export interface MaintenanceProgress {
  * 但前端已经没有浮层通知了，这条分支故意不在联合类型里：
  * 收到就当没这回事，各 store 的 switch 落到 default 直接忽略。
  */
+/** A `.kdjv` project as its live preview draws it (docs/kdjv.md, `kdjv.rs::Live`); seconds. */
+export interface KdjvLive {
+  duration: number;
+  width: number;
+  height: number;
+  sources: Array<{ kind: "video" | "image" | "gif" | "audio"; width: number; height: number; fps: number }>;
+  /** Picture clips; `track` 0 is the top one, `source` numbers `/api/kdjv/source/{track}/{n}`. */
+  clips: Array<{
+    source: number; track: number; at: number; in: number; out: number; length: number;
+    x: number; y: number; scale: number; opacity: number; fill: boolean; fade_in: number; fade_out: number;
+  }>;
+}
+
+/** What playing a project starts from: its sound, its render when there is one, its live picture. */
+export interface KdjvPreview {
+  sound: string;
+  render: string | null;
+  project: KdjvLive;
+}
+
 /** A `.kdjv` project being rendered for playing (docs/kdjv.md). */
 export interface KdjvProgress {
   path: string;

@@ -3256,6 +3256,29 @@ body[data-kd-search-pointer-dragging="true"] * {
   z-index: 1;
   opacity: 1;
 }
+/* A .kdjv project drawn live (KdjvLivePicture): its canvas contain-fitted over the video's place,
+   each clip a layer of its own, placed in percent of the canvas. */
+.kd-kdjv-live {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: #000;
+  pointer-events: none;
+}
+.kd-kdjv-live-canvas {
+  position: relative;
+  overflow: hidden;
+  background: #000;
+}
+.kd-kdjv-live-clip {
+  position: absolute;
+  display: block;
+  object-fit: fill;
+  max-width: none;
+}
 .kd-pip-compositor {
   position: fixed;
   left: -2px;

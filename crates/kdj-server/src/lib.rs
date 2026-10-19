@@ -148,6 +148,10 @@ fn media_path_allowed(path: &str) -> bool {
     ) || matches!(
         segments.as_slice(),
         ["api", "video", "youtube", "hls", ticket] if !ticket.is_empty()
+    ) || matches!(
+        // A project's live preview: only the files that project names (kdjv.rs `source`).
+        segments.as_slice(),
+        ["api", "kdjv", "source", id, n] if !id.is_empty() && !n.is_empty()
     )
 }
 
@@ -531,6 +535,14 @@ mod auth_tests {
                 "/api/library/audio/1?kdj_media_token=media-token",
                 None
             ),
+            &auth
+        ));
+        assert!(request_authorized(
+            &request(Method::GET, "/api/kdjv/source/7/0?kdj_media_token=media-token", None),
+            &auth
+        ));
+        assert!(!request_authorized(
+            &request(Method::POST, "/api/kdjv/preview?kdj_media_token=media-token", None),
             &auth
         ));
         assert!(request_authorized(

@@ -7806,6 +7806,18 @@ fn kdjv_render_for(path: &Path) -> ApiResult<Option<PathBuf>> {
         .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "工程还没有渲染好"))
 }
 
+/// A `.kdjv` project's sound: its render's, else the mix its live preview plays (kdjv.rs), there
+/// once the project has been played.
+fn kdjv_sound_for(path: &Path) -> ApiResult<Option<PathBuf>> {
+    use crate::compositions::workshop::kdjv;
+    if !kdjv::is_project_path(path) {
+        return Ok(None);
+    }
+    kdjv::sounded(path)
+        .map(Some)
+        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "工程还没有播放过"))
+}
+
 /// 缓存键里的文件 mtime。文件被换掉（重新打了标签、换了个更好的版本）之后
 /// 旧缓存必须自动作废，否则用户会一直看到旧封面 / 旧波形，还完全不知道怎么刷。
 /// 读不到就当 0——最坏是这份缓存一直命中，比每次都重算强。
@@ -7883,8 +7895,8 @@ async fn library_audio(
     if !path.is_file() {
         return Err(ApiError::not_found("音频文件已丢失"));
     }
-    if let Some(render) = kdjv_render_for(&path)? {
-        path = render;
+    if let Some(sound) = kdjv_sound_for(&path)? {
+        path = sound;
     }
     if is_video_container(&path) {
         path = extracted_audio(&path, track.id, &state.config.data_dir.join("audio-cache")).await?;
@@ -8501,8 +8513,9 @@ async fn library_waveform(
         .get(id)?
         .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
     if kdj_providers::workshop_images::is_image_path(Path::new(&track.path)) { return Err(ApiError::bad_request("图片没有音频波形")); }
-    // A project's sound is its render's (kdjv.rs), there once it has been played or rendered.
-    let project_render = kdjv_render_for(Path::new(&track.path))?;
+    // A project's sound is its render's or its live preview's mix (kdjv.rs), there once it has
+    // been played.
+    let project_render = kdjv_sound_for(Path::new(&track.path))?;
     let release_intent = crate::waveform::ReleaseOverviewIntent::from(params.intent);
     if params.profile == WaveformRequestProfile::ReleaseOverview && params.intent_only {
         state

@@ -3,14 +3,18 @@ use super::*;
 use crate::{error::ApiResult, state::AppState};
 use axum::{
     body::{Body, Bytes},
-    http::header,
+    extract::Path as AxumPath,
+    http::{header, HeaderMap},
     response::{IntoResponse, Response},
-    Extension, Json, Router, routing::post,
+    routing::{get, post},
+    Extension, Json, Router,
 };
 use serde::Deserialize;
 pub fn router(manager: Arc<Workshop>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/kdjv/check", post(kdjv_check))
+        .route("/api/kdjv/preview", post(kdjv_preview))
+        .route("/api/kdjv/source/{track_id}/{n}", get(kdjv_source))
         .route("/api/kdjv/render", post(kdjv_render))
         .route("/api/kdjv/export", post(kdjv_export))
         .layer(Extension(manager))
@@ -44,6 +48,65 @@ async fn kdjv_check(
 ) -> ApiResult<Json<kdjv::Checked>> {
     let (file, _) = kdjv_file(&m, &target)?;
     Ok(Json(m.kdjv_check(&file).await?))
+}
+/// What playing a project starts from (kdjv.rs `kdjv_preview`): its sound, mixed now if need be,
+/// with `kdjv.progress` meanwhile; its render when there is one; and the clips drawn live.
+async fn kdjv_preview(
+    Extension(m): Extension<Arc<Workshop>>,
+    Json(target): Json<KdjvTarget>,
+) -> ApiResult<Json<kdjv::Preview>> {
+    let (file, track_id) = kdjv_file(&m, &target)?;
+    let shown = file.to_string_lossy().into_owned();
+    let state = m.state.clone();
+    let cancel = CancellationToken::new();
+    let last = Mutex::new(u32::MAX);
+    let preview = m
+        .kdjv_preview(&file, &cancel, &|progress, detail| {
+            let step = (progress * 100.) as u32;
+            if std::mem::replace(&mut *last.lock().unwrap(), step) == step {
+                return;
+            }
+            state.hub.publish(
+                "kdjv.progress",
+                &serde_json::json!({"path": shown, "track_id": track_id, "progress": progress, "detail": detail, "error": null}),
+            );
+        })
+        .await;
+    if let Err(error) = &preview {
+        state.hub.publish(
+            "kdjv.progress",
+            &serde_json::json!({"path": shown, "track_id": track_id, "progress": 0, "detail": "", "error": format!("{error:#}")}),
+        );
+    }
+    Ok(Json(preview?))
+}
+/// One source file of a project's live preview, by the project's library row and the source's
+/// number: only the files that project names are served, with Range for seeking.
+async fn kdjv_source(
+    Extension(m): Extension<Arc<Workshop>>,
+    AxumPath((track_id, n)): AxumPath<(i64, usize)>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let (file, _) = kdjv_file(&m, &KdjvTarget { path: None, track_id: Some(track_id), stream: false })?;
+    let path = kdjv::source(&file, n).ok_or_else(|| crate::error::ApiError::not_found("工程里没有这个素材"))?;
+    let total = tokio::fs::metadata(&path)
+        .await
+        .map_err(|err| crate::error::ApiError::not_found(format!("读不到素材：{err}")))?
+        .len();
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "application/octet-stream",
+    };
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok()).filter(|v| !v.trim().is_empty());
+    crate::routes::audio_response(&path, total, mime.into(), range).await
 }
 /// Starts a project's render, or the wait for one under way (kdjv.rs keeps one per project).
 /// It runs on its own: a caller that goes away leaves it to finish. `kdjv.progress` tells the

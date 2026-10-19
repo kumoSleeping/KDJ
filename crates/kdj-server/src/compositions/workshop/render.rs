@@ -5,6 +5,7 @@ use std::{
     hash::{Hash, Hasher},
     time::Duration,
 };
+use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 pub const SAMPLE_RATE: u64 = 48_000;
 pub const CHUNK_MS: f64 = 8_000.;
@@ -372,7 +373,7 @@ impl Workshop {
                 if !m.is_file()
                     || !matches!(
                         e.path().extension().and_then(|s| s.to_str()),
-                        Some("pcm" | "mp4" | "jpg" | "png" | "json" | "afp")
+                        Some("pcm" | "wav" | "mp4" | "jpg" | "png" | "json" | "afp")
                     )
                 {
                     return None;
@@ -471,7 +472,8 @@ impl Workshop {
         Ok(bytes)
     }
     /// The sound of `p` between `lo` and `hi` (ms), mixed into `stage/mix.wav` from the
-    /// cached chunks of `audio_chunk`. Progress goes from 0 to 1.
+    /// cached chunks of `audio_chunk`, several at once (`preview_slots`), written in order.
+    /// Progress goes from 0 to 1.
     pub(super) async fn mix_file(
         &self,
         p: &CompositionProject,
@@ -487,9 +489,12 @@ impl Workshop {
             .await?;
         let first = (lo / CHUNK_MS).floor() as u64;
         let last = (hi / CHUNK_MS).ceil() as u64;
-        for n in first..last {
+        let mut chunks = futures_util::stream::iter(first..last)
+            .map(|n| async move { (n, self.audio_chunk(p, n, cancel).await) })
+            .buffered(4);
+        while let Some((n, bytes)) = chunks.next().await {
             check(cancel)?;
-            let bytes = self.audio_chunk(p, n, cancel).await?;
+            let bytes = bytes?;
             let begin = (frames(lo.max(n as f64 * CHUNK_MS)) - frames(n as f64 * CHUNK_MS)) * 4;
             let end = (frames(hi.min((n + 1) as f64 * CHUNK_MS)) - frames(n as f64 * CHUNK_MS)) * 4;
             file.write_all(&bytes[begin as usize..end as usize]).await?;

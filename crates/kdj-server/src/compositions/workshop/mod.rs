@@ -49,7 +49,11 @@ impl Workshop {
             cache,
             cache_locks: Mutex::new(HashMap::new()),
             cache_trim_at: Mutex::new(None),
-            preview_slots: tokio::sync::Semaphore::new(2),
+            // Sound chunks are mixed one FFmpeg each, on one thread: a project's sound uses
+            // half the cores, at most four.
+            preview_slots: tokio::sync::Semaphore::new(
+                std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 4)),
+            ),
             frame_slots: tokio::sync::Semaphore::new(2),
             export_slots: tokio::sync::Semaphore::new(1),
         }))

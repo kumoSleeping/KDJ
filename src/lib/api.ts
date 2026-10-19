@@ -941,6 +941,10 @@ export const api = {
   resolve: (url: string, limit = 0) => post<ResolveResponse>("/resolve", { url, limit }),
   intake: (body: IntakeRequest) => post<IntakeResponse>("/intake", body),
 
+  /** What playing a `.kdjv` project starts from (docs/kdjv.md): its sound (mixed now if need be, seconds), its render if any, its live picture. */
+  previewKdjv: (trackId: number) => post<import("../types").KdjvPreview>("/kdjv/preview", { track_id: trackId }),
+  /** The n-th source file of a project's live preview, with Range. */
+  kdjvSourceUrl: (trackId: number, n: number) => authenticatedGetUrl(`${bridge().baseUrl}/api/kdjv/source/${trackId}/${n}`),
   /** A `.kdjv` project's render (docs/kdjv.md): found in the cache, or made now (can take minutes). */
   renderKdjv: (trackId: number) => post<{ path: string; track_id: number | null }>("/kdjv/render", { track_id: trackId }),
   /** A `.kdjv` project written out as one MP4 beside it, never over an existing file. */

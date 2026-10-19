@@ -283,44 +283,152 @@ pub fn cover_frame(file: &Path) -> Option<(PathBuf, f64)> {
     doc.cover_frame(file.parent().unwrap_or(Path::new(".")))
 }
 
-/// Which render each project file plays from, as last rendered. The window asks for the render
-/// (POST /api/kdjv/render) before it plays a project; the library's media routes only look here.
-static RENDERED: std::sync::OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = std::sync::OnceLock::new();
-/// Where the renders are remembered across restarts (`<cache>/kdjv-index`): one small file per
-/// project, named by its path, holding the project's mtime and its render. Set by Workshop::new.
+/// What KDJ keeps of a project: its full render (picture and sound in one MP4, for 导出 MP4 and
+/// for playing once it exists) and its sound alone (the mix the live preview plays).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Made {
+    Render,
+    Sound,
+}
+
+/// What each project file plays from, as last made. The window asks for it (POST
+/// /api/kdjv/preview|render) before it plays a project; the library's media routes only look here.
+static MADE: std::sync::OnceLock<Mutex<HashMap<(PathBuf, Made), PathBuf>>> = std::sync::OnceLock::new();
+/// Where that is remembered across restarts (`<cache>/kdjv-index`): one small file per project
+/// and kind, named by the project's path, holding the project's mtime and the file made. Set by
+/// Workshop::new.
 pub(super) static INDEX: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-fn index_file(file: &Path) -> Option<PathBuf> {
+fn index_file(file: &Path, made: Made) -> Option<PathBuf> {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     file.hash(&mut h);
-    Some(INDEX.get()?.join(format!("{:016x}", h.finish())))
+    let suffix = match made {
+        Made::Render => "",
+        Made::Sound => ".sound",
+    };
+    Some(INDEX.get()?.join(format!("{:016x}{suffix}", h.finish())))
 }
 
 fn mtime(file: &Path) -> u64 {
     crate::waveform::file_mtime(file)
 }
 
-fn remember(file: &Path, render: &Path) {
+fn remember(file: &Path, made: Made, output: &Path) {
     let Ok(file) = std::fs::canonicalize(file) else { return };
-    if let Some(index) = index_file(&file) {
+    if let Some(index) = index_file(&file, made) {
         let _ = std::fs::create_dir_all(index.parent().unwrap_or(Path::new(".")));
-        let _ = std::fs::write(index, format!("{}\n{}", mtime(&file), render.display()));
+        let _ = std::fs::write(index, format!("{}\n{}", mtime(&file), output.display()));
     }
-    RENDERED.get_or_init(Default::default).lock().unwrap().insert(file, render.to_path_buf());
+    MADE.get_or_init(Default::default).lock().unwrap().insert((file, made), output.to_path_buf());
 }
 
-/// The render a project file last got, while it is still in the cache — remembered across
+/// What a project file last got of this kind, while it is still in the cache — remembered across
 /// restarts as long as the project file has not changed since.
-pub fn rendered(file: &Path) -> Option<PathBuf> {
+fn made(file: &Path, made: Made) -> Option<PathBuf> {
     let file = std::fs::canonicalize(file).ok()?;
-    let known = RENDERED.get_or_init(Default::default).lock().unwrap().get(&file).filter(|path| path.is_file()).cloned();
+    let known = MADE.get_or_init(Default::default).lock().unwrap().get(&(file.clone(), made)).filter(|path| path.is_file()).cloned();
     known.or_else(|| {
-        let text = std::fs::read_to_string(index_file(&file)?).ok()?;
-        let (stamp, render) = text.split_once('\n')?;
-        let render = PathBuf::from(render);
-        (stamp.parse::<u64>().ok()? == mtime(&file) && render.is_file()).then_some(render)
+        let text = std::fs::read_to_string(index_file(&file, made)?).ok()?;
+        let (stamp, output) = text.split_once('\n')?;
+        let output = PathBuf::from(output);
+        (stamp.parse::<u64>().ok()? == mtime(&file) && output.is_file()).then_some(output)
     })
+}
+
+/// The render a project file last got.
+pub fn rendered(file: &Path) -> Option<PathBuf> {
+    made(file, Made::Render)
+}
+
+/// What a project sounds like: its render, else the mix its live preview plays.
+pub fn sounded(file: &Path) -> Option<PathBuf> {
+    rendered(file).or_else(|| made(file, Made::Sound))
+}
+
+/// The n-th source file a project names (what its live preview loads), from the document alone:
+/// nothing is probed. None when the project names no such file.
+pub fn source(file: &Path, n: usize) -> Option<PathBuf> {
+    let doc = parse(&std::fs::read_to_string(file).ok()?).ok()?;
+    doc.sources(file.parent().unwrap_or(Path::new("."))).into_iter().nth(n)
+}
+
+/// A project as its live preview draws it: the canvas and each picture clip, its source by number
+/// (the order of `Doc::sources`, served by `/api/kdjv/source/{track}/{n}`).
+#[derive(Debug, Serialize)]
+pub struct Live {
+    pub duration: f64,
+    pub width: u32,
+    pub height: u32,
+    pub sources: Vec<LiveSource>,
+    pub clips: Vec<LiveClip>,
+}
+#[derive(Debug, Serialize)]
+pub struct LiveSource {
+    /// `video`, `image`, `gif` or `audio`.
+    pub kind: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+}
+/// One picture clip, in seconds as in the document.
+#[derive(Debug, Serialize)]
+pub struct LiveClip {
+    pub source: usize,
+    /// 0 is the top track.
+    pub track: usize,
+    pub at: f64,
+    #[serde(rename = "in")]
+    pub from: f64,
+    pub out: f64,
+    /// The clip's length in the project.
+    pub length: f64,
+    pub x: f64,
+    pub y: f64,
+    pub scale: f64,
+    pub opacity: f64,
+    pub fill: bool,
+    pub fade_in: f64,
+    pub fade_out: f64,
+}
+
+/// The live preview's view of a project: every picture clip and what its source is. Pure.
+pub fn live(p: &CompositionProject) -> Live {
+    let sources = p.sources.iter().map(|s| LiveSource { kind: s.kind.clone(), width: s.width, height: s.height, fps: s.fps }).collect();
+    let mut clips = vec![];
+    for (track, layer) in p.layers.iter().enumerate() {
+        for c in &layer.clips {
+            let Some(n) = p.sources.iter().position(|s| s.id == c.source_id) else { continue };
+            if !p.sources[n].visual() {
+                continue;
+            }
+            clips.push(LiveClip {
+                source: n,
+                track,
+                at: c.start_ms / 1000.,
+                from: c.source_in_ms / 1000.,
+                out: c.source_out_ms / 1000.,
+                length: c.duration() / 1000.,
+                x: c.picture.x,
+                y: c.picture.y,
+                scale: c.picture.scale,
+                opacity: c.picture.opacity,
+                fill: c.picture.crop_auto_fit,
+                fade_in: c.fades.video_in_ms / 1000.,
+                fade_out: c.fades.video_out_ms / 1000.,
+            });
+        }
+    }
+    Live { duration: p.duration() / 1000., width: p.canvas.width, height: p.canvas.height, sources, clips }
+}
+
+/// What playing a project starts from: the sound to hear, its render when there is one, and what
+/// the live preview draws.
+#[derive(Debug, Serialize)]
+pub struct Preview {
+    pub sound: PathBuf,
+    pub render: Option<PathBuf>,
+    pub project: Live,
 }
 
 /// What a check of a document found, for whoever wrote it.
@@ -388,6 +496,55 @@ impl Workshop {
         project(&doc, base, &probed)
     }
 
+    /// The project's sound alone, keyed like its render but by what is heard only.
+    fn kdjv_sound_cache(&self, p: &CompositionProject) -> Result<(String, PathBuf)> {
+        let name = format!("kdjv-sound-{}", key(&(&p.sources, &p.audio_project().layers))?);
+        let path = self.cache.join(format!("{name}.wav"));
+        Ok((name, path))
+    }
+
+    /// What playing a project needs at once: its sound, mixed now when it is not in the cache yet
+    /// (sound only, several chunks at a time: seconds, not the minutes of a render), its render if
+    /// one exists, and the clips the live preview draws. The picture is never rendered here.
+    pub async fn kdjv_preview(
+        &self,
+        file: &Path,
+        cancel: &CancellationToken,
+        progress: &(dyn Fn(f64, &str) + Sync),
+    ) -> Result<Preview> {
+        progress(0., "读取工程");
+        let p = self.kdjv_project(file, cancel).await?;
+        let (_, rendered) = self.kdjv_cache(&p)?;
+        let render = rendered.is_file().then_some(rendered);
+        if let Some(render) = &render {
+            remember(file, Made::Render, render);
+        }
+        let (name, cached) = self.kdjv_sound_cache(&p)?;
+        let lock = self.cache_lock(&name).await;
+        let guard = lock.lock().await;
+        if !cached.is_file() {
+            std::fs::create_dir_all(&self.cache)?;
+            let stage = self.cache.join(format!(".{name}-{}", id()));
+            std::fs::create_dir(&stage)?;
+            let _scratch = Scratch(stage.clone());
+            progress(0., "混合声音");
+            let mix = self
+                .mix_file(&p, &stage, 0., p.duration(), cancel, &|step| {
+                    if let Step::Progress(v) = step {
+                        progress(v, "混合声音");
+                    }
+                    Ok(())
+                })
+                .await?;
+            std::fs::rename(&mix, &cached)?;
+            self.trim_cache();
+        }
+        drop(guard);
+        remember(file, Made::Sound, &cached);
+        progress(1., "");
+        Ok(Preview { sound: cached, render, project: live(&p) })
+    }
+
     fn kdjv_cache(&self, p: &CompositionProject) -> Result<(String, PathBuf)> {
         let name = format!("kdjv-{}", key(&(&p.sources, &p.layers, &p.canvas))?);
         let path = self.cache.join(format!("{name}.mp4"));
@@ -426,7 +583,7 @@ impl Workshop {
         let lock = self.cache_lock(&name).await;
         let _guard = lock.lock().await;
         if cached.is_file() {
-            remember(file, &cached);
+            remember(file, Made::Render, &cached);
             return Ok(cached);
         }
         let _slot = tokio::select! {_ = cancel.cancelled() => bail!("渲染已取消"), s = self.export_slots.acquire() => s?};
@@ -448,7 +605,7 @@ impl Workshop {
         progress(0.2, "合成画面");
         self.picture_file(&p, &stage, &audio, &output, 0., hi, cancel, &|step| report(step, 0.2, 0.8)).await?;
         std::fs::rename(&output, &cached)?;
-        remember(file, &cached);
+        remember(file, Made::Render, &cached);
         self.trim_cache();
         progress(1., "");
         Ok(cached)
@@ -500,6 +657,33 @@ mod kdjv_tests {
         assert_eq!(p.canvas.width, 1280, "the canvas follows the first video, evened");
         assert_eq!(p.duration(), 15_000.);
         assert_eq!(doc.duration(), 15.);
+    }
+
+    #[test]
+    fn the_live_preview_draws_each_picture_clip_from_its_numbered_source() {
+        let doc = parse(
+            r#"{"kdjv":1,"tracks":[
+                {"clips":[{"src":"logo.mp4","at":2,"in":0,"out":4,"opacity":0.5,"fade_in":0.5,"fill":true}]},
+                {"clips":[{"src":"/media/a.mp4","at":0,"in":10,"out":20,"speed":2},
+                          {"src":"/media/song.flac","at":0,"in":0,"out":30}]}
+            ]}"#,
+        )
+        .unwrap();
+        let base = Path::new("/projects");
+        let song = Probed { kind: "audio".into(), video: false, ..video() };
+        let probed = HashMap::from([
+            (PathBuf::from("/projects/logo.mp4"), video()),
+            (PathBuf::from("/media/a.mp4"), video()),
+            (PathBuf::from("/media/song.flac"), song),
+        ]);
+        let live = live(&project(&doc, base, &probed).unwrap());
+        assert_eq!(live.clips.len(), 2, "a sound-only clip is not drawn");
+        let (top, fast) = (&live.clips[0], &live.clips[1]);
+        assert_eq!((top.track, top.source, top.fill, top.opacity, top.fade_in), (0, 0, true, 0.5, 0.5));
+        assert_eq!((fast.track, fast.source), (1, 1));
+        assert_eq!((fast.from, fast.out, fast.length), (10., 20., 5.), "twice as fast plays ten seconds in five");
+        assert_eq!(doc.sources(base)[fast.source], PathBuf::from("/media/a.mp4"), "numbered as /api/kdjv/source serves them");
+        assert_eq!(live.duration, 30.);
     }
 
     #[test]
