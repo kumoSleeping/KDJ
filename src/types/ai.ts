@@ -54,6 +54,8 @@ export interface AiToolStep {
   /** The text the model was given back. */
   text?: string;
   durationMs?: number;
+  /** When it started, in ms since the epoch: a download step finds its tasks from here on. */
+  startedAt?: number;
 }
 
 export interface AiTextPart {
@@ -90,3 +92,21 @@ export interface AiNotePart {
 }
 
 export type AiPart = AiToolStep | AiTextPart | AiUserPart | AiAskPart | AiNotePart;
+
+/** An earlier conversation, as the history lists it (kdj-server reads pi's session files). */
+export interface AiSession {
+  path: string;
+  id: string;
+  title: string;
+  messages: number;
+  /** ms since the epoch */
+  updated: number;
+}
+
+/** A login in the user's own pi (~/.pi/agent/auth.json) that can be brought into KDJ's. */
+export interface AiGlobalLogin {
+  id: string;
+  label: string;
+  kind: string;
+  importable: boolean;
+}

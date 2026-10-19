@@ -39,10 +39,10 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   - The place is read when the bubble arrives. `updateTask` cannot move a bubble; showing an id
     that is up at the other place sends that bubble away where it is — its owner is not told of
     a dismissal — and brings a new one up where it is now wanted.
-- **The AI dock.** While the AI corner is up at the bottom right (`docs/ai-dock.md`), the bottom
-  stack makes room for it: it stands to the dock's left when the window is wide enough for both
-  (with the bar put away, the playing song's bubble is pushed left of it), and on top of the dock
-  otherwise, rising from behind its top edge. The dock counts towards `--kd-info-lift`.
+- **The AI dock.** While the AI corner is up at the bottom right (`docs/ai-dock.md`), the playing
+  song's bubble keeps the corner and the dock stands on top of it (with the bar up the song's
+  bubble does not come up at all); every other bottom bubble stands to the dock's left when the
+  window is wide enough for both. The dock counts towards `--kd-info-lift`.
 - **The stack.** Each place has its own, and they mirror each other. The newest bubble rests
   nearest the stack's edge (the bar; at the top, the search row) and moves the older ones away
   from it. More than `TASK_VISIBLE_LIMIT` (3) in one place that leave by themselves, and the

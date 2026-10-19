@@ -128,7 +128,7 @@ export function reducePiEvent(t: AiTranscript, event: PiEvent): AiTranscript {
     case "tool_execution_start": {
       const id = text(event.toolCallId);
       if (!id || t.parts.some(part => part.id === id)) return t;
-      const step: AiToolStep = { kind: "tool", id, tool: text(event.toolName), args: record(event.args), state: "running" };
+      const step: AiToolStep = { kind: "tool", id, tool: text(event.toolName), args: record(event.args), state: "running", startedAt: Date.now() };
       return { ...t, parts: [...t.parts, step] };
     }
     case "tool_execution_update":
@@ -154,6 +154,47 @@ export function reducePiEvent(t: AiTranscript, event: PiEvent): AiTranscript {
     default:
       return t;
   }
+}
+
+/**
+ * An earlier conversation drawn again from pi's messages (`get_messages` after `switch_session`):
+ * the same parts the live stream would have left, without streaming.
+ */
+export function transcriptFromMessages(messages: unknown): AiTranscript {
+  const parts: AiPart[] = [];
+  const list = Array.isArray(messages) ? messages : [];
+  list.forEach((raw, index) => {
+    const message = record(raw);
+    if (message.role === "user") {
+      const content = message.content;
+      const line = typeof content === "string" ? content
+        : Array.isArray(content) ? content.map(block => record(block).type === "text" ? text(record(block).text) : "").join("") : "";
+      if (line) parts.push({ kind: "user", id: `h${index}`, text: line });
+      return;
+    }
+    if (message.role === "assistant") {
+      const content = Array.isArray(message.content) ? message.content : [];
+      content.forEach((rawBlock, at) => {
+        const block = record(rawBlock);
+        const id = `h${index}:${at}`;
+        if (block.type === "text" && text(block.text)) parts.push({ kind: "text", id, text: text(block.text), streaming: false });
+        else if (block.type === "thinking" && text(block.thinking)) parts.push({ kind: "thinking", id, text: text(block.thinking), streaming: false });
+        else if (block.type === "toolCall" && text(block.id)) {
+          parts.push({ kind: "tool", id: text(block.id), tool: text(block.name), args: record(block.arguments), state: "done" });
+        }
+      });
+      if (message.stopReason === "error") parts.push({ kind: "note", id: `h${index}:error`, text: text(message.errorMessage) || "模型返回错误", tone: "error" });
+      return;
+    }
+    if (message.role === "toolResult") {
+      const id = text(message.toolCallId);
+      const at = parts.findIndex(part => part.id === id);
+      if (at < 0) return;
+      const step = parts[at] as AiToolStep;
+      parts[at] = { ...step, state: message.isError ? "error" : "done", details: message.details, text: resultText(message) };
+    }
+  });
+  return { parts, running: false, message: list.length };
 }
 
 let localId = 0;

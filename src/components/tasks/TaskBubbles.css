@@ -17,18 +17,10 @@
   z-index: 120;
   top: 0;
   right: 0;
-  bottom: calc(var(--kd-task-floor, 0px) + var(--kd-task-under, 0px));
+  bottom: var(--kd-task-floor, 0px);
   left: 0;
   overflow: hidden;
   pointer-events: none;
-}
-/* The AI dock stands at the bottom right (docs/ai-dock.md): the bottom stack moves to its left
-   (--kd-task-aside, the dock's width and the gap to it) or, in a window without room for both,
-   onto it (--kd-task-under, added to the floor above). Moving aside follows the dock in or out
-   on the large-surface clock. */
-.kd-task-host[data-place="bottom"] {
-  right: var(--kd-task-aside, 0px);
-  transition: right var(--kd-motion-in) var(--kd-ease-out);
 }
 /* The top host hangs under the search row, where the drawer's panels have their place: it
    clips at that row's bottom edge and ends at the right edge of the list's column
@@ -69,11 +61,13 @@
    the host). */
 .kd-task-slot {
   position: absolute;
-  right: var(--kd-task-gap);
+  /* --kd-task-aside: clear of the AI dock (docs/ai-dock.md), which keeps the corner above the
+     playing song's bubble; the others stand to its left. */
+  right: calc(var(--kd-task-gap) + var(--kd-task-aside, 0px));
   bottom: var(--kd-task-gap);
   width: min(24rem, calc(100% - 2 * var(--kd-task-gap)));
   transform: translateY(calc(var(--kd-task-dir) * var(--kd-task-lift, 0px)));
-  transition: transform var(--kd-task-in) var(--kd-task-in-ease);
+  transition: transform var(--kd-task-in) var(--kd-task-in-ease), right var(--kd-task-in) var(--kd-task-in-ease);
 }
 .kd-task-host[data-place="top"] .kd-task-slot {
   top: var(--kd-task-gap);

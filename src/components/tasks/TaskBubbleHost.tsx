@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { AlertTriangle, Check, ChevronsDown, ChevronsUp, ChevronsUpDown, Info, LoaderCircle } from "lucide-react";
-import { useAiDockPlace } from "../../lib/aiDockPlace";
+import { setAiDockUnder, useAiDockPlace } from "../../lib/aiDockPlace";
 import { useCoverLoad } from "../../lib/coverLoad";
 import { useMiniPlayer } from "../../lib/miniPlayer";
 import { MOTION_MICRO_MS, MOTION_MICRO_OUT_MS, MOTION_REDUCED_MS } from "../../lib/motion";
@@ -99,6 +99,8 @@ interface TaskBubbleProps {
   /** Bubbles nearer the stack's edge are drawn over those beyond them, so one that leaves goes
    *  behind what stays. */
   front: number;
+  /** How far left of its place it stands, to clear the AI dock, in px; 0 in its place. */
+  aside: number;
   held: boolean;
   onHeld(key: string, held: boolean): void;
   onSize(key: string, height: number | null): void;
@@ -129,7 +131,7 @@ function TaskBubble(props: TaskBubbleProps) {
   return <ReadyTaskBubble {...props} entry={preparedEntry} preparing={covers === null} />;
 }
 
-function ReadyTaskBubble({ entry, lift, away, front, held, onHeld, onSize, preparing }: TaskBubbleProps & { preparing: boolean }) {
+function ReadyTaskBubble({ entry, lift, away, front, aside, held, onHeld, onSize, preparing }: TaskBubbleProps & { preparing: boolean }) {
   const id = entry.spec.id;
   /** This arrival, in the host's books. */
   const key = taskEntryKey(entry);
@@ -292,7 +294,8 @@ function ReadyTaskBubble({ entry, lift, away, front, held, onHeld, onSize, prepa
   // The key that sends it away points the way it goes.
   const Away = entry.place === "top" ? ChevronsUp : ChevronsDown;
   return <div className="kd-task-slot" data-size={spec.size ?? "regular"}
-    style={{ "--kd-task-lift": `${lift}px`, "--kd-task-away": away === null ? undefined : `${away}px`, zIndex: front } as CSSProperties}>
+    style={{ "--kd-task-lift": `${lift}px`, "--kd-task-away": away === null ? undefined : `${away}px`,
+      "--kd-task-aside": aside ? `${aside}px` : undefined, zIndex: front } as CSSProperties}>
     <article ref={node} className="kd-task" role={tone === "error" ? "alert" : "status"}
       data-kind={spec.kind} data-tone={tone} data-phase={entry.leaving || swapping ? "out" : "in"}
       data-expanded={expanded || undefined} data-held={held || preparing || swapping || undefined}
@@ -379,9 +382,12 @@ interface TaskStack {
  * instead of crossing its face from the stack's edge: the base is drawn over it, and `away` is
  * where it is wholly behind the base. That holds while the base is at least as large a size
  * and tall enough to hide it; otherwise it travels to the stack's edge like any other.
+ *
+ * `detachBase`: the base keeps the corner on its own while the others stand elsewhere (beside the
+ * AI dock, docs/ai-dock.md): they stack from the edge as if it were not there.
  */
 function layStack(place: TaskPlacement, entries: readonly TaskBubbleEntry[], sizes: Readonly<Record<string, number>>,
-  lifts: Record<string, number>): TaskStack {
+  lifts: Record<string, number>, detachBase = false): TaskStack {
   const ordered = entries.filter(entry => entry.place === place)
     .sort((a, b) => Number(!!b.spec.base) - Number(!!a.spec.base) || b.order - a.order);
   const away: Record<string, number> = {};
@@ -392,6 +398,14 @@ function layStack(place: TaskPlacement, entries: readonly TaskBubbleEntry[], siz
     const height = sizes[key] ?? 0;
     if (height === 0) continue; // Still preparing: it takes no room in the stack or drawer.
     const rank = SIZE_RANK[entry.spec.size ?? "regular"];
+    if (detachBase && entry.spec.base) {
+      if (entry.leaving) lifts[key] ??= 0;
+      else lifts[key] = 0;
+      if (entry.leaving) continue;
+      if (taskStay(entry.spec) === 0) kept = Math.max(kept, height + EDGE_GAP[place] * 2);
+      staying += 1;
+      continue;
+    }
     if (entry.leaving) lifts[key] ??= stacked;
     else lifts[key] = stacked;
     if (!entry.spec.base && cover && height > 0 && rank <= cover.rank && height + BEHIND_INSET <= cover.to - cover.from) {
@@ -465,12 +479,11 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
   useLayoutEffect(() => { setRoot(document.querySelector<HTMLElement>(".kd-app")); }, []);
   const floor = usePlayerBarHeight(root);
 
-  // The AI dock stands at the bottom right, where this stack would (docs/ai-dock.md). The stack
-  // moves to its left when the window has room for both side by side, and otherwise stands on
-  // top of it, rising from behind its top edge as it does from behind the bar's.
+  // The AI dock stands at the bottom right (docs/ai-dock.md), on top of the playing song's bubble,
+  // which keeps the corner. Every other bubble moves to the dock's left when the window has room
+  // for both side by side.
   const dock = useAiDockPlace(state => state.place);
   const aside = dock?.beside ? dock.width + EDGE_GAP.bottom : 0;
-  const under = dock && !dock.beside ? dock.height + EDGE_GAP.bottom : 0;
 
   // The top stack hangs from the top edge of the place the drawer's panels have: the list's
   // column under the search row (.kd-drawer-area, see Drawer.css), which is two rows down in a
@@ -498,7 +511,7 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
   }, [root, topUp]);
 
   const lifts = useRef<Record<string, number>>({});
-  const bottom = layStack("bottom", entries, sizes, lifts.current);
+  const bottom = layStack("bottom", entries, sizes, lifts.current, aside > 0);
   const top = layStack("top", entries, sizes, lifts.current);
   for (const key of Object.keys(lifts.current)) if (!entries.some(entry => taskEntryKey(entry) === key)) delete lifts.current[key];
 
@@ -507,12 +520,15 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
   // While a stack rides the sliding bar, the list already reaches the window's bottom and the
   // stack is still on the bar: the drawer keeps clear of the bar's height as well, and takes
   // that room when the bar is gone.
-  // The dock is kept up as well: beside it the drawer clears the taller of the two, on top of
-  // it the two together.
-  const dockReach = dock ? dock.height + EDGE_GAP.bottom * 2 : 0;
-  const kept = !dock ? bottom.kept
-    : dock.beside ? Math.max(bottom.kept, dockReach)
-      : bottom.kept > 0 ? bottom.kept + dock.height + EDGE_GAP.bottom : dockReach;
+  // How far the playing song's bubble reaches up from the floor, its gap included: the dock
+  // stands on it, and follows it as it grows or folds.
+  const base = bottom.ordered.find(entry => entry.spec.base && !entry.leaving);
+  const baseHeight = base ? sizes[taskEntryKey(base)] ?? 0 : 0;
+  const under = baseHeight > 0 ? baseHeight + EDGE_GAP.bottom : 0;
+  useEffect(() => setAiDockUnder(under), [under]);
+  useEffect(() => () => setAiDockUnder(0), []);
+  // The dock is kept up as well: the drawer clears its top.
+  const kept = dock ? Math.max(bottom.kept, under + dock.height + EDGE_GAP.bottom * 2) : bottom.kept;
   const lift = kept > 0 ? Math.round(kept + (riding ? floor : 0)) : 0;
   useEffect(() => {
     if (lift > 0) document.documentElement.style.setProperty("--kd-info-lift", `${lift}px`);
@@ -546,6 +562,7 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
     return stack.ordered.map((entry, index) => {
       const key = taskEntryKey(entry);
       return <TaskBubble key={key} entry={entry} lift={lifts.current[key] ?? 0} away={stack.away[key] ?? null}
+        aside={stack === bottom && !entry.spec.base ? aside : 0}
         front={stack.ordered.length - index} held={held} onHeld={onHeld} onSize={onSize} />;
     });
   };
@@ -554,8 +571,7 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
       {bottom.ordered.length > 0 && <div className="kd-task-host" data-place="bottom"
         data-floor={riding && !prefersReducedSeekMotion() ? (barPhase === "leaving" ? "down" : "up") : undefined}
         data-under-bar={underBar ? "true" : undefined}
-        style={{ ...TASK_CLOCK, "--kd-task-floor": `${barPhase === "up" ? floor : 0}px`, "--kd-task-ride": `${floor}px`,
-          "--kd-task-aside": aside ? `${aside}px` : undefined, "--kd-task-under": under ? `${under}px` : undefined } as CSSProperties}>
+        style={{ ...TASK_CLOCK, "--kd-task-floor": `${barPhase === "up" ? floor : 0}px`, "--kd-task-ride": `${floor}px` } as CSSProperties}>
         {bubbles(bottom)}
       </div>}
       {top.ordered.length > 0 && <div className="kd-task-host" data-place="top"

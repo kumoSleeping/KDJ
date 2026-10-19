@@ -67,8 +67,10 @@ function kdj(args: string[], signal?: AbortSignal, onProgress?: (progress: Progr
   });
 }
 
+/** `data` for the AI corner as it is; for the model without cover addresses, which only draw. */
 function result(data: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(data) }], details: data };
+  const text = JSON.stringify(data, (key, value) => (key === "cover" ? undefined : value));
+  return { content: [{ type: "text" as const, text }], details: data };
 }
 
 /** `--flag value` for each value that is set. */
@@ -203,6 +205,17 @@ const align = defineTool({
   },
 });
 
+/** Carried out by the KDJ window, which sees this call in pi's stream and plays the track. */
+const play = defineTool({
+  name: "kdj_play",
+  label: "播放",
+  description: "在 KDJ 里播放曲库中的一首歌：用 kdj_download 或 kdj_library_list 给出的 track_id。",
+  parameters: Type.Object({ track_id: Type.Integer() }),
+  async execute(_id, params) {
+    return result({ track_id: params.track_id, playing: true });
+  },
+});
+
 const browserProbe = defineTool({
   name: "browser_probe",
   label: "探测网络",
@@ -237,7 +250,7 @@ const browserOpen = defineTool({
 });
 
 export default function (pi: ExtensionAPI) {
-  for (const tool of [status, search, download, login, libraryList, libraryGet, peek, align, browserProbe, browserSearch, browserOpen]) {
+  for (const tool of [status, search, download, login, libraryList, libraryGet, peek, align, play, browserProbe, browserSearch, browserOpen]) {
     pi.registerTool(tool);
   }
 }

@@ -12,13 +12,23 @@ import {
   addUserLine,
   answerAsk,
   reducePiEvent,
+  transcriptFromMessages,
   type AiTranscript,
 } from "../lib/aiTranscript";
-import type { AiStatus } from "../types/ai";
+import type { AiSession, AiStatus } from "../types/ai";
 import type { WsEvent } from "../types";
 
 interface AiStore extends AiTranscript {
   open: boolean;
+  /** What the dock shows: the conversation, or the earlier ones to resume. */
+  view: "chat" | "history";
+  sessions: AiSession[] | null;
+  /** The earlier conversation this one continues, for the dock's title. */
+  title: string;
+  setView(view: "chat" | "history"): void;
+  loadSessions(): Promise<void>;
+  /** Resumes an earlier conversation: pi switches to it and the dock draws it again. */
+  openSession(session: AiSession): Promise<void>;
   /** A line put into the composer from outside (a tip's example); `n` tells two alike apart. */
   seed: { text: string; n: number } | null;
   /** Opens the dock with `text` written in its field, not sent. */
@@ -53,6 +63,9 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
 export const useAiStore = create<AiStore>((set, get) => ({
   ...EMPTY_TRANSCRIPT,
   open: false,
+  view: "chat",
+  sessions: null,
+  title: "",
   seed: null,
   status: null,
   statusError: "",
@@ -64,6 +77,25 @@ export const useAiStore = create<AiStore>((set, get) => ({
   },
   toggle() {
     get().setOpen(!get().open);
+  },
+  setView(view) {
+    set({ view });
+    if (view === "history") void get().loadSessions();
+  },
+  async loadSessions() {
+    try {
+      set({ sessions: (await aiApi.sessions()).sessions });
+    } catch (error) {
+      set(state => ({ ...addNote(state, message(error), "error"), view: "chat" }));
+    }
+  },
+  async openSession(session) {
+    try {
+      const { messages } = await aiApi.openSession(session.path);
+      set({ ...transcriptFromMessages(messages), title: session.title, view: "chat" });
+    } catch (error) {
+      set(state => ({ ...addNote(state, message(error), "error"), view: "chat" }));
+    }
   },
   suggest(text) {
     set(state => ({ seed: { text, n: (state.seed?.n ?? 0) + 1 } }));
@@ -99,7 +131,7 @@ export const useAiStore = create<AiStore>((set, get) => ({
     }
   },
   async reset() {
-    set({ ...EMPTY_TRANSCRIPT });
+    set({ ...EMPTY_TRANSCRIPT, title: "", view: "chat" });
     try {
       await aiApi.reset();
     } catch (error) {
@@ -121,6 +153,12 @@ export const useAiStore = create<AiStore>((set, get) => ({
 
   handleEvent(event) {
     if (event.type === "ai.event") {
+      // pi's kdj_play is carried out here, by the window that plays (docs/ai-dock.md).
+      const payload = event.payload;
+      if (payload.type === "tool_execution_start" && payload.toolName === "kdj_play") {
+        const trackId = Number((payload.args as { track_id?: unknown } | undefined)?.track_id);
+        void import("../lib/aiPlay").then(module => module.playLibraryTrack(trackId));
+      }
       set(state => {
         const next = reducePiEvent(state, event.payload);
         return next === state ? state : { parts: next.parts, running: next.running, message: next.message };

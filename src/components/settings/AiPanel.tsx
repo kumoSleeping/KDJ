@@ -4,7 +4,7 @@ import { aiApi } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
 import { copyText } from "../../lib/copyText";
 import { useAiStore } from "../../stores/aiStore";
-import type { AiModel } from "../../types/ai";
+import type { AiGlobalLogin, AiModel } from "../../types/ai";
 import { Button, InlineNotice, Panel } from "../common";
 import { Select } from "../common/Select";
 
@@ -15,7 +15,8 @@ const HOME_PAGE = "https://pi.dev";
 
 /**
  * 设置 → 系统 → AI (docs/ai-dock.md): the pi KDJ runs, the provider, its key and the model. The key
- * is written to KDJ's own pi directory (data/ai/pi-agent/auth.json), never to the global ~/.pi.
+ * is written to KDJ's own pi directory (data/ai/pi-agent/auth.json), never to the global ~/.pi; a
+ * key the global pi already has can be brought over from there.
  */
 export function AiPanel() {
   const status = useAiStore(state => state.status);
@@ -29,6 +30,25 @@ export function AiPanel() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState("");
+  const [global, setGlobal] = useState<AiGlobalLogin[]>([]);
+  const [importing, setImporting] = useState("");
+  useEffect(() => {
+    let live = true;
+    aiApi.globalLogins().then(result => { if (live) setGlobal(result.logins); }).catch(() => undefined);
+    return () => { live = false; };
+  }, []);
+  const bring = async (login: AiGlobalLogin) => {
+    setImporting(login.id);
+    setError("");
+    try {
+      setStatus(await aiApi.importLogin(login.id));
+      setProvider(login.id);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setImporting("");
+    }
+  };
 
   useEffect(() => {
     setChecking(true);
@@ -115,6 +135,14 @@ export function AiPanel() {
             aria-label={`${chosen?.label ?? provider} API Key`} onChange={event => setKey(event.target.value)} />
           <Button variant="ghost" size="sm" type="submit" disabled={saving || !key.trim()}>保存</Button>
         </form>
+        {global.length > 0 && <div className="kd-ffmpeg-actions kd-ai-global">
+          <span className="kd-ai-prompt-copy">从 pi 导入</span>
+          {global.map(login => login.importable
+            ? <Button key={login.id} variant="ghost" size="sm" disabled={!!importing} onClick={() => void bring(login)}>
+              {importing === login.id ? "导入中…" : login.label}
+            </Button>
+            : <span key={login.id} className="kd-ai-prompt-copy" title="订阅登录不能共用：两边会互相顶掉登录">{login.label} · 订阅登录</span>)}
+        </div>}
         {models.length > 0 && <label className="kd-ffmpeg-actions"><span className="kd-ai-prompt-copy">模型</span>
           <Select className="kd-select" value={model ?? ""} disabled={saving}
             onChange={event => void save({ model: event.target.value || null })}>

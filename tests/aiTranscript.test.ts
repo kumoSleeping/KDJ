@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EMPTY_TRANSCRIPT, addUserLine, answerAsk, reducePiEvent, resultText, type AiTranscript } from "../src/lib/aiTranscript";
+import { EMPTY_TRANSCRIPT, addUserLine, answerAsk, reducePiEvent, resultText, transcriptFromMessages, type AiTranscript } from "../src/lib/aiTranscript";
 import type { PiEvent } from "../src/types/ai";
 
 const run = (events: PiEvent[], from: AiTranscript = EMPTY_TRANSCRIPT) => events.reduce(reducePiEvent, from);
@@ -71,4 +71,21 @@ test("the process ending stops the run and is told", () => {
 test("tool results read only their text blocks", () => {
   assert.equal(resultText({ content: [{ type: "text", text: "a" }, { type: "image" }, { type: "text", text: "b" }] }), "a\nb");
   assert.equal(resultText(null), "");
+});
+
+test("an earlier conversation is drawn again from pi's messages", () => {
+  const t = transcriptFromMessages([
+    { role: "user", content: "下载 FX 战士的 OP" },
+    { role: "assistant", content: [
+      { type: "thinking", thinking: "先搜索" },
+      { type: "toolCall", id: "c1", name: "kdj_search", arguments: { text: "FX战士久留美 OP" } },
+    ] },
+    { role: "toolResult", toolCallId: "c1", toolName: "kdj_search", content: [{ type: "text", text: "{}" }], details: { items: [] }, isError: false },
+    { role: "assistant", content: [{ type: "text", text: "找到了" }] },
+  ]);
+  assert.deepEqual(t.parts.map(part => part.kind), ["user", "thinking", "tool", "text"]);
+  const step = t.parts[2];
+  assert.ok(step.kind === "tool" && step.state === "done" && step.tool === "kdj_search");
+  assert.deepEqual(step.kind === "tool" && step.details, { items: [] });
+  assert.equal(t.running, false);
 });

@@ -137,6 +137,7 @@ fn project_song(source: &SongSource) -> Value {
         "duration": source.duration,
         "max_quality": source.max_quality,
         "vip": source.vip,
+        "cover": source.cover,
     })
 }
 

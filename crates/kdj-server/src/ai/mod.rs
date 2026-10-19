@@ -9,6 +9,7 @@
 //! prompt (kdj-prompt.md).
 
 mod pi;
+mod sessions;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -264,11 +265,17 @@ impl AiBridge {
         let configured = self.configured();
         let choice = self.choice();
         let running = self.process.lock().await.is_some();
+        // The offered providers, then any other one a key was brought in for (from the global pi).
+        let mut providers: Vec<Value> = PROVIDERS
+            .iter()
+            .map(|(id, label)| json!({ "id": id, "label": label, "configured": configured.iter().any(|c| c == id) }))
+            .collect();
+        for id in configured.iter().filter(|id| !PROVIDERS.iter().any(|(known, _)| known == id)) {
+            providers.push(json!({ "id": id, "label": id, "configured": true }));
+        }
         json!({
             "pi": pi,
-            "providers": PROVIDERS.iter().map(|(id, label)| json!({
-                "id": id, "label": label, "configured": configured.iter().any(|c| c == id),
-            })).collect::<Vec<_>>(),
+            "providers": providers,
             "provider": choice.provider,
             "model": choice.model,
             "running": running,
@@ -481,10 +488,10 @@ fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<O
 }
 
 pub async fn set_provider(State(state): State<Arc<AppState>>, Json(body): Json<ProviderBody>) -> ApiResult<Json<Value>> {
-    if !PROVIDERS.iter().any(|(id, _)| *id == body.provider) {
+    let bridge = bridge(&state);
+    if !PROVIDERS.iter().any(|(id, _)| *id == body.provider) && !bridge.configured().contains(&body.provider) {
         return Err(ApiError::bad_request(format!("不支持的服务商：{}", body.provider)));
     }
-    let bridge = bridge(&state);
     let before = bridge.choice();
     let mut choice = before.clone();
     let mut restart = false;
@@ -581,6 +588,92 @@ pub async fn answer(State(state): State<Arc<AppState>>, Json(body): Json<AnswerB
     }
     process.tell(message).await?;
     Ok(Json(json!({})))
+}
+
+// ---------------------------------------------------------------- history
+
+pub async fn sessions_list(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let dir = bridge(&state).paths.sessions.clone();
+    let sessions = tokio::task::spawn_blocking(move || sessions::list(&dir)).await.unwrap_or_default();
+    Json(json!({ "sessions": sessions }))
+}
+
+#[derive(Deserialize)]
+pub struct OpenBody {
+    path: String,
+}
+
+/// Resumes an earlier conversation: pi switches to its session and gives back its messages, which
+/// the window draws again.
+pub async fn sessions_open(State(state): State<Arc<AppState>>, Json(body): Json<OpenBody>) -> ApiResult<Json<Value>> {
+    let bridge = bridge(&state);
+    let path = sessions::inside(&bridge.paths.sessions, &body.path).ok_or_else(|| ApiError::not_found("找不到这段对话"))?;
+    let process = bridge.process(&state).await?;
+    if process.streaming.load(Ordering::Relaxed) {
+        process.send(json!({ "type": "abort" })).await?;
+    }
+    let switched = process.send(json!({ "type": "switch_session", "sessionPath": path })).await?;
+    if switched["cancelled"] == true {
+        return Err(ApiError::bad_request("pi 没有切换到这段对话"));
+    }
+    let messages = process.send(json!({ "type": "get_messages" })).await?;
+    Ok(Json(json!({ "messages": messages["messages"] })))
+}
+
+// ---------------------------------------------------------------- the global pi's logins
+
+/// The user's own pi directory: `PI_CODING_AGENT_DIR` when KDJ was started with one, else
+/// `~/.pi/agent`.
+fn global_agent_dir() -> Option<PathBuf> {
+    std::env::var_os("PI_CODING_AGENT_DIR")
+        .map(PathBuf::from)
+        .or_else(|| pi::home().map(|home| home.join(".pi").join("agent")))
+}
+
+/// The logins in the global pi. A key can be brought into KDJ's directory; a subscription login
+/// cannot, because both copies would renew the same token and log each other out.
+pub async fn global_logins(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let ours = bridge(&state).paths.agent.clone();
+    let Some(dir) = global_agent_dir().filter(|dir| *dir != ours) else {
+        return Json(json!({ "logins": [] }));
+    };
+    let auth = read_object(&dir.join("auth.json")).unwrap_or_default();
+    let logins: Vec<Value> = auth
+        .iter()
+        .map(|(id, entry)| {
+            let kind = entry["type"].as_str().unwrap_or_default();
+            let label = PROVIDERS.iter().find(|(known, _)| known == id).map(|(_, label)| *label).unwrap_or(id);
+            json!({ "id": id, "label": label, "kind": kind, "importable": kind == "api_key" })
+        })
+        .collect();
+    Json(json!({ "path": dir.display().to_string(), "logins": logins }))
+}
+
+#[derive(Deserialize)]
+pub struct ImportBody {
+    provider: String,
+}
+
+pub async fn import_login(State(state): State<Arc<AppState>>, Json(body): Json<ImportBody>) -> ApiResult<Json<Value>> {
+    let bridge = bridge(&state);
+    let dir = global_agent_dir().filter(|dir| *dir != bridge.paths.agent).ok_or_else(|| ApiError::not_found("没有找到全局 pi 的目录"))?;
+    let auth = read_object(&dir.join("auth.json"))?;
+    let entry = auth.get(&body.provider).ok_or_else(|| ApiError::not_found(format!("全局 pi 里没有 {} 的登录", body.provider)))?;
+    if entry["type"] != "api_key" {
+        return Err(ApiError::bad_request("订阅登录不能共用：两边会互相顶掉登录，请在 KDJ 里另填 API Key"));
+    }
+    update_object(&bridge.paths.auth(), |ours| {
+        ours.insert(body.provider.clone(), entry.clone());
+    })?;
+    let before = bridge.choice();
+    bridge.save_choice(&Choice {
+        provider: Some(body.provider.clone()),
+        model: if before.provider.as_deref() == Some(body.provider.as_str()) { before.model } else { None },
+    })?;
+    bridge.stop().await;
+    let status = bridge.status(false).await;
+    state.hub.publish("ai.status", &status);
+    Ok(Json(status))
 }
 
 #[cfg(test)]

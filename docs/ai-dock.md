@@ -10,23 +10,31 @@ KDJ 里的 AI 是用户自己装的 [pi](https://pi.dev)，由 kdj-server 以 `p
 
 ## 位置
 
-- 入口是顶栏右侧按键里的 **AI**（`ChromeActions.tsx`，下载与导出之后），按下时浮层在。只在桌面端出现。
-- 浮层在右下角，和底部气泡同样的间距，站在播放条上；播放条收起时随它下到窗口底边（`translate`，
-  播放条自己的时钟）。从播放条后面滑上来（`motion("slide", { edge: "bottom" })`），宽度与普通气泡相同。
-- **底部气泡给它让位**（`useAiDockPlace`，`TaskBubbleHost` 读）：
-  - 窗口够宽（浮层 + 一个普通气泡的宽度）：底部气泡整体移到浮层**左边**（`--kd-task-aside`）。
-    播放条收起时也一样——正在播放的气泡被挤到左边，右边是 AI。
-  - 窗口太窄：气泡叠在浮层**上面**，从浮层上沿后面升起（`--kd-task-under`）。
-- 抽屉的底边让开浮层（并入 `--kd-info-lift`）：并排时取两者中较高的，叠放时取两者之和。
+- 入口是顶栏右侧按键里的 **AI**（`ChromeActions.tsx`，下载与导出之后），按下时窗口在。只在桌面端出现。
+- 一个小对话窗，在右下角，和底部气泡同样的间距；宽 28rem（与播放中的大气泡同宽），高到 44rem，窗口矮时
+  随之变矮。从播放条后面滑上来（`motion("slide", { edge: "bottom" })`）。
+- **播放条在**：窗口站在播放条上。打开期间播放中的气泡不弹出（`NowPlayingTask` 让位），播放条就是播放控制。
+- **播放条收起**：播放中的气泡留在右下角原位，窗口站在它上面、右边对齐；气泡长高或收起（迷你控制那一行）时，
+  窗口跟着上下移动，对话不变（`useAiDockPlace.under`，由 `TaskBubbleHost` 发布）。
+- **其他气泡**（下载、导出等）：窗口够宽时移到窗口左边，从窗口底边开始叠（`--kd-task-aside`，
+  `layStack(…, detachBase)`）；太窄时留在原来的堆里。
+- 抽屉的底边让开窗口顶（并入 `--kd-info-lift`）。
 
 ## 对话
 
-- pi 的 RPC 事件原样经 WebSocket 以 `ai.event` 发给窗口，`reducePiEvent`（`aiTranscript.ts`）折成：
-  用户的话、模型的文字（流式，`message_end` 为准）、思考（收起）、**每个工具调用一步**
-  （`tool_execution_start` → `update` → `end`，`details` 是 CLI 命令自己的 JSON）、扩展的提问
-  （`extension_ui_request` 的 select / confirm / input，在浮层里回答）、提示与错误。
-- pi 工作时发出的话是 steer；什么都没写时发送键变成停止（`abort`）。新对话键让 pi 开新会话。
-- 浮层里只写状态：没装 pi、pi 无法运行、未设置模型，各带一个「设置」键。空的时候什么都不写。
+- 传统的对话流：用户的话在右边的浅色气泡里，模型的回复是正文颜色、不加气泡（`AiMarkdown.tsx`：段落、列表、
+  粗体、代码、链接），思考过程边生成边显示在一个只露最新几行的小窗里，结束后收成「思考过程」。
+- pi 的 RPC 事件原样经 WebSocket 以 `ai.event` 发给窗口，`reducePiEvent`（`aiTranscript.ts`）折成对话；每次工具
+  调用一张卡片（`tool_execution_start` → `update` → `end`，`details` 是 CLI 命令自己的 JSON）：
+  - 搜索：带封面的结果行，以列表自己的到达动作（`listArrival.ts`）依次升起；
+  - 下载：直接画下载列表里这一步发起的任务（按引用和开始时间对应），进度就是下载列表的进度，完成的打勾、
+    出现播放键；
+  - 播放（`kdj_play`）：窗口在流里看到这次调用就播放该曲目（`aiPlay.ts`），卡片显示封面，播放时显示播放中的小波形；
+  - 曲库：带播放键的曲目行；对齐、截帧、网页搜索、探测网络各有自己的一行。
+- 扩展的提问（select / confirm / input）在窗口里回答；pi 工作时发出的话是 steer，没写字时发送键变成停止。
+- **历史**：标题栏的历史键列出 pi 的会话文件（`<data>/ai/sessions`，`sessions.rs`；标题是会话名或第一句话），
+  点一个就 `switch_session` 并用 `get_messages` 重画（`transcriptFromMessages`）。新对话键开新会话。
+- 窗口里只写状态：没装 pi、pi 无法运行、未设置模型，各带一个「设置」键。空的时候什么都不写。
 
 ## pi 的隔离
 
@@ -37,12 +45,14 @@ KDJ 里的 AI 是用户自己装的 [pi](https://pi.dev)，由 kdj-server 以 `p
   `kdj-ai.json`（选中的服务商和模型）。启动时 `--no-extensions --no-skills --no-context-files
   --no-builtin-tools`，只加载 KDJ 的扩展和提示词。
 - 换 Key 或服务商会结束 pi，下一句话时重新启动；只换模型用 `set_model`，对话保留。
+- **从 pi 导入**：设置里列出全局 pi（`PI_CODING_AGENT_DIR` 或 `~/.pi/agent`）的 `auth.json` 里的登录。API Key
+  可以复制一份到 KDJ 的目录并选中；订阅登录（OAuth）不复制——两份会各自续期同一个令牌，互相把对方顶掉。
 
 ## 工具
 
 `kdj-tools.ts` 把 `kdj` CLI（`docs/ai-cli.md`，同一个桌面二进制带子命令）的命令一一注册成工具：
 `kdj_status`、`kdj_search`、`kdj_download`、`kdj_login`、`kdj_library_list`、`kdj_library_get`、
-`kdj_peek`、`kdj_align`。`kdj download` 运行时往 stderr 写 `{"event":"progress","done","total"}`，扩展把它当作
+`kdj_peek`、`kdj_align`，以及窗口自己执行的 `kdj_play`。搜索结果带封面地址给窗口画，发给模型的文本里去掉。`kdj download` 运行时往 stderr 写 `{"event":"progress","done","total"}`，扩展把它当作
 工具的中途结果（`onUpdate`），下载那一步因此画出进度条。
 
 `kdj-browser.ts` 是只读的浏览器，经 CDP 驱动用户自己的 Chrome / Edge / Brave / Chromium（无头，KDJ 自己的
