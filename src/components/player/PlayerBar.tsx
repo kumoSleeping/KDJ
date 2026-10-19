@@ -3976,17 +3976,21 @@ export function PlayerBar() {
   const setVisualizerPopup = useVisualizerPopup((state) => state.setOpen);
   // 画面小窗：视频走共享视频小窗，歌曲走可视化小窗；没有可视化的来源不提供这个键。
   const popupTrack = !video && canVisualizeTrack(displayTrack ?? null);
-  const popupOn = video ? pipMode === "float" : visualizerPopup;
+  // × closes the window of the video playing without changing the mode: the key is off then, and
+  // pressing it brings that video's window back.
+  const videoWindowClosed = Boolean(video && !pipActive && displayTrack && isVideoTrack(displayTrack.format));
+  const popupOn = video ? pipMode === "float" && !videoWindowClosed : visualizerPopup;
   const togglePopup = () => {
     if (!video) {
       setVisualizerPopup(!visualizerPopup);
       return;
     }
-    cyclePipMode();
-    // 叉掉小窗会清掉会话；再次主动开启时，恢复当前本地视频而不是等下一次换曲。
-    if (!useVideoPip.getState().active && displayTrack && isVideoTrack(displayTrack.format)) {
+    if (videoWindowClosed && displayTrack) {
+      useVideoPip.getState().setMode("float");
       requestLocalVideo(displayTrack, playing);
+      return;
     }
+    cyclePipMode();
   };
   // The playing song's bubble offers the same key (with the bar away it is the only one).
   const togglePopupRef = useRef(togglePopup);

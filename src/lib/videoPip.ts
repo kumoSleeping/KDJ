@@ -1,7 +1,7 @@
 /**
  * 本地与网络视频共用呈现模式（底栏按钮两态切换）：
- * - panel：内嵌面板（本地在顶部使用 LocalVideoPlayer，网络在侧栏使用共享预览宿主）
- * - float：自研浮动小窗；关闭小窗后回到 panel 偏好。
+ * - float（默认）：自研浮动小窗；× 只关这一次的小窗，下一个视频照样弹出。
+ * - panel：网络视频停靠在侧栏的共享预览宿主；本地视频不出画面。
  * 系统画中画不是底栏模式：在浮动小窗里手动开，或切走应用时自动开。
  */
 
@@ -13,8 +13,11 @@ import {
   writeLocalStorageNow,
 } from "./storageWrite";
 
-// Videos open in an embedded panel by default; explicit presentation choices persist.
-const STORAGE_KEY = "kdj.videoPreviewModeV3";
+// Videos open in the floating window by default: a local video has no panel in the page, so
+// "panel" plays it without a picture. The choice is the 小窗 key's and only that key changes it.
+// V3 was turned back to "panel" by every × on the window and every return from the system's
+// picture-in-picture, so what it holds is not the listener's choice; it is not read.
+const STORAGE_KEY = "kdj.videoPreviewModeV4";
 const LOCAL_PRESENTATION_KEY = "kdj.localVideoPresentationV1";
 
 export type VideoPreviewMode = "panel" | "float";
@@ -60,7 +63,7 @@ export function networkVideoOwnsTransport(
   return active && !failed && session?.source === "network";
 }
 
-/** 默认内嵌面板；底栏按钮只在这两态之间切换。 */
+/** 默认浮动小窗；底栏按钮只在这两态之间切换。 */
 export const VIDEO_PREVIEW_MODES: VideoPreviewMode[] = ["panel", "float"];
 
 export const VIDEO_PREVIEW_MODE_UI: Record<
@@ -111,7 +114,7 @@ function isMode(value: string | null): value is VideoPreviewMode {
 
 function readMode(): VideoPreviewMode {
   const raw = readLocalStorage(STORAGE_KEY);
-  return isMode(raw) ? raw : "panel";
+  return isMode(raw) ? raw : "float";
 }
 
 /** 只记录“本地视频画面是否仍打开”；网络预览不跨启动保存短效会话。 */
@@ -211,8 +214,8 @@ export const useVideoPip = create<VideoPipState>((set, get) => ({
   panelTarget: null,
   setPanelTarget(panelTarget) { set({ panelTarget }); },
   close() {
-    // 用户叉掉小窗是退出浮动模式；普通换源的 clear() 不应更改这项偏好。
-    get().setMode("panel");
+    // × closes this video's window; the next video opens in one again. Turning the window off is
+    // the 小窗 key's.
     get().clear();
   },
   setMode(mode) {
@@ -242,13 +245,9 @@ export const useVideoPip = create<VideoPipState>((set, get) => ({
     set({ failed: on });
   },
   setSystemPip(on) {
-    const returningToPanel = !on && get().systemPip && get().active && get().mode === "float";
+    // Leaving the system's picture-in-picture (it opens by itself whenever the listener switches
+    // to another app) brings the video back to the floating window; the mode stays as chosen.
     set({ systemPip: on });
-    // 系统小窗关闭/返回应用也退出浮动模式；程序主动退 PiP 时已切 panel 或清掉会话。
-    if (returningToPanel) {
-      get().setMode("panel");
-      broadcastApply("panel");
-    }
   },
   setPlaying(on) {
     set({ playing: on });
