@@ -1331,9 +1331,6 @@ export const aiApi = {
   reset: () => request<void>("/ai/reset", { method: "POST" }, null),
   answer: (body: { id: string; value?: string; confirmed?: boolean; cancelled?: boolean }) =>
     request<void>("/ai/answer", { method: "POST", body: JSON.stringify(body) }, null),
-  sessions: () => request<{ sessions: import("../types/ai").AiSession[] }>("/ai/sessions", {}, null),
-  openSession: (path: string) =>
-    request<{ messages: unknown[] }>("/ai/sessions/open", { method: "POST", body: JSON.stringify({ path }) }, null),
   globalLogins: () => request<{ path?: string; logins: import("../types/ai").AiGlobalLogin[] }>("/ai/global", {}, null),
   importLogin: (provider: string) =>
     request<import("../types/ai").AiStatus>("/ai/import", { method: "POST", body: JSON.stringify({ provider }) }, null),

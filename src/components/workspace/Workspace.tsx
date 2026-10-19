@@ -170,6 +170,8 @@ import {
   SearchBar,
 } from "../download/SearchBar";
 import { SearchTipsPanel } from "../download/SearchTipsPanel";
+import { AI_SEARCH_EVENT, type AiSearchDetail } from "../../lib/aiSearch";
+import { useAiStore } from "../../stores/aiStore";
 import { shownTipsPages, useTipsPage, type TipsPage } from "../../lib/tipsPages";
 import { useTipsNudge } from "../../lib/tipsNudge";
 import { FolderTree, NarrowFolderRail } from "../library/FolderTree";
@@ -1686,7 +1688,10 @@ export function Workspace() {
       onQueryChange={setQuery}
       batch={batch}
       busy={busy}
-      onSubmit={() => void submit()}
+      onSubmit={() => {
+        useAiStore.getState().noteUserChange(`用户自己搜索了“${query.trim()}”`);
+        void submit();
+      }}
       tipsOpen={showSearchTips}
       onTips={toggleSearchTipsPanel}
       burstNonce={searchBurstNonce}
@@ -2080,6 +2085,39 @@ export function Workspace() {
     platforms: Platform[];
   } | null>(null);
   const [searchBurstNonce, setSearchBurstNonce] = useState(0);
+  // The AI searched (docs/ai-dock.md): the pane runs the same search, as the listener would.
+  const [aiSearchPending, setAiSearchPending] = useState<AiSearchDetail | null>(null);
+  useEffect(() => {
+    const onAiSearch = (event: Event) => {
+      const detail = (event as CustomEvent<AiSearchDetail>).detail;
+      const q = detail?.query?.trim();
+      if (!q) return;
+      setQuery(q);
+      if (detail.kind && searchKinds.includes(detail.kind)) setSearchKind(detail.kind);
+      setAiSearchPending({ ...detail, query: q });
+    };
+    window.addEventListener(AI_SEARCH_EVENT, onAiSearch);
+    return () => window.removeEventListener(AI_SEARCH_EVENT, onAiSearch);
+  }, [searchKinds]);
+  useEffect(() => {
+    if (!aiSearchPending || query !== aiSearchPending.query) return;
+    const kind = aiSearchPending.kind && searchKinds.includes(aiSearchPending.kind) ? aiSearchPending.kind : null;
+    if (kind && searchKind !== kind) return;
+    setAiSearchPending(null);
+    setSearchBurstNonce((n) => n + 1);
+    // Sources named by the AI apply to a song search, the only kind submit takes them for.
+    const plats = aiSearchPending.platforms?.length && (kind ?? "song") === "song" ? aiSearchPending.platforms : undefined;
+    void submit(plats);
+  }, [aiSearchPending, query, searchKind, searchKinds, submit]);
+  // The listener comes first: leaving the results for the library while the AI works is told
+  // to it, and it goes on from there. The AI itself never leaves them.
+  const paneWas = useRef(activeWorkspacePane);
+  useEffect(() => {
+    if (paneWas.current === activeWorkspacePane) return;
+    paneWas.current = activeWorkspacePane;
+    if (activeWorkspacePane === "local") useAiStore.getState().noteUserChange("用户切到了本地曲库");
+  }, [activeWorkspacePane]);
+
   useEffect(() => {
     const onExplore = (event: Event) => {
       const detail = (event as CustomEvent<ExploreSearchDetail>).detail;

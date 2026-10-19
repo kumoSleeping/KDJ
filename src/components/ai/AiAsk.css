@@ -1,0 +1,32 @@
+/* A question from the AI (docs/ai-dock.md): its choices as plain keys along the bubble's
+   controls row. The AI's default is written in full ink and weight, the others muted; nothing is
+   tinted. */
+.kd-ai-ask-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-top: 2px;
+}
+.kd-ai-choice {
+  padding: 3px 12px;
+  border: 1px solid var(--kd-float-edge, var(--kd-line));
+  border-radius: 8px;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-sm);
+  cursor: pointer;
+}
+.kd-ai-choice:hover { background: var(--kd-hover); color: var(--kd-text); }
+.kd-ai-choice[data-default] { color: var(--kd-text); font-weight: 600; }
+.kd-ai-ask-input {
+  flex: 1 1 10rem;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--kd-line);
+  border-radius: 8px;
+  background: var(--kd-panel);
+  color: var(--kd-text);
+  font: inherit;
+}

@@ -205,6 +205,29 @@ const align = defineTool({
   },
 });
 
+/**
+ * The only way to ask the listener anything: a question with a few choices, shown as a bubble at
+ * the bottom right of the KDJ window, with a countdown when `timeout` is given — when it runs
+ * out, `default` is taken.
+ */
+const askUser = defineTool({
+  name: "ask_user",
+  label: "询问",
+  description: "需要用户决定时调用：在 KDJ 右下角弹出一句问题和 2 到 4 个简短选项。给了 timeout（秒）就显示倒计时，到时没选则按 default（必须是选项之一）。返回 choice：用户选的选项；用户关掉为 null。",
+  parameters: Type.Object({
+    question: Type.String(),
+    options: Type.Array(Type.String(), { minItems: 2, maxItems: 4 }),
+    default: Type.Optional(Type.String()),
+    timeout: Type.Optional(Type.Integer({ minimum: 3, maximum: 120 })),
+  }),
+  async execute(_id, params, signal, _onUpdate, ctx) {
+    const timeout = params.timeout ? params.timeout * 1000 : undefined;
+    const choice = await ctx.ui.select(params.question, params.options, { signal, timeout });
+    const fallback = timeout && params.default && params.options.includes(params.default) ? params.default : null;
+    return result({ choice: choice ?? fallback });
+  },
+});
+
 /** Carried out by the KDJ window, which sees this call in pi's stream and plays the track. */
 const play = defineTool({
   name: "kdj_play",
@@ -250,7 +273,7 @@ const browserOpen = defineTool({
 });
 
 export default function (pi: ExtensionAPI) {
-  for (const tool of [status, search, download, login, libraryList, libraryGet, peek, align, play, browserProbe, browserSearch, browserOpen]) {
+  for (const tool of [status, search, download, login, libraryList, libraryGet, peek, align, play, askUser, browserProbe, browserSearch, browserOpen]) {
     pi.registerTool(tool);
   }
 }

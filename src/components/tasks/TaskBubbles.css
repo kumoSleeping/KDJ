@@ -61,13 +61,11 @@
    the host). */
 .kd-task-slot {
   position: absolute;
-  /* --kd-task-aside: clear of the AI dock (docs/ai-dock.md), which keeps the corner above the
-     playing song's bubble; the others stand to its left. */
-  right: calc(var(--kd-task-gap) + var(--kd-task-aside, 0px));
+  right: var(--kd-task-gap);
   bottom: var(--kd-task-gap);
   width: min(24rem, calc(100% - 2 * var(--kd-task-gap)));
   transform: translateY(calc(var(--kd-task-dir) * var(--kd-task-lift, 0px)));
-  transition: transform var(--kd-task-in) var(--kd-task-in-ease), right var(--kd-task-in) var(--kd-task-in-ease);
+  transition: transform var(--kd-task-in) var(--kd-task-in-ease);
 }
 .kd-task-host[data-place="top"] .kd-task-slot {
   top: var(--kd-task-gap);

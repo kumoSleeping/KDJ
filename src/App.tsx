@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import { LoaderCircle, PlugZap, RefreshCw } from "lucide-react";
 import { Button, EmptyState } from "./components/common";
 import { TaskBubbleHost } from "./components/tasks/TaskBubbleHost";
-import { AiDock } from "./components/ai/AiDock";
 import { MiniPlayerHost } from "./components/player/MiniPlayer";
 import { Workspace } from "./components/workspace/Workspace";
 import { PlayerBar } from "./components/player/PlayerBar";
@@ -156,7 +155,6 @@ export default function App() {
       {ready && (
         <>
           <PlayerBar />
-          <AiDock />
           <VideoPipHost />
           <TrackMetaEditorHost />
         </>

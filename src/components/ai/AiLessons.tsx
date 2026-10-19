@@ -8,7 +8,7 @@ import { openAiSettings } from "../../lib/aiSettings";
 import { getBridge } from "../../lib/bridge";
 import { copyText } from "../../lib/copyText";
 import { useAiStore } from "../../stores/aiStore";
-import "./AiDock.css";
+import "./AiLessons.css";
 
 const PI_SITE = "https://pi.dev";
 const DEEPSEEK_KEYS = "https://platform.deepseek.com/api_keys";
@@ -47,7 +47,8 @@ export function AiLessons() {
         然后在 <button type="button" className="kd-ai-link" onClick={openAiSettings}>设置 → 系统 → AI</button> 里服务商选 DeepSeek，粘贴 Key，保存。</p>
     </li>
     <li>
-      <p>点右上角的 AI，一句话说你要什么。找歌、下载、查曲库、给视频截帧和对齐都行，下到哪个文件夹也直接说。</p>
+      <p>点聚合搜索框右边的 AI 键，搜索框就变成交给 AI 的输入。一句话说你要什么：找歌、下载、播放、查曲库、给视频截帧和对齐都行，下到哪个文件夹也直接说。</p>
+      <p>AI 不说话，直接动手：搜的歌出现在搜索页，下载进下载栏，每一步在顶部提示；需要你决定时，右下角会弹出选项。工作时你随时可以自己操作，它会接着你的改动做。</p>
       <div className="kd-ai-examples">
         {EXAMPLES.map(example => <button key={example} type="button" className="kd-ai-example" onClick={() => suggest(example)}>
           {example}

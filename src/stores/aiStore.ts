@@ -1,55 +1,43 @@
 /**
- * The AI corner (docs/ai-dock.md): whether the dock is up, what kdj-server says about pi, and
- * the conversation folded from pi's stream (src/lib/aiTranscript.ts). Events arrive through
- * connectEvents in appStore, like every other store's.
+ * KDJ's AI (docs/ai-dock.md): the search row's AI mode, whether pi is at work, and what
+ * kdj-server says about pi. pi's stream arrives through connectEvents in appStore, like every
+ * other store's events, and is carried out by aiEvents.tsx.
  */
 import { create } from "zustand";
 import { aiApi } from "../lib/api";
 import { getBridge } from "../lib/bridge";
-import {
-  EMPTY_TRANSCRIPT,
-  addNote,
-  addUserLine,
-  answerAsk,
-  reducePiEvent,
-  transcriptFromMessages,
-  type AiTranscript,
-} from "../lib/aiTranscript";
-import type { AiSession, AiStatus } from "../types/ai";
+import type { AiStatus } from "../types/ai";
 import type { WsEvent } from "../types";
 
-interface AiStore extends AiTranscript {
-  open: boolean;
-  /** What the dock shows: the conversation, or the earlier ones to resume. */
-  view: "chat" | "history";
-  sessions: AiSession[] | null;
-  /** The earlier conversation this one continues, for the dock's title. */
-  title: string;
-  setView(view: "chat" | "history"): void;
-  loadSessions(): Promise<void>;
-  /** Resumes an earlier conversation: pi switches to it and the dock draws it again. */
-  openSession(session: AiSession): Promise<void>;
-  /** A line put into the composer from outside (a tip's example); `n` tells two alike apart. */
-  seed: { text: string; n: number } | null;
-  /** Opens the dock with `text` written in its field, not sent. */
-  suggest(text: string): void;
+interface AiStore {
+  /** The search row takes a request for the AI instead of a search. */
+  mode: boolean;
+  /** pi is at work: from a request until it settles. */
+  running: boolean;
   status: AiStatus | null;
   /** The status could not be read. */
   statusError: string;
-  setOpen(open: boolean): void;
-  toggle(): void;
+  /** A request put into the field from elsewhere (a tip's example); `n` tells two alike apart. */
+  seed: { text: string; n: number } | null;
+  setMode(mode: boolean): void;
+  toggleMode(): void;
+  /** Turns the search row to AI mode with `text` written in it, not sent. */
+  suggest(text: string): void;
   /** `force`: look for pi again instead of using what was found a minute ago. */
   refresh(force?: boolean): Promise<void>;
   setStatus(status: AiStatus): void;
-  send(line: string): Promise<void>;
+  /** Hands a request to pi. Nothing is said back: the AI only acts. */
+  send(request: string): Promise<void>;
   abort(): Promise<void>;
-  /** A new conversation: pi starts a new session and the dock is emptied. */
-  reset(): Promise<void>;
-  answer(id: string, answer: string | boolean | null): Promise<void>;
+  /**
+   * The listener changed what is on screen while the AI works: pi is told, and goes on from
+   * there. The listener comes first.
+   */
+  noteUserChange(change: string): void;
   handleEvent(event: WsEvent): void;
 }
 
-/** pi runs beside the desktop app only; a phone has no AI corner. */
+/** pi runs beside the desktop app only; a phone has no AI. */
 export function aiOffered(): boolean {
   try {
     return ["darwin", "win32", "linux"].includes(getBridge().platform);
@@ -58,48 +46,39 @@ export function aiOffered(): boolean {
   }
 }
 
+/** What stands in the way of a request, as state: no pi, a pi that does not run, no model. */
+export function aiBlocker(status: AiStatus | null): string | null {
+  if (!status) return null;
+  if (status.pi.state === "missing") return "未安装 pi";
+  if (status.pi.state === "broken") return status.pi.error ? `pi 无法运行：${status.pi.error}` : "pi 无法运行";
+  if (!status.provider || !status.providers.some(provider => provider.id === status.provider && provider.configured)) return "AI 未设置模型";
+  return null;
+}
+
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+// The window's side of pi's stream, loaded when first needed: it draws bubbles, plays and searches.
+const events = () => import("../components/ai/aiEvents");
+
+let lastChange = { text: "", at: 0 };
 
 export const useAiStore = create<AiStore>((set, get) => ({
-  ...EMPTY_TRANSCRIPT,
-  open: false,
-  view: "chat",
-  sessions: null,
-  title: "",
+  mode: false,
   seed: null,
+  running: false,
   status: null,
   statusError: "",
 
-  setOpen(open) {
-    if (get().open === open) return;
-    set({ open });
-    if (open) void get().refresh();
+  setMode(mode) {
+    if (get().mode === mode) return;
+    set({ mode });
+    if (mode && !get().status) void get().refresh();
   },
-  toggle() {
-    get().setOpen(!get().open);
-  },
-  setView(view) {
-    set({ view });
-    if (view === "history") void get().loadSessions();
-  },
-  async loadSessions() {
-    try {
-      set({ sessions: (await aiApi.sessions()).sessions });
-    } catch (error) {
-      set(state => ({ ...addNote(state, message(error), "error"), view: "chat" }));
-    }
-  },
-  async openSession(session) {
-    try {
-      const { messages } = await aiApi.openSession(session.path);
-      set({ ...transcriptFromMessages(messages), title: session.title, view: "chat" });
-    } catch (error) {
-      set(state => ({ ...addNote(state, message(error), "error"), view: "chat" }));
-    }
+  toggleMode() {
+    get().setMode(!get().mode);
   },
   suggest(text) {
     set(state => ({ seed: { text, n: (state.seed?.n ?? 0) + 1 } }));
-    get().setOpen(true);
+    get().setMode(true);
   },
 
   async refresh(force = false) {
@@ -113,62 +92,51 @@ export const useAiStore = create<AiStore>((set, get) => ({
     set({ status, statusError: "" });
   },
 
-  async send(line) {
-    const text = line.trim();
+  async send(request) {
+    const text = request.trim();
     if (!text) return;
-    set(state => ({ ...addUserLine(state, text), running: true }));
+    if (!get().status) await get().refresh();
+    const blocked = get().statusError || aiBlocker(get().status);
+    if (blocked) {
+      void events().then(module => module.aiBlocked(blocked));
+      return;
+    }
+    set({ running: true });
     try {
       await aiApi.prompt(text);
     } catch (error) {
-      set(state => ({ ...addNote(state, message(error), "error"), running: false }));
+      set({ running: false });
+      void events().then(module => module.aiProblem(message(error)));
     }
   },
   async abort() {
     try {
       await aiApi.abort();
     } catch (error) {
-      set(state => addNote(state, message(error), "error"));
+      void events().then(module => module.aiProblem(message(error)));
     }
   },
-  async reset() {
-    set({ ...EMPTY_TRANSCRIPT, title: "", view: "chat" });
-    try {
-      await aiApi.reset();
-    } catch (error) {
-      set(state => addNote(state, message(error), "error"));
-    }
-  },
-  async answer(id, answer) {
-    set(state => answerAsk(state, id, answer));
-    const requestId = id.replace(/^ui:/, "");
-    const body = answer === null
-      ? { id: requestId, cancelled: true }
-      : typeof answer === "boolean" ? { id: requestId, confirmed: answer } : { id: requestId, value: answer };
-    try {
-      await aiApi.answer(body);
-    } catch (error) {
-      set(state => addNote(state, message(error), "error"));
-    }
+  noteUserChange(change) {
+    if (!get().running) return;
+    const now = Date.now();
+    if (lastChange.text === change && now - lastChange.at < 3_000) return;
+    lastChange = { text: change, at: now };
+    void aiApi.prompt(`用户改变了页面：${change}。以用户为准，接着完成任务。`).catch(() => undefined);
   },
 
   handleEvent(event) {
     if (event.type === "ai.event") {
-      // pi's kdj_play is carried out here, by the window that plays (docs/ai-dock.md).
       const payload = event.payload;
-      if (payload.type === "tool_execution_start" && payload.toolName === "kdj_play") {
-        const trackId = Number((payload.args as { track_id?: unknown } | undefined)?.track_id);
-        void import("../lib/aiPlay").then(module => module.playLibraryTrack(trackId));
-      }
-      set(state => {
-        const next = reducePiEvent(state, event.payload);
-        return next === state ? state : { parts: next.parts, running: next.running, message: next.message };
-      });
+      if (payload.type === "agent_start") set({ running: true });
+      if (payload.type === "agent_settled" || payload.type === "kdj_exit" || payload.type === "kdj_error") set({ running: false });
+      void events().then(module => module.handlePiEvent(payload));
       return;
     }
     if (event.type === "ai.status") {
       get().setStatus(event.payload);
+      if (!event.payload.running && get().running) set({ running: false });
       return;
     }
-    if (event.type === "connection.open" && (get().open || get().status)) void get().refresh();
+    if (event.type === "connection.open" && get().status) void get().refresh();
   },
 }));

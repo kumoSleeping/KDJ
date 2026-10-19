@@ -9,7 +9,10 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { LoaderCircle, Sparkles } from "lucide-react";
 import type { Platform, SearchKind, TrackSummary } from "../../types";
+import { aiOffered, useAiStore } from "../../stores/aiStore";
+import { AnalysisGlyph } from "../chrome/ActivityRail";
 import { useSearchPresets } from "./useSearchPresets";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import {
@@ -287,6 +290,39 @@ export function SearchBar({
   // Some third-party dictation IMEs report Enter before React's isComposing
   // flag settles. Keep our own composition state and also honor keyCode 229.
   const composingRef = useRef(false);
+  // AI mode (docs/ai-dock.md): the same field takes a request for the AI. The search's own
+  // query is kept and comes back with the mode.
+  const offered = aiOffered();
+  const aiMode = useAiStore(state => state.mode) && offered;
+  const aiRunning = useAiStore(state => state.running);
+  const [request, setRequest] = useState("");
+  const sentRef = useRef("");
+  const seed = useAiStore(state => state.seed);
+  useEffect(() => {
+    if (!seed || !offered) return;
+    setRequest(seed.text);
+    useAiStore.setState({ seed: null });
+    inputRef.current?.focus();
+  }, [seed, offered]);
+  useEffect(() => {
+    // A request stays in the field while the AI carries it out, unless a new one was written.
+    if (aiRunning) return;
+    setRequest(current => (current === sentRef.current ? "" : current));
+    sentRef.current = "";
+  }, [aiRunning]);
+  // Turning the mode over puts the caret in the field; arriving on screen does not.
+  const modeWas = useRef(aiMode);
+  useEffect(() => {
+    if (modeWas.current === aiMode) return;
+    modeWas.current = aiMode;
+    inputRef.current?.focus();
+  }, [aiMode]);
+  const sendRequest = () => {
+    const text = request.trim();
+    if (!text) return;
+    sentRef.current = request;
+    void useAiStore.getState().send(text);
+  };
   const [inputFocused, setInputFocused] = useState(false);
   const [platformsExpanded, setPlatformsExpanded] = useState(false);
   const [wavePhase, setWavePhase] = useState<SearchPhase | null>(null);
@@ -383,11 +419,15 @@ export function SearchBar({
       aria-busy={wavePhase === "run" || undefined}
       onSubmit={(event) => {
         event.preventDefault();
-        fireSubmit();
+        if (aiMode) sendRequest();
+        else fireSubmit();
       }}
     >
       <div
         className="kd-searchbar kd-grow"
+        data-ai={aiMode || undefined}
+        data-ai-running={aiMode && aiRunning || undefined}
+        data-has-ai={offered || undefined}
         data-batch={batch || undefined}
         data-stacked={stacked || undefined}
         data-platforms-expanded={stacked && platformsExpanded ? "true" : undefined}
@@ -399,16 +439,20 @@ export function SearchBar({
         }}
       >
         <div className="kd-searchbar-tools">
-          {searchKinds.length > 1 && (
+          {(searchKinds.length > 1 || aiMode) && (
             <button
               type="button"
               className="kd-search-kind"
-              data-kind={searchKind}
-              aria-label={`搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
-              title={`${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              data-kind={aiMode ? "ai" : searchKind}
+              disabled={aiMode}
+              aria-label={aiMode ? (aiRunning ? "AI 工作中" : "AI") : `搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              title={aiMode ? undefined : `${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
               onClick={() => onSearchKindChange(nextSearchKind)}
             >
-              <RollText text={SEARCH_KIND_LABEL[searchKind]} className="kd-search-kind-text" />
+              {/* The kind turns over into AI, and the AI's mark moves while it works. */}
+              {aiMode && aiRunning
+                ? <span className="kd-search-ai-work" aria-hidden="true"><AnalysisGlyph /></span>
+                : <RollText text={aiMode ? "AI" : SEARCH_KIND_LABEL[searchKind]} className="kd-search-kind-text" />}
             </button>
           )}
           <SearchPlatforms
@@ -450,7 +494,7 @@ export function SearchBar({
               </span>
             </span>
           ) : null}
-          {!query && (
+          {!query && !aiMode && (
             <SearchTipCarousel
               inputFocused={inputFocused}
               tipsOpen={tipsOpen}
@@ -462,23 +506,23 @@ export function SearchBar({
             className="kd-searchbar-input"
             rows={inputRows}
             style={{ "--kd-search-rows": inputRows } as CSSProperties}
-            value={query}
+            value={aiMode ? request : query}
             placeholder=""
             // Titles and links are not prose: no spelling marks under them.
             spellCheck={false}
             autoCorrect="off"
             autoCapitalize="off"
-            aria-label="关键词、单曲链接或歌单链接，支持多行，@ 选择歌曲名"
+            aria-label={aiMode ? "交给 AI 的事" : "关键词、单曲链接或歌单链接，支持多行，@ 选择歌曲名"}
             role="combobox"
-            {...presets.aria}
-            title="搜索（Enter；Shift + Enter 换行；@ 歌曲名）"
+            {...(aiMode ? {} : presets.aria)}
+            title={aiMode ? "交给 AI（Enter；Shift + Enter 换行）" : "搜索（Enter；Shift + Enter 换行；@ 歌曲名）"}
             onFocus={() => setInputFocused(true)}
             onBlur={event => {
               setInputFocused(false);
-              presets.onBlur(event.relatedTarget);
+              if (!aiMode) presets.onBlur(event.relatedTarget);
             }}
             // Only a query with an @ in it has suggestions to place; plain typing does not track the caret.
-            onSelect={query.includes("@") ? presets.syncCaret : undefined}
+            onSelect={!aiMode && query.includes("@") ? presets.syncCaret : undefined}
             onCompositionStart={() => {
               composingRef.current = true;
             }}
@@ -488,21 +532,41 @@ export function SearchBar({
             onKeyDown={(event) => {
               const nativeEvent = event.nativeEvent;
               const composing = composingRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229;
-              if (!composing && presets.onKeyDown(event)) return;
+              if (!aiMode && !composing && presets.onKeyDown(event)) return;
               // 普通 Enter 永远不换行：搜索中或空框时也不能把 "\n" 写进去，否则会被当成批量搜索。
               if (event.key === "Enter" && !event.shiftKey && !composing) {
                 event.preventDefault();
-                fireSubmit();
+                if (aiMode) sendRequest();
+                else fireSubmit();
               }
             }}
             onChange={(event) => {
+              if (aiMode) {
+                setRequest(event.target.value);
+                return;
+              }
               onQueryChange(event.target.value);
               if (event.target.value.includes("@")) presets.syncCaret();
             }}
           />
         </div>
+        {/* AI mode's key at the end of the row; while the AI works it stops it. */}
+        {offered && <button
+          type="button"
+          className="kd-search-ai"
+          aria-pressed={aiMode}
+          data-running={aiRunning || undefined}
+          aria-label={aiRunning ? "停止 AI" : aiMode ? "回到搜索" : "AI 模式"}
+          title={aiRunning ? "停止 AI" : aiMode ? "回到搜索" : "AI 模式"}
+          onClick={() => {
+            if (aiRunning) void useAiStore.getState().abort();
+            else useAiStore.getState().toggleMode();
+          }}
+        >
+          {aiRunning ? <LoaderCircle size={16} className="kd-spin" aria-hidden="true" /> : <Sparkles size={16} aria-hidden="true" />}
+        </button>}
       </div>
-      {presets.menu}
+      {!aiMode && presets.menu}
     </form>
   );
 }

@@ -16,7 +16,6 @@ import { useWindowTaken } from "../../lib/windowTaken";
 import { useLibraryStore } from "../../stores/libraryStore";
 import type { TaskBubbleSpec } from "../tasks/taskBubbleSchema";
 import { dismissTask, showTask, updateTask } from "../tasks/taskBubbleStore";
-import { useAiStore } from "../../stores/aiStore";
 import { trackTaskCover } from "../tasks/taskCovers";
 import { prepareTaskCovers } from "../tasks/taskCoverPreparation";
 import { NowPlayingTransport } from "./NowPlayingTransport";
@@ -57,11 +56,6 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
   const held = useNowPlayingInfo(nowPlayingHeld);
   const barAway = useNowPlayingInfo(state => state.barAway);
   const peek = useNowPlayingInfo(state => state.peek);
-  // With the bar up the bar is the transport, and the AI corner has the bottom right: the song's
-  // bubble stays down while it is open. With the bar away it is the transport and stays, under
-  // the corner (docs/ai-dock.md).
-  const aiOpen = useAiStore(state => state.open);
-  const yielded = aiOpen && !barAway;
   const song = useRef({ trackId, announced: true, enterAt: 0 });
   const entrance = useRef<number | null>(null);
   useEffect(() => {
@@ -119,7 +113,7 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
   const raise = `${held}:${peek}`;
   const raised = useRef("");
   useEffect(() => {
-    if (!visible || !track || yielded) {
+    if (!visible || !track) {
       raised.current = "";
       dismissTask(NOW_PLAYING_TASK);
       return;
@@ -186,7 +180,7 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
     } else {
       updateTask(NOW_PLAYING_TASK, spec);
     }
-  }, [visible, yielded, raise, held, barAway, track, covers, popup, popupOn, lyrics.open, lyrics.matching, colourOffered, colourOn, extent.openFrom, extent.opened]);
+  }, [visible, raise, held, barAway, track, covers, popup, popupOn, lyrics.open, lyrics.matching, colourOffered, colourOn, extent.openFrom, extent.opened]);
   useEffect(() => () => dismissTask(NOW_PLAYING_TASK), []);
   return visible && track ? extent.menu : null;
 }

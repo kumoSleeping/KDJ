@@ -651,3 +651,56 @@
   76% { opacity: 1; }
   to { opacity: 0; }
 }
+
+/* —— AI mode (docs/ai-dock.md) ——
+   A key at the end of the row turns the field into a request for the AI: the kind turns over
+   into "AI" by its own roll, the sources fold away on the large-surface clock, and the field
+   keeps its place. While the AI works, its mark is the moving bars of the work rail and the key
+   stops it. Ink only: the key that is on is full ink and heavier, like any selected control. */
+.kd-searchbar[data-has-ai] { grid-template-columns: auto minmax(0, 1fr) auto; }
+.kd-searchbar .kd-plats {
+  max-width: 40rem;
+  transition: max-width var(--kd-motion-in) var(--kd-ease-out), opacity var(--kd-motion-micro) var(--kd-ease-out);
+}
+.kd-searchbar[data-ai] .kd-plats {
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+.kd-searchbar[data-ai] .kd-search-kind { color: var(--kd-text); font-weight: 700; cursor: default; }
+.kd-search-ai-work { display: grid; place-items: center; height: 1.5rem; color: var(--kd-text); }
+.kd-search-ai-work svg { width: 15px; height: 15px; }
+.kd-search-ai {
+  appearance: none;
+  display: grid;
+  flex: none;
+  place-items: center;
+  align-self: start;
+  width: 1.9rem;
+  height: var(--kd-search-h);
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.kd-search-ai:hover { background: var(--kd-hover); color: var(--kd-text); }
+.kd-search-ai[aria-pressed="true"],
+.kd-search-ai[data-running] { color: var(--kd-text); }
+.kd-search-ai[aria-pressed="true"] svg { stroke-width: 2.4; }
+.kd-search-ai:focus-visible { outline: 2px solid var(--kd-focus, var(--kd-text)); outline-offset: 1px; }
+/* A tall window stacks the row: the key stays at the end of its first line. */
+.kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top .kd-searchbar[data-has-ai] {
+  grid-template-columns: minmax(0, 1fr);
+}
+.kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top .kd-searchbar[data-has-ai] .kd-search-ai {
+  grid-row: 1;
+  grid-column: 1;
+  justify-self: end;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-searchbar .kd-plats { transition: none; }
+}

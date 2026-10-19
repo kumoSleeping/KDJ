@@ -9,7 +9,6 @@
 //! prompt (kdj-prompt.md).
 
 mod pi;
-mod sessions;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -588,36 +587,6 @@ pub async fn answer(State(state): State<Arc<AppState>>, Json(body): Json<AnswerB
     }
     process.tell(message).await?;
     Ok(Json(json!({})))
-}
-
-// ---------------------------------------------------------------- history
-
-pub async fn sessions_list(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let dir = bridge(&state).paths.sessions.clone();
-    let sessions = tokio::task::spawn_blocking(move || sessions::list(&dir)).await.unwrap_or_default();
-    Json(json!({ "sessions": sessions }))
-}
-
-#[derive(Deserialize)]
-pub struct OpenBody {
-    path: String,
-}
-
-/// Resumes an earlier conversation: pi switches to its session and gives back its messages, which
-/// the window draws again.
-pub async fn sessions_open(State(state): State<Arc<AppState>>, Json(body): Json<OpenBody>) -> ApiResult<Json<Value>> {
-    let bridge = bridge(&state);
-    let path = sessions::inside(&bridge.paths.sessions, &body.path).ok_or_else(|| ApiError::not_found("找不到这段对话"))?;
-    let process = bridge.process(&state).await?;
-    if process.streaming.load(Ordering::Relaxed) {
-        process.send(json!({ "type": "abort" })).await?;
-    }
-    let switched = process.send(json!({ "type": "switch_session", "sessionPath": path })).await?;
-    if switched["cancelled"] == true {
-        return Err(ApiError::bad_request("pi 没有切换到这段对话"));
-    }
-    let messages = process.send(json!({ "type": "get_messages" })).await?;
-    Ok(Json(json!({ "messages": messages["messages"] })))
 }
 
 // ---------------------------------------------------------------- the global pi's logins
