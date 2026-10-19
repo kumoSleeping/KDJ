@@ -10,9 +10,29 @@ import { withAttachments, type AiAttachment } from "../lib/aiAttachments";
 import type { AiStatus } from "../types/ai";
 import type { WsEvent } from "../types";
 
+/** One step of a run: a tool call, while it runs and how it ended (the AI drawer's 任务 page). */
+export interface AiStep {
+  id: string;
+  tool: string;
+  args: unknown;
+  state: "running" | "done" | "failed";
+  /** The result's text, for a failure's reason. */
+  text?: string;
+  details?: unknown;
+}
+
+/** The request under way, or the last one: what was asked, with what, and what the AI did. */
+export interface AiRun {
+  request: string;
+  attached: string[];
+  supplements: string[];
+  steps: AiStep[];
+}
+
 interface AiStore {
   /** The search row takes a request for the AI instead of a search. */
   mode: boolean;
+  run: AiRun | null;
   /** pi is at work: from a request until it settles. */
   running: boolean;
   status: AiStatus | null;
@@ -69,6 +89,7 @@ let lastChange = { text: "", at: 0 };
 
 export const useAiStore = create<AiStore>((set, get) => ({
   mode: false,
+  run: null,
   seed: null,
   attachments: [],
   attach(items) {

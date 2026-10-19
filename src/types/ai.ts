@@ -66,3 +66,22 @@ export interface AiGlobalLogin {
   kind: string;
   importable: boolean;
 }
+
+/** One of the AI's past sessions (crates/kdj-server/src/ai/sessions.rs). */
+export interface AiSessionSummary {
+  path: string;
+  id: string;
+  /** ISO 8601. */
+  started: string;
+  /** Unix ms of the last change. */
+  updated: number;
+  /** The first request, cut short. */
+  title: string;
+  requests: number;
+  steps: number;
+}
+
+/** What was asked, or one tool call and how it ended. */
+export type AiSessionStep =
+  | { kind: "request"; text: string; attached: string[]; at: string }
+  | { kind: "tool"; tool: string; args: unknown; failed: boolean; text: string; details: unknown };

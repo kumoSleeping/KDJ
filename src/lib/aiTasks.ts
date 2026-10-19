@@ -144,6 +144,42 @@ export function noticeOnEnd(tool: string, args: unknown, details: unknown, faile
   return { ...base, detail: outcome(tool, fields(details)), tone: "success" };
 }
 
+/**
+ * One step as the AI drawer lists it (任务 and 历史): every tool call, the ones that report
+ * elsewhere too, in the words of its bubble where it has one.
+ */
+export function stepLine(tool: string, args: unknown, state: "running" | "done" | "failed", details: unknown, text: string): { title: string; detail?: string } {
+  const a = fields(args);
+  // The quiet tools have no words of their own in a bubble (a failure would only name the tool).
+  const notice = SILENT.has(tool) ? null
+    : state === "running" ? noticeOnStart(tool, args) : noticeOnEnd(tool, args, details, state === "failed", text);
+  if (notice) return { title: notice.title, detail: notice.detail };
+  const failure = state === "failed" ? text.trim().split("\n")[0] || undefined : undefined;
+  const line = (title: string, detail?: string) => ({ title: failure ? `${title} 失败` : title, detail: failure ?? detail });
+  switch (tool) {
+    case "kdj_download": {
+      const refs = Array.isArray(a.refs) ? a.refs.length : 0;
+      return line(`下载 ${refs || ""} 项`.replace("  ", " "), str(a.to) ? sourceName(a.to) : undefined);
+    }
+    case "kdj_play":
+      return line("播放");
+    case "kdj_status":
+      return line("查看 KDJ 的状态");
+    case "ask_user": {
+      const answer = fields(details).choices;
+      return line(`询问：${str(a.question)}`, Array.isArray(answer) && answer.length ? `选了 ${answer.map(str).join("、")}` : undefined);
+    }
+    case "tell_user":
+      return line(`消息：${str(a.message)}`);
+    case "read":
+      return line(`读取 ${sourceName(a.path)}`);
+    case "write":
+      return line(`写入 ${sourceName(a.path)}`);
+    default:
+      return line(tool);
+  }
+}
+
 /** The text blocks of a tool result (`{ content: [{ type: "text", text }] }`). */
 export function resultText(result: unknown): string {
   const content = fields(result).content;

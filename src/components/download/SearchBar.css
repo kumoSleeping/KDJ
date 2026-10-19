@@ -696,7 +696,7 @@
   gap: 4px;
   min-width: max-content;
   padding-inline: 0.2rem;
-  cursor: default;
+  cursor: pointer;
 }
 .kd-search-agent-mark { flex: none; color: var(--kd-agent-a); }
 .kd-searchbar[data-ai] .kd-search-kind-text .kd-roll-line {

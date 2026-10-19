@@ -30,7 +30,7 @@ import { VinylPlaceholder } from "../common/VinylPlaceholder";
 import { PLATFORM_LABEL } from "../download/MergedGroupRow";
 import { PlatformMark } from "../download/PlatformMark";
 import { dismissTask, showTask } from "../tasks/taskBubbleStore";
-import { useAiStore } from "../../stores/aiStore";
+import { useAiStore, type AiRun } from "../../stores/aiStore";
 import "./AiAsk.css";
 
 /**
@@ -353,11 +353,21 @@ function drawWaiting(line: UserLine) {
   });
 }
 
+/** The run the AI drawer's 任务 page shows (aiStore.run): a new request starts one. */
+function updateRun(change: (run: AiRun) => AiRun) {
+  const run = useAiStore.getState().run;
+  if (run) useAiStore.setState({ run: change(run) });
+}
+function startRun(line: UserLine, supplements: string[] = []) {
+  useAiStore.setState({ run: { request: line.text, attached: line.attached, supplements, steps: [] } });
+}
+
 /** The listener sent a request: a task of its own, or a supplement to the one under way. */
 export function userRequest(text: string, running: boolean, sent = text, attached: string[] = []): string {
   taskSeq += 1;
   if (!mainTask) {
     mainTask = { id: `t${taskSeq}`, text, sent, attached, supplements: [], working: running };
+    startRun(mainTask);
     drawMain();
     return mainTask.id;
   }
@@ -422,6 +432,7 @@ export function handlePiEvent(event: PiEvent) {
       waiting = waiting.filter(item => item !== line);
       dismissTask(`ai-task:${line.id}`, "caller");
       mainTask.supplements.push(line.text);
+      updateRun(run => ({ ...run, supplements: [...run.supplements, line.text] }));
       drawMain();
       return;
     }
@@ -429,6 +440,7 @@ export function handlePiEvent(event: PiEvent) {
       const id = str(event.toolCallId), tool = str(event.toolName), args = fields(event.args);
       if (!id) return;
       calls.set(id, { tool, args });
+      updateRun(run => ({ ...run, steps: [...run.steps, { id, tool, args, state: "running" }] }));
       if (tool === "kdj_search") gatherSearch(args);
       if (tool === "kdj_library_list") requestAiLibrary(args);
       if (tool === "kdj_play") {
@@ -457,6 +469,13 @@ export function handlePiEvent(event: PiEvent) {
         dismissTask(`ai-ask:${id}`);
       }
       const result = fields(event.result);
+      const failed = event.isError === true;
+      updateRun(run => ({
+        ...run,
+        steps: run.steps.map(step => step.id === id
+          ? { ...step, state: failed ? "failed" : "done", text: resultText(result), details: result.details }
+          : step),
+      }));
       const notice = noticeOnEnd(call.tool, call.args, result.details, event.isError === true, resultText(result));
       // A finished step stays the listener's usual length, a failed one twice that.
       if (notice) noticeBubble(id, notice, undefined);
@@ -485,6 +504,7 @@ export function handlePiEvent(event: PiEvent) {
         for (const line of waiting) dismissTask(`ai-task:${line.id}`, "caller");
         waiting = [];
         mainTask = { ...first, supplements: rest.map(line => line.text), working: false };
+        startRun(first, mainTask.supplements);
         drawMain();
       } else {
         // Nothing follows: the window goes back to where the listener was, if they left it be.

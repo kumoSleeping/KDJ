@@ -1296,6 +1296,12 @@ export const aiApi = {
   globalLogins: () => request<{ path?: string; logins: import("../types/ai").AiGlobalLogin[] }>("/ai/global", {}, null),
   importLogin: (provider: string) =>
     request<import("../types/ai").AiStatus>("/ai/import", { method: "POST", body: JSON.stringify({ provider }) }, null),
+  /** The AI's history: its sessions, newest first, and the one pi has open. */
+  sessions: () => request<{ current: string | null; sessions: import("../types/ai").AiSessionSummary[] }>("/ai/sessions", {}, null),
+  session: (path: string) =>
+    request<{ steps: import("../types/ai").AiSessionStep[] }>(`/ai/sessions/detail?path=${encodeURIComponent(path)}`, {}, null),
+  switchSession: (path: string) =>
+    request<void>("/ai/sessions/switch", { method: "POST", body: JSON.stringify({ path }) }, null),
 };
 
 /* ---------------------------------------------------------------- WebSocket */

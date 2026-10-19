@@ -11,6 +11,7 @@ import {
 } from "react";
 import { LoaderCircle, Music, Sparkles, Video, X } from "lucide-react";
 import { AI_DROP_ATTR, timeLabel } from "../../lib/aiAttachments";
+import { useAiDrawer } from "../../lib/aiDrawer";
 import type { Platform, SearchKind, TrackSummary } from "../../types";
 import { aiOffered, useAiStore } from "../../stores/aiStore";
 import { useSearchPresets } from "./useSearchPresets";
@@ -463,10 +464,13 @@ export function SearchBar({
               type="button"
               className="kd-search-kind"
               data-kind={aiMode ? "ai" : searchKind}
-              disabled={aiMode}
-              aria-label={aiMode ? (aiRunning ? "Agent Mode，工作中" : "Agent Mode") : `搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
-              title={aiMode ? undefined : `${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
-              onClick={() => onSearchKindChange(nextSearchKind)}
+              aria-label={aiMode ? (aiRunning ? "Agent Mode，工作中：打开 AI 任务与历史" : "Agent Mode：打开 AI 任务与历史") : `搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              title={aiMode ? "AI 任务与历史" : `${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              onClick={() => {
+                // In Agent Mode the name opens the AI's drawer app: the task under way and the history.
+                if (aiMode) useAiDrawer.getState().show("tasks");
+                else onSearchKindChange(nextSearchKind);
+              }}
             >
               {/* The row turns over into Agent Mode as a whole, so the kind does not roll on its own
                   then (keyed by the mode); while the agent works the field's edge runs. */}
