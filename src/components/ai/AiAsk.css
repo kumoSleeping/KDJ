@@ -108,3 +108,10 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* A plan (several questions answered together): what the AI means to do, then each question's
+   label over its keys. Questions are told apart by spacing; a long plan scrolls inside the bubble. */
+.kd-ai-ask[data-plan] { max-height: min(28rem, 60vh); overflow-y: auto; }
+.kd-ai-ask-title { font-weight: 600; }
+.kd-ai-ask-questions { display: grid; gap: 10px; }
+.kd-ai-ask-question { display: grid; gap: 2px; min-width: 0; }

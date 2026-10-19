@@ -67,6 +67,9 @@ KDJ 里的 AI 是用户自己装的 [pi](https://pi.dev)，由 kdj-server 以 `p
   `default`。用户手动收起算没选。气泡由这次调用的中途结果画出（扩展记得本轮搜索结果的封面），回答经一个名为
   `kdj:ask:<调用 id>` 的 editor 对话以 JSON（`choices`、`note`）送回。
 - **询问的气泡**完整写出问题（不是一行滚动的标题），最后一行除了「补充」和「确定」还有「暂停」：停下这次任务。
+- **方案**：一次要定几件事时（视频方案），`ask_user` 带 `preview`（AI 打算怎么做，写在最上面）和 `questions`（每项 id、问题、
+  选项、可否多选、默认）。气泡里每个问题是一行小字标签加一排键，一个「确定」一起提交，回 `answers`（每个 id 选中的）；
+  太长时在气泡里滚动。收起或「暂停」回 `cancelled`。AI 抽屉的步骤里写成「方案：…」，下面是每个问题选了什么。
 - **找文件夹**：`kdj_folders` 在曲库根目录和全部子文件夹里按名字找（`kdj-folders.ts`：不分空格和分隔符，八=8，
   yue=月；完全一样 > 开头一样 > 包含 > 依次出现；同分时层级浅、路径短的在前），给出绝对路径。提示词要它下载到某个
   文件夹前先找：一个就直接用，几个同样合适就 `ask_user`，没有就问，不许猜路径。
@@ -132,7 +135,9 @@ KDJ 内部的 AI 不知道背后是 CLI：工具说明写的是 KDJ 做什么，
 `commands`、`notes`、`hint`、`running`、`kdj`），出错时去掉「运行 kdj status 查看用法」这类提示。原来写在 CLI
 `notes` 里、AI 仍然需要的说明（对齐表的换算、时间单位和小节线）搬进了对应工具的说明。CLI 和它的复制提示词是给
 KDJ 之外的 AI 用的。`kdj_peek` 把截下的画面作为图片直接交给模型（有拼好的总图时给总图，否则最多四张），模型不需要
-另外的读文件工具；所选模型看不了图时，画面对它没有用。
+另外的读文件工具。所选模型不收图片时（pi 模型表的 `input` 里没有 `image`），画面不交给它，而且每一轮系统提示末尾多一行：
+它是非视觉模型，剪辑、VJ 这类视频请求一律拒绝（一句 tell_user 说明后结束），只用可视化的可以照做（`kdj-tools.ts` 的
+`before_agent_start`）。
 
 设置里 AI 和 FFmpeg 各有自己的一页（`settingsPages`：通用、播放、登录、AI、FFmpeg、系统；后两者只在桌面端）。
 
@@ -140,7 +145,8 @@ KDJ 之外的 AI 用的。`kdj_peek` 把截下的画面作为图片直接交给�
 
 - `access`（默认）：社区插件 pi-web-access，设置里点「安装」由 pi 装进 KDJ 自己的目录（`pi install npm:pi-web-access`，
   `PI_CODING_AGENT_DIR` 指向 KDJ 的目录），不碰全局 pi。KDJ 写一份锁死的 `web-search.json`：不读浏览器 Cookie，
-  关掉视频、YouTube、GitHub、PDF 和它的命令，不请求本机地址。
+  关掉视频、YouTube、GitHub、PDF 和它的命令，不请求本机地址。拒绝列表只写主机名和 IPv4：它不认 `::1` 这样的 IPv6 写法，
+  有一项不认就整份配置作废、读网页全部失败；回环和内网地址它自己会拒绝。
 - `deepseek`：DeepSeek 的 Search / Fetch（`api.deepseek.com/v1/tools/search`、`…/fetch`），用已登录的 DeepSeek Key。
 - `deepseek-jina`：DeepSeek 搜索；网页由 Jina Reader 不带 Key 读取，被限流（429）时改由 DeepSeek Fetch 读。
 - `jina`：Jina 的搜索和 Reader，用设置里填的 Jina Key（存在 KDJ 目录的 `auth.json`）。
@@ -155,13 +161,17 @@ pi 没有 shell、读写文件等内置工具（`--no-builtin-tools`），整理
 
 剪视频交给 AI：它做出来的是 `.kdjv` 视频工程（`docs/kdjv.md`），曲库里的一行，点开像视频一样播放。手动的剪辑器已经删掉。
 
+- **做法与方案**：四种做法（完整 VJ、简洁剪辑、音视频合并、可视化）、素材顺序、先探索再交方案、报告，见
+  `docs/ai-video-presets.md`。
 - **技能**：`crates/kdj-server/src/ai/skills/kdj-video/`（`SKILL.md` 和 `references/` 下的 `kdjv.md`、`ffmpeg.md`、
-  `remotion.md`），由 kdj-server 写进 pi 目录。pi 只把名字和描述放进系统提示，模型遇到视频的事才用 `read` 读全文。pi 只在有
+  `remotion.md`、四种做法的 `preset-*.md`），由 kdj-server 写进 pi 目录。pi 只把名字和描述放进系统提示，模型遇到视频的事才用 `read` 读全文。pi 只在有
   名为 `read`（或 `bash`）的工具时才列出技能，所以 KDJ 自己注册了一个只读得到技能、工作目录和 `.kdjv` 的 `read`。
 - **工具**（`kdj-video.ts`，没有 shell）：`read`；`write`（只写工作目录，`remotion/node_modules` 除外）；`kdj_probe`（ffprobe）；
   `kdj_ffmpeg`（参数 + 输出文件，输出只能在工作目录，相对路径进 `renders/`，KDJ 自己的 FFmpeg，经 `KDJ_FFMPEG`）；
   `kdj_remotion_render`（用跑 pi 的那个 node 跑工作目录 `remotion/` 里的 Remotion CLI）；`kdj_project_save`（写进曲库根目录，
-  改已有工程不许少字段、旧版先备份）和 `kdj_project_render`（经 `kdj project check|render`）。`kdj_peek` 截下的画面作为图片交给
+  改已有工程不许少字段、旧版先备份）、`kdj_project_render`（经 `kdj project check|render`）、`kdj_project_export`（渲染后复制成
+  曲库文件夹里的一个 MP4，不覆盖）和 `kdj_visualizer_render`（经 `kdj visualizer render`：歌曲封面 + 默认场景的整首可视化，
+  进 `renders/` 当片段，或给了曲库文件夹就直接出片）。`kdj_align` 的每套方案带 `gaps`（参考曲里没画面的段）。`kdj_peek` 截下的画面作为图片交给
   模型。`read`、`write` 不出顶部提示，其余几步各有自己的一句（`aiTasks.ts`）。
 - **Remotion**：设置 → AI → 视频，「安装/更新」用跑 pi 的那个 node 旁边的 npm，在 `<data>/ai/workspace/remotion/` 装
   `remotion`、`@remotion/cli`、`@remotion/transitions`、`react`、`react-dom`，再 `remotion browser ensure` 下好渲染用的浏览器；

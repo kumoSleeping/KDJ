@@ -14,7 +14,7 @@
 .kd-ai-step[data-state="failed"] .kd-ai-step-mark { color: var(--kd-danger, var(--kd-warn)); }
 .kd-ai-step-copy { display: flex; flex-direction: column; min-width: 0; font-size: var(--kd-size-sm); }
 .kd-ai-step-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.kd-ai-step-copy > small { color: var(--kd-muted); font-size: var(--kd-size-xs); overflow-wrap: anywhere; }
+.kd-ai-step-copy > small { color: var(--kd-muted); font-size: var(--kd-size-xs); overflow-wrap: anywhere; white-space: pre-line; }
 .kd-ai-step-request { margin-top: 0.5rem; }
 .kd-ai-step-request .kd-ai-request { margin-bottom: 0.1rem; }
 

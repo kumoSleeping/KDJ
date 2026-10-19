@@ -18,7 +18,7 @@ import { basename, relative } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { folderScore, walk } from "./kdj-folders.ts";
-import { registerVideo } from "./kdj-video.ts";
+import { blindLine, registerVideo } from "./kdj-video.ts";
 import { registerWeb } from "./kdj-web.ts";
 
 const CLI = process.env.KDJ_CLI || "kdj";
@@ -256,8 +256,10 @@ const peek = defineTool({
     every: Type.Optional(Type.Number()),
     width: Type.Optional(Type.Integer()),
   }),
-  async execute(_id, params, signal) {
+  async execute(_id, params, signal, _onUpdate, ctx) {
     const data = await kdj(["peek", params.source, ...flags({ at: params.at, every: params.every, width: params.width })], signal);
+    // A model that takes no pictures is not handed pictures it never sees.
+    if (blindLine(ctx?.model)) return result({ ...(data as object), blind: "你看不到图片，这些画面没有交给你" });
     const told = result(data);
     return { ...told, content: [...told.content, ...await pictures(data)] };
   },
@@ -281,20 +283,56 @@ async function pictures(data: unknown) {
 const align = defineTool({
   name: "kdj_align",
   label: "对齐",
-  description: "把视频对齐到参考曲，返回几套定位方案 plans：segments 里 ref = ref_at + (video - video_in) / speed（秒）；ref_bar 是参考曲的小节号。evidence 为 verified 的经过声学核实，auto=true 的可以直接采用；melody / partial 只是候选，auto=false 的方案需要用户试听确认。",
+  description: "把视频按声音对齐到参考曲（音视频合并的核心；short 版 MV/NCED 对整首歌也用它），返回几套定位方案 plans：segments 里 ref = ref_at + (video - video_in) / speed（秒）；ref_bar 是参考曲的小节号。evidence 为 verified 的经过声学核实，auto=true 的可以直接采用；melody / partial 只是候选，auto=false 的方案需要用户试听确认。只有部分对得上时用「裁切匹配段」（sections）。每套方案的 gaps 是参考曲里没有画面的空档（start、end、length，秒）：空档要问用户怎么处理，不要自己拉别的素材填。matched 为 false 是对不上，告诉用户，不要硬拼。",
   parameters: Type.Object({
     ref: Type.String({ description: "参考曲：曲库 id 或文件路径" }),
     video: Type.String({ description: "视频：曲库 id、文件路径、bilibili ref 或链接" }),
   }),
   async execute(_id, params, signal) {
-    return result(await kdj(["align", ...flags({ ref: params.ref, video: params.video })], signal));
+    return result(withGaps(await kdj(["align", ...flags({ ref: params.ref, video: params.video })], signal)));
   },
 });
+
+/** Gaps shorter than this are seams between segments, not a stretch without picture. */
+const GAP_MIN_SECONDS = 0.5;
+
+/**
+ * Each plan gets the stretches of the reference its segments leave without picture, so the AI
+ * can name them to the listener rather than working them out.
+ */
+function withGaps(data: unknown): unknown {
+  const aligned = data as { reference?: { duration?: unknown }; plans?: unknown } | null;
+  const duration = typeof aligned?.reference?.duration === "number" ? aligned.reference.duration : null;
+  if (!aligned || duration === null || !Array.isArray(aligned.plans)) return data;
+  const plans = aligned.plans.map(raw => {
+    const plan = raw as { segments?: unknown };
+    const covered = (Array.isArray(plan.segments) ? plan.segments : []).flatMap(item => {
+      const seg = item as { video_in?: unknown; video_out?: unknown; ref_at?: unknown; speed?: unknown };
+      if (typeof seg.video_in !== "number" || typeof seg.video_out !== "number" || typeof seg.ref_at !== "number") return [];
+      const speed = typeof seg.speed === "number" && seg.speed > 0 ? seg.speed : 1;
+      const start = Math.max(0, seg.ref_at);
+      const end = Math.min(duration, seg.ref_at + (seg.video_out - seg.video_in) / speed);
+      return end > start ? [[start, end] as const] : [];
+    }).sort((a, b) => a[0] - b[0]);
+    const gaps: { start: number; end: number; length: number }[] = [];
+    let at = 0;
+    for (const [start, end] of [...covered, [duration, duration] as const]) {
+      if (start - at >= GAP_MIN_SECONDS) {
+        const round = (value: number) => Math.round(value * 100) / 100;
+        gaps.push({ start: round(at), end: round(start), length: round(start - at) });
+      }
+      at = Math.max(at, end);
+    }
+    return { ...(raw as object), gaps };
+  });
+  return { ...aligned, plans };
+}
 
 /**
  * The only way to ask the listener anything: a question with a few choices, shown as a bubble at
  * the bottom right of the KDJ window, with a countdown when `timeout` is given — when it runs
- * out, `default` is taken.
+ * out, `default` is taken. A plan asks several questions at once (`questions`, under a `preview`
+ * of what will be done), all answered with one 确定.
  */
 /**
  * The question is drawn by the KDJ window from this call's partial result (the songs with their
@@ -304,9 +342,17 @@ const align = defineTool({
 const askUser = defineTool({
   name: "ask_user",
   label: "询问",
-  description: "需要用户决定时调用：KDJ 右下角弹出一句问题，可以给文字选项（options），也可以给歌曲选项（songs：kdj_search 给出的 ref，显示封面、歌名、艺术家和来源），multiple 允许多选。用户还可以写一句补充（note），要照着做。给了 timeout（秒）就显示倒计时，到时没选则按 default。返回 choices（选中的选项文字或 ref）和 note；用户关掉则 choices 为空。",
+  description: "需要用户决定时调用：KDJ 右下角弹出一句问题，可以给文字选项（options），也可以给歌曲选项（songs：kdj_search 给出的 ref，显示封面、歌名、艺术家和来源），multiple 允许多选。用户还可以写一句补充（note），要照着做。给了 timeout（秒）就显示倒计时，到时没选则按 default。返回 choices（选中的选项文字或 ref）和 note；用户关掉或点「暂停」则 cancelled 为 true，停下。\n一次要定几件事（比如视频方案）时用 questions：每项一个 id、一句问题和它的选项，用户一起看、一起点确定；preview 写在问题上面，说明你打算怎么做（做法、会下什么、大约多大、最后交什么）。返回 answers（每个 id 选中的选项）和 note。",
   parameters: Type.Object({
-    question: Type.String(),
+    question: Type.Optional(Type.String({ description: "一句问题；用 questions 时是这组问题的标题，可以不给" })),
+    preview: Type.Optional(Type.String({ description: "写在问题上面：你打算怎么做" })),
+    questions: Type.Optional(Type.Array(Type.Object({
+      id: Type.String(),
+      question: Type.String(),
+      options: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }),
+      multiple: Type.Optional(Type.Boolean()),
+      default: Type.Optional(Type.Array(Type.String())),
+    }), { maxItems: 8 })),
     options: Type.Optional(Type.Array(Type.String(), { maxItems: 6 })),
     songs: Type.Optional(Type.Array(Type.String(), { maxItems: 8, description: "kdj_search 给出的 ref" })),
     multiple: Type.Optional(Type.Boolean()),
@@ -314,8 +360,14 @@ const askUser = defineTool({
     timeout: Type.Optional(Type.Integer({ minimum: 3, maximum: 300 })),
   }),
   async execute(id, params, signal, onUpdate, ctx) {
+    const questions = (params.questions ?? []).map(item => ({
+      id: item.id, question: item.question, options: item.options, multiple: item.multiple ?? false, defaults: item.default ?? [],
+    }));
+    if (!params.question && !params.preview && questions.length === 0) throw new Error("没有要问的：给 question，或 questions");
     const asked = {
-      question: params.question,
+      question: params.question ?? "",
+      preview: params.preview ?? "",
+      questions,
       options: params.options ?? [],
       songs: (params.songs ?? []).map(ref => songs.get(ref) ?? { ref, title: ref, artists: [], platform: ref.split(":")[0], cover: "", duration: null }),
       multiple: params.multiple ?? false,
@@ -325,12 +377,19 @@ const askUser = defineTool({
     onUpdate?.({ content: [{ type: "text", text: "等待用户回答" }], details: asked });
     const timeout = params.timeout ? params.timeout * 1000 : undefined;
     const reply = await ctx.ui.editor(`kdj:ask:${id}`, "", { signal, timeout });
-    let answer: { choices?: unknown; note?: unknown } = {};
+    let answer: { choices?: unknown; answers?: unknown; note?: unknown; cancelled?: unknown } = {};
     try { answer = reply ? JSON.parse(reply) : {}; } catch { answer = { note: reply }; }
-    const choices = Array.isArray(answer.choices) ? answer.choices.filter((item): item is string => typeof item === "string") : [];
+    const picks = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
     const note = typeof answer.note === "string" && answer.note.trim() ? answer.note.trim() : null;
-    if (reply === undefined && timeout) return result({ choices: asked.defaults, note: null, timedOut: true });
-    return result({ choices, note });
+    const timedOut = reply === undefined && Boolean(timeout);
+    const cancelled = !timedOut && (reply === undefined || answer.cancelled === true);
+    if (questions.length > 0) {
+      const given = answer.answers && typeof answer.answers === "object" ? answer.answers as Record<string, unknown> : {};
+      const answers = Object.fromEntries(questions.map(item => [item.id, timedOut ? item.defaults : picks(given[item.id])]));
+      return result(cancelled ? { cancelled, answers: {}, note } : { answers, note, ...(timedOut ? { timedOut } : {}) });
+    }
+    if (timedOut) return result({ choices: asked.defaults, note: null, timedOut: true });
+    return result(cancelled ? { cancelled, choices: [], note } : { choices: picks(answer.choices), note });
   },
 });
 
@@ -366,4 +425,9 @@ export default function (pi: ExtensionAPI) {
   registerWeb(pi);
   // Video work (the kdj-video skill): files in the workspace, FFmpeg, Remotion and .kdjv projects.
   registerVideo(pi, { kdj, libraryRoots });
+  // A model that takes no pictures is told so at the start of every run, and turns video work down.
+  pi.on("before_agent_start", (event, ctx) => {
+    const line = blindLine(ctx.model);
+    return line ? { systemPrompt: `${event.systemPrompt}\n\n${line}` } : undefined;
+  });
 }

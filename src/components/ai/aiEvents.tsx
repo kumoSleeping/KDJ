@@ -114,13 +114,17 @@ function answer(id: string, body: { value?: string; confirmed?: boolean; cancell
 // ---------------------------------------------------------------- ask_user
 
 interface AskSong { ref: string; title: string; artists: string[]; platform: string; cover: string; duration: number | null }
-interface Asked { question: string; options: string[]; songs: AskSong[]; multiple: boolean; defaults: string[]; timeout: number }
+interface AskQuestion { id: string; question: string; options: string[]; multiple: boolean; defaults: string[] }
+interface Asked {
+  question: string; preview: string; questions: AskQuestion[];
+  options: string[]; songs: AskSong[]; multiple: boolean; defaults: string[]; timeout: number;
+}
 
 /** The dialog each `ask_user` call waits on (`kdj:ask:<call id>`), and an answer given before it came. */
 const askDialogs = new Map<string, string>();
 const askEarly = new Map<string, string>();
 
-function sendAsk(callId: string, reply: { choices: string[]; note?: string; cancelled?: boolean }) {
+function sendAsk(callId: string, reply: { choices?: string[]; answers?: Record<string, string[]>; note?: string; cancelled?: boolean }) {
   const value = JSON.stringify(reply);
   const dialog = askDialogs.get(callId);
   if (dialog) answer(dialog, { value });
@@ -131,6 +135,12 @@ function asked(details: unknown): Asked {
   const data = fields(details);
   return {
     question: str(data.question),
+    preview: str(data.preview),
+    questions: (Array.isArray(data.questions) ? data.questions : []).map(raw => {
+      const item = fields(raw);
+      return { id: str(item.id), question: str(item.question), options: strings(item.options),
+        multiple: item.multiple === true, defaults: strings(item.defaults) };
+    }).filter(item => item.id && item.options.length > 0),
     options: strings(data.options),
     songs: (Array.isArray(data.songs) ? data.songs : []).map(raw => {
       const song = fields(raw);
@@ -150,6 +160,56 @@ function SongCover({ song }: { song: AskSong }) {
       ? <img src={thumbUrl(song.cover, 96)} alt="" draggable={false} referrerPolicy="no-referrer" onError={() => setFailed(true)} />
       : <VinylPlaceholder />}
   </span>;
+}
+
+/** Several questions answered together (a plan): what the AI means to do, then each question with
+ *  its choices; one 确定 sends them all. */
+function AskPlan({ callId, ask }: { callId: string; ask: Asked }) {
+  const [picked, setPicked] = useState<Record<string, ReadonlySet<string>>>(
+    () => Object.fromEntries(ask.questions.map(item => [item.id, new Set(item.defaults)])));
+  const [note, setNote] = useState("");
+  const toggle = (item: AskQuestion, value: string) => setPicked(before => {
+    const now = before[item.id] ?? new Set<string>();
+    let next: Set<string>;
+    if (item.multiple) {
+      next = new Set(now);
+      if (next.has(value)) next.delete(value);
+      else next.add(value);
+    } else {
+      next = now.has(value) ? new Set() : new Set([value]);
+    }
+    return { ...before, [item.id]: next };
+  });
+  const answered = ask.questions.every(item => (picked[item.id]?.size ?? 0) > 0);
+  const submit = () => {
+    const answers = Object.fromEntries(ask.questions.map(item => [item.id, [...(picked[item.id] ?? [])]]));
+    sendAsk(callId, { answers, note: note.trim() || undefined });
+    dismissTask(`ai-ask:${callId}`);
+  };
+  const pause = () => {
+    sendAsk(callId, { answers: {}, cancelled: true });
+    dismissTask(`ai-ask:${callId}`);
+    void useAiStore.getState().abort();
+  };
+  return <div className="kd-ai-ask" data-plan="">
+    {ask.question && <p className="kd-ai-message kd-ai-ask-title">{ask.question}</p>}
+    {ask.preview && <p className="kd-ai-message">{ask.preview}</p>}
+    <div className="kd-ai-ask-questions">
+      {ask.questions.map(item => <div key={item.id} className="kd-ai-ask-question" role="group" aria-label={item.question}>
+        <span className="kd-ai-ask-label">{item.question}{item.multiple ? "（可多选）" : ""}</span>
+        <div className="kd-ai-ask-row">
+          {item.options.map(option => <button key={option} type="button" className="kd-ai-choice"
+            aria-pressed={picked[item.id]?.has(option) ?? false} onClick={() => toggle(item, option)}>{option}</button>)}
+        </div>
+      </div>)}
+    </div>
+    <form className="kd-ai-ask-row" onSubmit={event => { event.preventDefault(); submit(); }}>
+      <span className="kd-ai-ask-label">补充</span>
+      <input className="kd-ai-ask-input" value={note} aria-label="补充说明" onChange={event => setNote(event.target.value)} />
+      <button type="submit" className="kd-ai-choice" data-default="true" disabled={!answered && !note.trim()}>确定</button>
+      <button type="button" className="kd-ai-choice" data-quiet="true" title="停下这次任务" onClick={pause}>暂停</button>
+    </form>
+  </div>;
 }
 
 /** The question's body: songs to pick, text choices, and a line for the listener's own words. */
@@ -174,6 +234,7 @@ function AskPanel({ callId, ask }: { callId: string; ask: Asked }) {
     void useAiStore.getState().abort();
   };
   return <div className="kd-ai-ask">
+    {ask.preview && <p className="kd-ai-message">{ask.preview}</p>}
     {/* The whole question, not a line that scrolls. */}
     {ask.question && <p className="kd-ai-message">{ask.question}</p>}
     {ask.songs.length > 0 && <ul className="kd-ai-songs" role="group" aria-label={ask.multiple ? "可多选的歌曲" : "歌曲"}>
@@ -218,7 +279,7 @@ function askBubble(callId: string, ask: Asked) {
     title: "需要你决定",
     icon: AI_MARK,
     stay: ask.timeout * 1000,
-    controls: <AskPanel callId={callId} ask={ask} />,
+    controls: ask.questions.length > 0 ? <AskPlan callId={callId} ask={ask} /> : <AskPanel callId={callId} ask={ask} />,
     // Put away by hand: nothing chosen. Run out: pi takes the AI's default itself.
     onDismiss: reason => { if (reason === "user") sendAsk(callId, { choices: [], cancelled: true }); },
   });

@@ -43,6 +43,10 @@ const SKILL: &[(&str, &str)] = &[
     ("references/kdjv.md", include_str!("skills/kdj-video/references/kdjv.md")),
     ("references/ffmpeg.md", include_str!("skills/kdj-video/references/ffmpeg.md")),
     ("references/remotion.md", include_str!("skills/kdj-video/references/remotion.md")),
+    ("references/preset-vj.md", include_str!("skills/kdj-video/references/preset-vj.md")),
+    ("references/preset-cut.md", include_str!("skills/kdj-video/references/preset-cut.md")),
+    ("references/preset-merge.md", include_str!("skills/kdj-video/references/preset-merge.md")),
+    ("references/preset-visualizer.md", include_str!("skills/kdj-video/references/preset-visualizer.md")),
 ];
 /// What the Remotion project holds: Remotion's packages move in lockstep, so `latest` of each
 /// is one release.

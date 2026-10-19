@@ -9,13 +9,17 @@
  * - `kdj_ffmpeg`: one FFmpeg run, its output inside the workspace.
  * - `kdj_remotion_render`: one Remotion render of the workspace's Remotion project, installed by
  *   KDJ (设置 → AI → 视频).
+ * - `kdj_project_save` / `kdj_project_render` / `kdj_project_export`: a .kdjv project in the
+ *   library, rendered for playing, and once the listener agrees, written out as one MP4.
+ * - `kdj_visualizer_render`: KDJ's visualizer for a song (its cover in the default scene), as a
+ *   clip for a project or, given a library folder, as the finished MP4.
  *
  * Written into KDJ's own pi directory by kdj-server; edits here, not there.
  */
 import { spawn } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
-import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { constants, existsSync, statSync } from "node:fs";
+import { copyFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -48,6 +52,19 @@ function readable(path: string): boolean {
 /** Inside the workspace, and not in the Remotion project's installed packages. */
 function writable(path: string): boolean {
   return inside(WORKSPACE, path) && !inside(join(REMOTION, "node_modules"), path);
+}
+
+/**
+ * The line a model that takes no pictures gets in its system prompt (kdj-tools.ts adds it at the
+ * start of each run, so a model changed in 设置 is judged afresh): it cannot choose or check
+ * footage, so it turns video work down instead of building it from titles alone. The visualizer
+ * looks at no footage and stays open to it.
+ */
+export function blindLine(model: { id?: unknown; input?: unknown } | undefined): string | null {
+  if (!model || !Array.isArray(model.input) || model.input.includes("image")) return null;
+  return `你是非视觉模型（${String(model.id ?? "")}），看不到图片和视频画面。剪辑、拼接、做 VJ、配画面、换画面这类视频请求一律拒绝：` +
+    `用 tell_user 说一句「当前模型看不到画面，请在 设置 → AI 换一个能看图的模型」，然后结束，不搜索、不下载。` +
+    `只用 KDJ 可视化出画面的请求不需要看画面，可以照做。`;
 }
 
 const text = (value: unknown) => ({
@@ -302,7 +319,66 @@ function projectTools(deps: VideoDeps) {
     },
   });
 
-  return [save, render];
+  const exportProject = defineTool({
+    name: "kdj_project_export",
+    label: "导出工程",
+    description: "把一个已保存的 .kdjv 工程导出成一个 MP4 文件，放进曲库里的文件夹（to，绝对路径，必须在曲库根目录内；不给就放在工程旁边）。" +
+      "只在用户同意导出后用：默认先给 .kdjv 让用户预览。不覆盖已有文件，同名时换一个 name。全部结束才返回。",
+    parameters: Type.Object({
+      path: Type.String({ description: ".kdjv 文件的绝对路径" }),
+      to: Type.Optional(Type.String({ description: "放 MP4 的文件夹" })),
+      name: Type.Optional(Type.String({ description: "文件名（不含 .mp4），默认和工程同名" })),
+    }),
+    async execute(_id, params, signal) {
+      const project = resolve(params.path);
+      if (extname(project).toLowerCase() !== ".kdjv") throw new Error("要导出的是 .kdjv 工程");
+      const folder = resolve(params.to ?? dirname(project));
+      const roots = await deps.libraryRoots(signal);
+      if (!roots.some(root => inside(resolve(root), folder))) throw new Error(`导出要放在曲库根目录内：${roots.join("、")}`);
+      const name = (params.name ?? basename(project, extname(project))).replace(/[\\/:*?"<>|]/g, "_").trim();
+      if (!name) throw new Error("文件名为空");
+      const target = join(folder, `${name}.mp4`);
+      if (existsSync(target)) throw new Error(`已经有这个文件，换一个 name：${target}`);
+      const rendered = await deps.kdj(["project", "render", project], signal) as { path?: unknown };
+      if (typeof rendered?.path !== "string") throw new Error("渲染没有给出文件");
+      await mkdir(folder, { recursive: true });
+      await copyFile(rendered.path, target, constants.COPYFILE_EXCL);
+      return text({ exported: target, from: project });
+    },
+  });
+
+  const visualizer = defineTool({
+    name: "kdj_visualizer_render",
+    label: "可视化",
+    description: "可视化做法用：给曲库里的一首歌渲染整首的 KDJ 可视化（歌曲封面 + 频谱，默认样式，不是用户在可视化编辑器里调过的样子），30 fps。" +
+      "也可以用来填剪辑或音视频合并里的空档（在 .kdjv 里用 in/out 取需要的一段）。" +
+      "不给 to 时文件在工作目录的 renders/，用它的路径作为 .kdjv 片段的 src；给了 to（曲库里的文件夹，绝对路径）就直接导出成一个 MP4。" +
+      "宽高是偶数，320×180 至 2560×1440（竖屏最多 810×1440）。歌曲要有内嵌封面。全部结束才返回。",
+    parameters: Type.Object({
+      track_id: Type.Integer(),
+      width: Type.Optional(Type.Integer({ minimum: 320, maximum: 2560 })),
+      height: Type.Optional(Type.Integer({ minimum: 180, maximum: 1440 })),
+      to: Type.Optional(Type.String({ description: "直接导出时放 MP4 的曲库文件夹" })),
+      name: Type.Optional(Type.String({ description: "文件名（不含 .mp4）" })),
+    }),
+    async execute(_id, params, signal) {
+      let folder = RENDERS;
+      if (params.to) {
+        folder = resolve(params.to);
+        const roots = await deps.libraryRoots(signal);
+        if (!roots.some(root => inside(resolve(root), folder))) throw new Error(`导出要放在曲库根目录内：${roots.join("、")}`);
+      }
+      const name = (params.name ?? `visualizer-${params.track_id}-${Date.now()}`).replace(/[\\/:*?"<>|]/g, "_").trim();
+      const target = join(folder, `${name}.mp4`);
+      if (existsSync(target)) throw new Error(`已经有这个文件，换一个 name：${target}`);
+      await mkdir(folder, { recursive: true });
+      const size = { width: params.width, height: params.height };
+      return text(await deps.kdj(["visualizer", "render", String(params.track_id), "--out", target,
+        ...(size.width ? ["--width", String(size.width)] : []), ...(size.height ? ["--height", String(size.height)] : [])], signal));
+    },
+  });
+
+  return [save, render, exportProject, visualizer];
 }
 
 export function registerVideo(pi: ExtensionAPI, deps: VideoDeps) {

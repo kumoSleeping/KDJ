@@ -90,6 +90,10 @@ function running(tool: string, args: Fields): Omit<AiNotice, "tone"> {
       return { icon: "video", title: `保存工程 ${sourceName(args.path)}` };
     case "kdj_project_render":
       return { icon: "video", title: `准备工程 ${sourceName(args.path)}` };
+    case "kdj_project_export":
+      return { icon: "video", title: `导出工程 ${sourceName(args.path)}` };
+    case "kdj_visualizer_render":
+      return { icon: "video", title: "渲染可视化" };
     default:
       return { icon: "tool", title: tool };
   }
@@ -112,8 +116,14 @@ function outcome(tool: string, details: Fields): string | undefined {
     }
     case "kdj_peek":
       return `${count(details.frames)} 张`;
-    case "kdj_align":
-      return details.matched === true ? `${count(details.plans)} 个方案` : "没有对上";
+    case "kdj_align": {
+      if (details.matched !== true) return "没有对上";
+      // The first plan's stretches without picture, which the AI is to ask about.
+      const first = fields(Array.isArray(details.plans) ? details.plans[0] : null);
+      const gaps = Array.isArray(first.gaps) ? first.gaps.map(fields) : [];
+      const open = gaps.reduce((sum, gap) => sum + (typeof gap.length === "number" ? gap.length : 0), 0);
+      return [`${count(details.plans)} 个方案`, open >= 1 ? `空档 ${Math.round(open)} 秒` : ""].filter(Boolean).join(" · ");
+    }
     case "kdj_web_search": {
       const engine = details.engine === "deepseek" ? "DeepSeek" : details.engine === "jina" ? "Jina" : "";
       return [engine, `${count(details.results)} 条`].filter(Boolean).join(" · ");
@@ -125,6 +135,10 @@ function outcome(tool: string, details: Fields): string | undefined {
       if (details.problem) return str(details.problem).split("\n")[0];
       return typeof check.duration === "number" ? `${Math.round(check.duration)} 秒 · ${count(check.sources)} 个素材` : undefined;
     }
+    case "kdj_project_export":
+      return str(details.exported) ? sourceName(details.exported) : undefined;
+    case "kdj_visualizer_render":
+      return str(details.path) ? sourceName(details.path) : undefined;
     default:
       return undefined;
   }
@@ -166,11 +180,22 @@ export function stepLine(tool: string, args: unknown, state: "running" | "done" 
     case "kdj_status":
       return line("查看 KDJ 的状态");
     case "ask_user": {
-      const answer = fields(details).choices;
-      return line(`询问：${str(a.question)}`, Array.isArray(answer) && answer.length ? `选了 ${answer.map(str).join("、")}` : undefined);
+      const answer = fields(details);
+      // A plan: its questions answered together, each as 问题：选了的.
+      if (Array.isArray(a.questions)) {
+        const answers = fields(answer.answers);
+        const picked = a.questions.map(fields).map(item => {
+          const chosen = answers[str(item.id)];
+          return Array.isArray(chosen) && chosen.length ? `${str(item.question)}：${chosen.map(str).join("、")}` : "";
+        }).filter(Boolean);
+        return line(`方案：${str(a.question) || str(a.preview)}`, answer.cancelled === true ? "暂停了" : picked.join("；") || undefined);
+      }
+      const choices = answer.choices;
+      return line(`询问：${str(a.question)}`, Array.isArray(choices) && choices.length ? `选了 ${choices.map(str).join("、")}` : undefined);
     }
     case "tell_user":
-      return line(`消息：${str(a.message)}`);
+      // The whole message (a video task's report runs to several lines) below the step.
+      return line("消息", str(a.message));
     case "read":
       return line(`读取 ${sourceName(a.path)}`);
     case "write":
