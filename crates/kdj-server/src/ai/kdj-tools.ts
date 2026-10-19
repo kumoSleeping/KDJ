@@ -535,7 +535,7 @@ const askUser = defineTool({
 const tellUser = defineTool({
   name: "tell_user",
   label: "告诉用户",
-  description: "给用户发一条消息，显示在 KDJ 顶部。少用：只在用户问了问题、需要你回答时用；用户让你做事，做完不要发完成消息。seconds 是停留秒数，不给则一直停留到用户关掉。",
+  description: "做事中途给用户发一条消息，显示在 KDJ 顶部。少用：结果和报告写在最后收尾的那段话里，不用它发。seconds 是停留秒数，不给则一直停留到用户关掉。",
   parameters: Type.Object({
     message: Type.String(),
     seconds: Type.Optional(Type.Integer({ minimum: 3, maximum: 600 })),

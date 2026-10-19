@@ -7,6 +7,7 @@ import { create } from "zustand";
 import { aiApi } from "../lib/api";
 import { getBridge } from "../lib/bridge";
 import { imagesOf, withAttachments, type AiAttachment } from "../lib/aiAttachments";
+import { withStatus } from "../lib/aiStatus";
 import type { AiStatus } from "../types/ai";
 import type { WsEvent } from "../types";
 
@@ -29,6 +30,8 @@ export interface AiRun {
   steps: AiStep[];
   /** The earlier session this request went on in (历史 → 继续), by its title. */
   resumed?: string;
+  /** What the AI said when it was done (its last reply), Markdown. */
+  reply?: string;
 }
 
 /** An earlier session the next request goes on in (历史 → 继续); shown as a card in Agent Mode. */
@@ -168,11 +171,12 @@ export const useAiStore = create<AiStore>((set, get) => ({
     // The request becomes a task at the bottom right (a supplement when the AI is at work); the
     // cards go with it and leave the field.
     const attached = get().attachments;
-    const sent = withAttachments(text, attached);
     const images = imagesOf(attached);
     set({ attachments: [] });
     const module = await events();
     const running = get().running;
+    // A new request also says where the listener is (aiStatus.ts); a supplement does not.
+    const sent = running ? withAttachments(text, attached) : withStatus(withAttachments(text, attached));
     // A request (not a supplement) goes on in the session 继续 chose, and the card goes.
     const resumed = running ? undefined : get().resume?.title;
     const task = module.userRequest(text, running, sent, attached.map(item => item.title), images, resumed);

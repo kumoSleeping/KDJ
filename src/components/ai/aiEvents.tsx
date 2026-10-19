@@ -83,8 +83,13 @@ function gatherSearch(args: Fields) {
 
 /** The calls under way: their tool and arguments, for the line their end writes. */
 const calls = new Map<string, { tool: string; args: Fields }>();
+/** The step bubbles this task put up at the top, cleared when its closing words come. */
+const stepBubbles = new Set<string>();
+/** The AI's last words in this task: its closing reply. */
+let lastReply = "";
 
 function noticeBubble(id: string, notice: AiNotice, stay: number | undefined, progress?: number) {
+  stepBubbles.add(id);
   showTask({
     progress,
     id: `ai:${id}`,
@@ -406,6 +411,32 @@ function tell(callId: string, args: Fields) {
   });
 }
 
+// ---------------------------------------------------------------- the closing reply
+
+/**
+ * The task is done and the AI said what came of it: its words are a bubble that stays until put
+ * away, and the steps' bubbles leave with the task (the drawer keeps them).
+ */
+function closingReply(text: string) {
+  for (const id of stepBubbles) dismissTask(`ai:${id}`);
+  stepBubbles.clear();
+  const reply = text.trim();
+  if (!reply) return;
+  updateRun(run => ({ ...run, reply }));
+  const short = reply.length <= SHORT_MESSAGE && !reply.includes("\n") && !/[*`#|>\[~]/.test(reply);
+  showTask({
+    id: "ai-reply",
+    kind: "ai",
+    title: short ? reply : "AI",
+    icon: AI_MARK,
+    placement: "top",
+    size: short ? "small" : "regular",
+    stay: 0,
+    resizable: !short,
+    controls: short ? undefined : <div className="kd-ai-message-md"><PlanText text={reply} /></div>,
+  });
+}
+
 // ---------------------------------------------------------------- the listener's tasks
 
 /**
@@ -524,6 +555,11 @@ function userText(message: Fields): string {
 export function handlePiEvent(event: PiEvent) {
   switch (event.type) {
     case "agent_start":
+      if (!mainTask?.working) {
+        // A new task: the last one's closing words go.
+        lastReply = "";
+        dismissTask("ai-reply");
+      }
       aiTaskBegan();
       if (mainTask && !mainTask.working) {
         mainTask.working = true;
@@ -605,6 +641,11 @@ export function handlePiEvent(event: PiEvent) {
     case "message_end": {
       const message = fields(event.message);
       if (message.role === "assistant" && message.stopReason === "error") aiProblem(str(message.errorMessage) || "AI 出错了");
+      // What the AI writes is its closing reply; a run stopped half-way has none.
+      // Only the last message counts: words written between tool calls are not the outcome.
+      if (message.role === "assistant") {
+        lastReply = message.stopReason === "error" || message.stopReason === "aborted" ? "" : userText(message).trim();
+      }
       return;
     }
     case "agent_settled":
@@ -624,7 +665,10 @@ export function handlePiEvent(event: PiEvent) {
         startRun(first, mainTask.supplements);
         drawMain();
       } else {
-        // Nothing follows: the window goes back to where the listener was, if they left it be.
+        // Nothing follows: the AI's closing words come up, and the window goes back to where the
+        // listener was, if they left it be.
+        closingReply(lastReply);
+        lastReply = "";
         aiTaskEnded();
       }
       return;

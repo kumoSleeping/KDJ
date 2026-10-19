@@ -102,6 +102,8 @@
 /* A message from the AI, as Markdown (AiMarkup.tsx), under the bubble's name; a long one
    scrolls inside the bubble. */
 .kd-ai-message-md { max-height: min(32rem, 64vh); min-width: 0; overflow-y: auto; }
+/* The closing reply under the task's steps in the drawer. */
+.kd-ai-reply { margin-top: 12px; max-height: none; }
 
 /* The listener's own words in their task. */
 .kd-ai-message {

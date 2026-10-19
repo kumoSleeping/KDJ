@@ -16,6 +16,7 @@ import { aiDrawerPages, useAiDrawer } from "../../lib/aiDrawer";
 import { useAiStore } from "../../stores/aiStore";
 import { SlidePages } from "../drawer/SlidePages";
 import { AiSessions, Request, StepRow } from "./AiSessions";
+import { PlanText } from "./AiMarkup";
 import "./AiDrawer.css";
 
 function TaskPage() {
@@ -26,6 +27,7 @@ function TaskPage() {
       <ol className="kd-ai-steps">
         {run.steps.map(step => <StepRow key={step.id} {...step} />)}
       </ol>
+      {run.reply && <div className="kd-ai-message-md kd-ai-reply"><PlanText text={run.reply} /></div>}
     </>}
   </div>;
 }

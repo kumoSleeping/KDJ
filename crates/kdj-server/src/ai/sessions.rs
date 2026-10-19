@@ -37,9 +37,11 @@ pub enum Step {
     Tool { tool: String, args: Value, failed: bool, text: String, details: Value },
 }
 
-/// The listener's words without the attachments block KDJ adds (aiAttachments.ts), and the
+/// The listener's words without the blocks KDJ adds (aiAttachments.ts, aiStatus.ts), and the
 /// titles of what was attached.
 fn request_text(raw: &str) -> (String, Vec<String>) {
+    // Where the listener was (aiStatus.ts) is for the AI, not part of what they asked.
+    let raw = raw.find("<kdj-status>").map_or(raw, |at| &raw[..at]);
     let Some(start) = raw.find("<kdj-attachments>") else {
         return (raw.trim().to_string(), vec![]);
     };
@@ -212,7 +214,7 @@ mod tests {
 
     const SESSION: &str = r#"{"type":"session","version":3,"id":"s-1","timestamp":"2026-10-19T08:00:00.000Z","cwd":"/w"}
 {"type":"message","id":"a","parentId":null,"timestamp":"2026-10-19T08:00:01.000Z","message":{"role":"system","content":""}}
-{"type":"message","id":"b","parentId":"a","timestamp":"2026-10-19T08:00:02.000Z","message":{"role":"user","content":"把这段换成城市夜景\n\n<kdj-attachments>\n{\"kind\":\"video\",\"title\":\"Set A\",\"range\":[83,101]}\n</kdj-attachments>"}}
+{"type":"message","id":"b","parentId":"a","timestamp":"2026-10-19T08:00:02.000Z","message":{"role":"user","content":"把这段换成城市夜景\n\n<kdj-attachments>\n{\"kind\":\"video\",\"title\":\"Set A\",\"range\":[83,101]}\n</kdj-attachments>\n\n<kdj-status>\n{\"page\":\"本地曲库\",\"folder\":null,\"playing\":{\"track_id\":7,\"title\":\"Set B\"}}\n</kdj-status>"}}
 {"type":"message","id":"c","parentId":"b","timestamp":"2026-10-19T08:00:03.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"t1","name":"kdj_search","arguments":{"text":"city night"}}]}}
 {"type":"message","id":"d","parentId":"c","timestamp":"2026-10-19T08:00:04.000Z","message":{"role":"toolResult","toolCallId":"t1","toolName":"kdj_search","content":[{"type":"text","text":"{}"}],"details":{"items":[]},"isError":false}}
 {"type":"message","id":"e","parentId":"d","timestamp":"2026-10-19T08:00:05.000Z","message":{"role":"user","content":"用户改变了页面：用户切到了本地曲库。以用户为准，接着完成任务。"}}
