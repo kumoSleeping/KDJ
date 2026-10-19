@@ -761,6 +761,64 @@
 .kd-search-ai[data-running] { color: var(--kd-text); }
 .kd-search-ai[aria-pressed="true"] svg { stroke-width: 2.4; }
 .kd-search-ai:focus-visible { outline: 2px solid var(--kd-focus, var(--kd-text)); outline-offset: 1px; }
+/* What was dragged into Agent Mode (aiAttachments.ts): a row of cards under the field, one per
+   thing — its cover, its name, the time marked on it, and a key to take it out. The row grows
+   the search row; nothing else moves. */
+.kd-searchbar[data-attached] { row-gap: 0.35rem; }
+.kd-ai-chips {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  min-width: 0;
+  cursor: default;
+}
+.kd-ai-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 18rem;
+  height: 1.7rem;
+  padding: 0 0.2rem 0 0.2rem;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--kd-text) 7%, var(--kd-panel));
+  font-size: 0.76rem;
+}
+.kd-ai-chip-cover {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 4px;
+  object-fit: cover;
+  color: var(--kd-muted);
+  background: color-mix(in srgb, var(--kd-text) 8%, transparent);
+}
+.kd-ai-chip-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kd-ai-chip-time { flex: none; color: var(--kd-muted); font-variant-numeric: tabular-nums; }
+.kd-ai-chip-remove {
+  appearance: none;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+.kd-ai-chip-remove:hover { color: var(--kd-text); background: var(--kd-hover); }
+.kd-ai-chip-remove:focus-visible { outline: 2px solid var(--kd-focus, var(--kd-text)); outline-offset: 0; }
+/* Something dragged over the row or the key: the field's edge lights in its own colours. */
+.kd-searchbar[data-kd-pointer-ai-over] .kd-searchbar-copy {
+  box-shadow: inset 0 0 0 1.5px var(--kd-agent-a);
+}
+.kd-search-ai[data-kd-pointer-ai-over] { color: var(--kd-text); background: var(--kd-hover); }
 /* A tall window stacks the row: the key stays at the end of its first line. */
 .kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top .kd-searchbar[data-has-ai] {
   grid-template-columns: minmax(0, 1fr);
@@ -769,6 +827,10 @@
   grid-row: 1;
   grid-column: 1;
   justify-self: end;
+}
+.kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top .kd-searchbar[data-has-ai] .kd-ai-chips {
+  grid-row: auto;
+  grid-column: 1;
 }
 @media (prefers-reduced-motion: reduce) {
   .kd-searchbar[data-ai] .kd-searchbar-copy { animation: none; }

@@ -3690,6 +3690,21 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-wave-cue-loop[data-active="true"] {
   background: color-mix(in srgb, var(--kd-cue-color) 38%, transparent);
 }
+/* The range playing is held in (Shift + drag on the waveform, src/lib/playRange.ts): a wash of
+   ink over the bars, lighter while it is still being drawn. */
+.kd-wave-range {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  min-width: 1px;
+  pointer-events: none;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--kd-text) 18%, transparent);
+}
+.kd-wave-range[data-draft] {
+  background: color-mix(in srgb, var(--kd-text) 12%, transparent);
+}
 .kd-wave-cue {
   --kd-cue-color: #7d8796;
   position: absolute;
@@ -5624,6 +5639,18 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   align-items: center;
   margin-right: 0.3rem;
   color: var(--kd-muted);
+}
+/* A KDJ video project (docs/kdjv.md): the word 工程 on a tone of the panel, as small as the
+   icons beside other rows. Ink only. */
+.kd-project-mark {
+  flex: none;
+  padding: 0 0.28rem;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--kd-text) 9%, transparent);
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: 0.04em;
 }
 
 /* ============================================================

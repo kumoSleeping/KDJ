@@ -6,6 +6,7 @@
 import { create } from "zustand";
 import { aiApi } from "../lib/api";
 import { getBridge } from "../lib/bridge";
+import { withAttachments, type AiAttachment } from "../lib/aiAttachments";
 import type { AiStatus } from "../types/ai";
 import type { WsEvent } from "../types";
 
@@ -19,6 +20,11 @@ interface AiStore {
   statusError: string;
   /** A request put into the field from elsewhere (a tip's example); `n` tells two alike apart. */
   seed: { text: string; n: number } | null;
+  /** What was dragged into the field, as cards above it; sent with the next request (aiAttachments.ts). */
+  attachments: AiAttachment[];
+  /** Adds cards (one per thing) and turns the row to Agent Mode. */
+  attach(items: readonly AiAttachment[]): void;
+  detach(key: string): void;
   setMode(mode: boolean): void;
   toggleMode(): void;
   /** Turns the search row to AI mode with `text` written in it, not sent. */
@@ -64,6 +70,20 @@ let lastChange = { text: "", at: 0 };
 export const useAiStore = create<AiStore>((set, get) => ({
   mode: false,
   seed: null,
+  attachments: [],
+  attach(items) {
+    if (items.length === 0) return;
+    set(state => {
+      const known = new Set(state.attachments.map(item => item.key));
+      // The same thing dropped again takes its newer time.
+      const updated = state.attachments.map(item => items.find(next => next.key === item.key) ?? item);
+      return { attachments: [...updated, ...items.filter(item => !known.has(item.key))] };
+    });
+    get().setMode(true);
+  },
+  detach(key) {
+    set(state => ({ attachments: state.attachments.filter(item => item.key !== key) }));
+  },
   running: false,
   status: null,
   statusError: "",
@@ -101,12 +121,16 @@ export const useAiStore = create<AiStore>((set, get) => ({
       void events().then(module => module.aiBlocked(blocked));
       return;
     }
-    // The request becomes a task at the bottom right (a supplement when the AI is at work).
+    // The request becomes a task at the bottom right (a supplement when the AI is at work); the
+    // cards go with it and leave the field.
+    const attached = get().attachments;
+    const sent = withAttachments(text, attached);
+    set({ attachments: [] });
     const module = await events();
-    const task = module.userRequest(text, get().running);
+    const task = module.userRequest(text, get().running, sent, attached.map(item => item.title));
     set({ running: true });
     try {
-      await aiApi.prompt(text);
+      await aiApi.prompt(sent);
     } catch (error) {
       module.requestFailed(task);
       set({ running: false });

@@ -86,7 +86,7 @@ import {
 } from "../../lib/folderDrop";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
-import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isImageTrack, isVideoTrack, thumbUrl } from "../../lib/format";
+import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isImageTrack, isProjectTrack, isVideoTrack, thumbUrl } from "../../lib/format";
 import { playClickForLayout, useTrackClickPrefs } from "../../lib/trackClickPrefs";
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import { shouldHandleWorkspaceDelete } from "../../lib/workspacePanes";
@@ -128,6 +128,8 @@ import { requestExploreSearch } from "../../lib/vjSearch";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, normalizeSearchPlatforms } from "../../lib/searchPlatforms";
 import { readLocalStorage } from "../../lib/storageWrite";
+import { aiDropElementAt, fromLocalTracks } from "../../lib/aiAttachments";
+import { useAiStore } from "../../stores/aiStore";
 
 /** @deprecated 请从 `lib/playTrack` 引用；保留 re-export 以免旧 import 断掉。 */
 export { PLAY_EVENT, playTrack, parsePlayRequest, type PlayRequest } from "../../lib/playTrack";
@@ -535,8 +537,10 @@ function trackCell(
       return (
         <div key={key} className="kd-list-cell kd-td-strong" role="gridcell" data-col="title" data-flex="" title={track.title || track.filename}>
           <TrackCoverThumb track={track} />
-          {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。 */}
-          {isVideoTrack(track.format) && (
+          {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。KDJ 视频工程写一个「工程」小标签。 */}
+          {isProjectTrack(track.format) ? (
+            <span className="kd-video-mark kd-project-mark" title="KDJ 视频工程：由本机文件拼成，在 KDJ 里播放">工程</span>
+          ) : isVideoTrack(track.format) && (
             <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
               <Video size={11} aria-hidden="true" />
             </span>
@@ -1286,12 +1290,20 @@ export const TrackTable = memo(function TrackTable({
     const clearTargets = () => {
       paintWorkshopDrop();
       document
-        .querySelectorAll<HTMLElement>("[data-kd-pointer-track-over]")
-        .forEach((node) => node.removeAttribute("data-kd-pointer-track-over"));
+        .querySelectorAll<HTMLElement>("[data-kd-pointer-track-over], [data-kd-pointer-ai-over]")
+        .forEach((node) => {
+          node.removeAttribute("data-kd-pointer-track-over");
+          node.removeAttribute("data-kd-pointer-ai-over");
+        });
     };
     const hitAt = (x: number, y: number) => document.elementFromPoint(x, y) as HTMLElement | null;
     const paintTarget = (x: number, y: number) => {
       clearTargets();
+      const ai = aiDropElementAt(x, y);
+      if (ai) {
+        ai.setAttribute("data-kd-pointer-ai-over", "");
+        return;
+      }
       if (paintWorkshopDrop(x, y)) return;
       const folder = folderDropElementAt(x, y);
       if (folder) {
@@ -1462,9 +1474,18 @@ export const TrackTable = memo(function TrackTable({
       const trash = hit?.closest<HTMLElement>("[data-kd-track-trash-target]");
       const cover = hit?.closest<HTMLElement>(`[${TRACK_COVER_DROP_TARGET_ATTR}]`);
       const coverTrackId = cover ? Number(cover.dataset.kdTrackId) : NaN;
+      const ai = aiDropElementAt(up.clientX, up.clientY);
       cleanup();
       if (!dragging) return;
       up.preventDefault();
+      // Agent Mode: the songs become cards that go to the AI with the request.
+      if (ai) {
+        finishTrackDrop();
+        void libraryStore.getState().resolveSummaries(ids)
+          .then(tracks => useAiStore.getState().attach(fromLocalTracks(tracks)))
+          .catch(() => undefined);
+        return;
+      }
       if (hit?.closest("[data-kd-visualizer-export-drop]")) {
         finishTrackDrop();
         void libraryStore.getState().resolveSummaries(ids)

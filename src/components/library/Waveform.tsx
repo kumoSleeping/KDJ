@@ -44,6 +44,7 @@ import { drawWaveformCanvas, drawWaveformPushFrame } from "./WaveformCanvas";
 import { THEME_CHANGE_EVENT } from "../../lib/themePack";
 import { useWaveformData } from "./useWaveformData";
 import { markerRatio, WaveformCueMarkers, WaveformLoopFills } from "./WaveformMarkers";
+import { MIN_RANGE_SECONDS, usePlayRange } from "../../lib/playRange";
 import {
   SONG_SWAP_IN_EASE,
   SONG_SWAP_IN_MS,
@@ -351,6 +352,11 @@ export function Waveform({
   } | null>(null);
   const customSeekRef = useRef(onSeek);
   const draggingRef = useRef(false);
+  // Shift + drag: where the range began, the range while it is drawn, and the range held (playRange.ts).
+  const rangeAnchorRef = useRef<number | null>(null);
+  const [rangeDraft, setRangeDraft] = useState<{ start: number; end: number } | null>(null);
+  const heldRange = usePlayRange((state) => (state.range?.trackId === trackId ? state.range : null));
+  const shownRange = rangeDraft ?? heldRange;
   const previewFrameRef = useRef<number | null>(null);
   const previewPositionRef = useRef(0);
   const phaseAnchorRef = useRef<number | null>(null);
@@ -1536,6 +1542,19 @@ export function Waveform({
         loopLength={overlay.loopLength}
       />
 
+      {/* The range playing is held in (Shift + drag, playRange.ts): a band of ink. */}
+      {shownRange && overlay.total > 0 && (
+        <span
+          className="kd-wave-range"
+          data-draft={rangeDraft ? "" : undefined}
+          style={{
+            left: `${(Math.max(0, shownRange.start) / overlay.total) * 100}%`,
+            width: `${(Math.max(0, Math.min(overlay.total, shownRange.end) - Math.max(0, shownRange.start)) / overlay.total) * 100}%`,
+          }}
+          aria-hidden="true"
+        />
+      )}
+
       {/* 已播部分压暗：不换色，只盖一层半透明遮罩，颜色信息还在。
           遮罩色跟主题走：深色主题盖黑、浅色主题盖白，白天才不会糊成一团黑 */}
       {dimPlayed && overlay.motionRatio !== null && overlay.motionRatio > 0 && (
@@ -1651,6 +1670,19 @@ export function Waveform({
               event.preventDefault();
               return;
             }
+            // Shift + drag marks a range to play in (playRange.ts) instead of moving the playhead.
+            if (event.shiftKey) {
+              event.preventDefault();
+              try {
+                event.currentTarget.setPointerCapture(event.pointerId);
+              } catch {
+                // In-bounds moves still mark the range.
+              }
+              const at = pointerPosition(event.currentTarget, event.clientX);
+              rangeAnchorRef.current = at;
+              setRangeDraft({ start: at, end: at });
+              return;
+            }
             // WKWebView 的透明原生 range 在受控 value 更新时可能丢掉系统拇指跟踪。
             // 手势改由 pointer 坐标驱动；阻止原生默认动作，避免两套跟踪互相覆盖。
             event.preventDefault();
@@ -1671,12 +1703,46 @@ export function Waveform({
             dispatchSeek(mapped, true, true);
           }}
           onPointerMove={(event) => {
+            const anchor = rangeAnchorRef.current;
+            if (anchor !== null) {
+              event.stopPropagation();
+              event.preventDefault();
+              const at = pointerPosition(event.currentTarget, event.clientX);
+              setRangeDraft({ start: Math.min(anchor, at), end: Math.max(anchor, at) });
+              return;
+            }
             if (!draggingRef.current) return;
             event.stopPropagation();
             event.preventDefault();
             previewSeek(mapSeekPosition(pointerPosition(event.currentTarget, event.clientX)));
           }}
           onPointerUp={(event) => {
+            const anchor = rangeAnchorRef.current;
+            if (anchor !== null) {
+              event.stopPropagation();
+              event.preventDefault();
+              rangeAnchorRef.current = null;
+              setRangeDraft(null);
+              try {
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                  event.currentTarget.releasePointerCapture(event.pointerId);
+                }
+              } catch {
+                // Already released.
+              }
+              const at = pointerPosition(event.currentTarget, event.clientX);
+              const start = Math.min(anchor, at);
+              // Short of the very end, so the song never ends (and moves on) inside the range.
+              const end = Math.min(Math.max(anchor, at), Math.max(0, total - 0.2));
+              if (end - start < MIN_RANGE_SECONDS) {
+                usePlayRange.getState().set(null);
+                return;
+              }
+              usePlayRange.getState().set({ trackId, start, end });
+              // Playing moves into the range at once.
+              dispatchSeek(start, false, false, true);
+              return;
+            }
             if (!draggingRef.current) return;
             event.stopPropagation();
             event.preventDefault();
@@ -1701,6 +1767,11 @@ export function Waveform({
           }}
           onPointerCancel={(event) => {
             event.stopPropagation();
+            if (rangeAnchorRef.current !== null) {
+              rangeAnchorRef.current = null;
+              setRangeDraft(null);
+              return;
+            }
             draggingRef.current = false;
             try {
               if (event.currentTarget.hasPointerCapture(event.pointerId)) {

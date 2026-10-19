@@ -9,7 +9,8 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { LoaderCircle, Sparkles } from "lucide-react";
+import { LoaderCircle, Music, Sparkles, Video, X } from "lucide-react";
+import { AI_DROP_ATTR, timeLabel } from "../../lib/aiAttachments";
 import type { Platform, SearchKind, TrackSummary } from "../../types";
 import { aiOffered, useAiStore } from "../../stores/aiStore";
 import { useSearchPresets } from "./useSearchPresets";
@@ -309,6 +310,7 @@ export function SearchBar({
     return () => window.clearTimeout(timer);
   }, [rowTurn, offered]);
   const aiRunning = useAiStore(state => state.running);
+  const attachments = useAiStore(state => state.attachments);
   const [request, setRequest] = useState("");
   const seed = useAiStore(state => state.seed);
   useEffect(() => {
@@ -444,6 +446,8 @@ export function SearchBar({
         data-platforms-expanded={stacked && platformsExpanded ? "true" : undefined}
         data-searching={wavePhase ?? undefined}
         data-kd-turn={rowTurn ?? undefined}
+        data-attached={aiMode && attachments.length > 0 || undefined}
+        {...(aiMode ? { [AI_DROP_ATTR]: "" } : {})}
         style={barStyle}
         onAnimationEnd={(event) => {
           if (event.target === event.currentTarget && rowTurn === "in") setRowTurn(null);
@@ -565,10 +569,33 @@ export function SearchBar({
             }}
           />
         </div>
-        {/* AI mode's key at the end of the row; while the AI works it stops it. */}
+        {/* What was dragged into Agent Mode: a card each, sent with the request (aiAttachments.ts). */}
+        {aiMode && attachments.length > 0 && (
+          <div className="kd-ai-chips" role="list" aria-label="附带给 AI">
+            {attachments.map(item => {
+              const time = timeLabel(item);
+              return (
+                <span key={item.key} className="kd-ai-chip" role="listitem" data-kd-turn="in" title={item.path ?? item.url ?? item.title}>
+                  {item.cover
+                    ? <img className="kd-ai-chip-cover" src={item.cover} alt="" draggable={false} />
+                    : <span className="kd-ai-chip-cover" aria-hidden="true">{item.video ? <Video size={12} /> : <Music size={12} />}</span>}
+                  <span className="kd-ai-chip-title">{item.title}</span>
+                  {time && <span className="kd-ai-chip-time">{time}</span>}
+                  <button type="button" className="kd-ai-chip-remove" aria-label={`移除 ${item.title}`}
+                    onClick={() => useAiStore.getState().detach(item.key)}>
+                    <X size={11} aria-hidden="true" />
+                  </button>
+                </span>
+              );
+            })}
+          </div>
+        )}
+        {/* AI mode's key at the end of the row; while the AI works it stops it. Something dragged
+            onto it turns the row to Agent Mode with that thing attached. */}
         {offered && <button
           type="button"
           className="kd-search-ai"
+          {...{ [AI_DROP_ATTR]: "" }}
           aria-pressed={aiMode}
           data-running={aiRunning || undefined}
           aria-label={aiRunning ? "停止 AI" : aiMode ? "回到搜索" : "AI 模式"}

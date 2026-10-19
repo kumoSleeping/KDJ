@@ -301,16 +301,26 @@ function tell(callId: string, args: Fields) {
 
 // ---------------------------------------------------------------- the listener's tasks
 
-interface UserTask { id: string; text: string; supplements: string[]; working: boolean }
+/**
+ * `text` is the listener's words as shown; `sent` is what pi got (the words and the dragged-in
+ * cards, aiAttachments.ts), by which its echo is recognised; `attached` names the cards.
+ */
+interface UserLine { id: string; text: string; sent: string; attached: string[] }
+interface UserTask extends UserLine { supplements: string[]; working: boolean }
 
 /** The request under way, and the lines sent since that the AI has not taken in yet. */
 let mainTask: UserTask | null = null;
-let waiting: { id: string; text: string }[] = [];
+let waiting: UserLine[] = [];
 let taskSeq = 0;
+
+function Attached({ titles }: { titles: string[] }) {
+  return titles.length > 0 ? <p className="kd-ai-message kd-ai-task-more">附带：{titles.join("、")}</p> : null;
+}
 
 function TaskText({ task }: { task: UserTask }) {
   return <div className="kd-ai-task">
     <p className="kd-ai-message">{task.text}</p>
+    <Attached titles={task.attached} />
     {task.supplements.map((line, index) => <p key={index} className="kd-ai-message kd-ai-task-more">补充：{line}</p>)}
   </div>;
 }
@@ -330,28 +340,28 @@ function drawMain() {
   });
 }
 
-function drawWaiting(line: { id: string; text: string }) {
+function drawWaiting(line: UserLine) {
   showTask({
     id: `ai-task:${line.id}`,
     kind: "ai-task",
     title: "补充 · 等待 AI 收到",
     icon: AI_MARK,
     stay: 0,
-    controls: <p className="kd-ai-message">{line.text}</p>,
+    controls: <div className="kd-ai-task"><p className="kd-ai-message">{line.text}</p><Attached titles={line.attached} /></div>,
     dismiss: { label: "撤销" },
     onDismiss: reason => { if (reason === "user") void takeBack(line.id); },
   });
 }
 
 /** The listener sent a request: a task of its own, or a supplement to the one under way. */
-export function userRequest(text: string, running: boolean): string {
+export function userRequest(text: string, running: boolean, sent = text, attached: string[] = []): string {
   taskSeq += 1;
   if (!mainTask) {
-    mainTask = { id: `t${taskSeq}`, text, supplements: [], working: running };
+    mainTask = { id: `t${taskSeq}`, text, sent, attached, supplements: [], working: running };
     drawMain();
     return mainTask.id;
   }
-  const line = { id: `s${taskSeq}`, text };
+  const line = { id: `s${taskSeq}`, text, sent, attached };
   waiting.push(line);
   drawWaiting(line);
   return line.id;
@@ -380,7 +390,7 @@ async function takeBack(id: string) {
   waiting = waiting.filter(line => line.id !== id);
   try {
     await aiApi.clearQueue();
-    for (const line of waiting) await aiApi.prompt(line.text);
+    for (const line of waiting) await aiApi.prompt(line.sent);
   } catch (error) {
     aiProblem(error instanceof Error ? error.message : String(error));
   }
@@ -407,7 +417,7 @@ export function handlePiEvent(event: PiEvent) {
       const message = fields(event.message);
       if (message.role !== "user") return;
       const text = userText(message).trim();
-      const line = waiting.find(item => item.text.trim() === text);
+      const line = waiting.find(item => item.sent.trim() === text);
       if (!line || !mainTask) return;
       waiting = waiting.filter(item => item !== line);
       dismissTask(`ai-task:${line.id}`, "caller");
@@ -474,7 +484,7 @@ export function handlePiEvent(event: PiEvent) {
         const [first, ...rest] = waiting;
         for (const line of waiting) dismissTask(`ai-task:${line.id}`, "caller");
         waiting = [];
-        mainTask = { id: first.id, text: first.text, supplements: rest.map(line => line.text), working: false };
+        mainTask = { ...first, supplements: rest.map(line => line.text), working: false };
         drawMain();
       } else {
         // Nothing follows: the window goes back to where the listener was, if they left it be.
