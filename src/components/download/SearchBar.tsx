@@ -10,8 +10,14 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { LoaderCircle, Music, Sparkles, Video, X } from "lucide-react";
-import { AI_DROP_ATTR, timeLabel } from "../../lib/aiAttachments";
+import { AI_DROP_ATTR, fromLocalTracks, fromPastedImage, fromSearchDrag, timeLabel } from "../../lib/aiAttachments";
+import { activeSearchDrag, finishSearchDrop, readSearchDrop } from "../../lib/searchDrag";
+import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
+import { useLibraryStore } from "../../stores/libraryStore";
+import { aiApi } from "../../lib/api";
+import { showTask } from "../tasks/taskBubbleStore";
 import { useAiDrawer } from "../../lib/aiDrawer";
+import type { AiThinking } from "../../types/ai";
 import type { Platform, SearchKind, TrackSummary } from "../../types";
 import { aiOffered, useAiStore } from "../../stores/aiStore";
 import { useSearchPresets } from "./useSearchPresets";
@@ -38,6 +44,26 @@ import {
   type SearchPhase,
 } from "./searchMotion";
 import "./SearchBar.css";
+
+/** pi's reasoning efforts in the order the key steps through them. */
+const THINKING_ORDER: AiThinking[] = ["low", "medium", "high", "xhigh"];
+const THINKING_LABEL: Record<AiThinking, string> = { low: "低", medium: "中", high: "高", xhigh: "极高" };
+const nextThinking = (level: AiThinking) => THINKING_ORDER[(THINKING_ORDER.indexOf(level) + 1) % THINKING_ORDER.length];
+
+/** One step of the reasoning key: shown at once, kept by kdj-server and given to pi. */
+async function cycleThinking(): Promise<void> {
+  const ai = useAiStore.getState();
+  const status = ai.status;
+  if (!status) return;
+  const level = nextThinking(status.thinking ?? "high");
+  ai.setStatus({ ...status, thinking: level });
+  try {
+    ai.setStatus(await aiApi.setThinking(level));
+  } catch (error) {
+    ai.setStatus(status);
+    showTask({ id: "ai-thinking", kind: "notice", title: "推理强度没能切换", detail: error instanceof Error ? error.message : String(error), tone: "error", placement: "top" });
+  }
+}
 
 export {
   DEFAULT_PRIORITY,
@@ -312,6 +338,7 @@ export function SearchBar({
   }, [rowTurn, offered]);
   const aiRunning = useAiStore(state => state.running);
   const attachments = useAiStore(state => state.attachments);
+  const thinking = useAiStore(state => state.status?.thinking ?? "high");
   const [request, setRequest] = useState("");
   const seed = useAiStore(state => state.seed);
   useEffect(() => {
@@ -448,7 +475,33 @@ export function SearchBar({
         data-searching={wavePhase ?? undefined}
         data-kd-turn={rowTurn ?? undefined}
         data-attached={aiMode && attachments.length > 0 || undefined}
-        {...(aiMode ? { [AI_DROP_ATTR]: "" } : {})}
+        {...(offered ? { [AI_DROP_ATTR]: "" } : {})}
+        // Most drags are pointer drags that find this row themselves (TrackTable, searchDrag); a
+        // system drag of library rows or search results arrives here.
+        onDragOver={offered ? (event) => {
+          if (!isTrackDrag(event) && !activeSearchDrag()) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+          event.currentTarget.setAttribute("data-kd-pointer-ai-over", "");
+        } : undefined}
+        onDragLeave={offered ? (event) => event.currentTarget.removeAttribute("data-kd-pointer-ai-over") : undefined}
+        onDrop={offered ? (event) => {
+          event.currentTarget.removeAttribute("data-kd-pointer-ai-over");
+          const ids = isTrackDrag(event) ? readTrackDragIds(event.dataTransfer) : [];
+          const search = ids.length ? null : readSearchDrop(event.dataTransfer);
+          if (!ids.length && !search) return;
+          event.preventDefault();
+          event.stopPropagation();
+          if (search) {
+            finishSearchDrop();
+            useAiStore.getState().attach(fromSearchDrag(search));
+            return;
+          }
+          finishTrackDrop();
+          void useLibraryStore.getState().resolveSummaries(ids)
+            .then(tracks => useAiStore.getState().attach(fromLocalTracks(tracks)))
+            .catch(() => undefined);
+        } : undefined}
         style={barStyle}
         onAnimationEnd={(event) => {
           if (event.target === event.currentTarget && rowTurn === "in") setRowTurn(null);
@@ -563,6 +616,25 @@ export function SearchBar({
                 else fireSubmit();
               }
             }}
+            onPaste={(event) => {
+              // A picture pasted here goes to the AI: a card in Agent Mode (aiAttachments.ts).
+              if (!offered) return;
+              const images = Array.from(event.clipboardData?.items ?? [])
+                .filter(item => item.kind === "file" && item.type.startsWith("image/"))
+                .map(item => item.getAsFile())
+                .filter((file): file is File => file !== null);
+              if (!images.length) return;
+              event.preventDefault();
+              for (const image of images) {
+                const preview = URL.createObjectURL(image);
+                aiApi.paste(image)
+                  .then(({ path }) => useAiStore.getState().attach([fromPastedImage(path, preview)]))
+                  .catch(error => {
+                    URL.revokeObjectURL(preview);
+                    showTask({ id: "ai-paste", kind: "notice", title: "图片没能粘贴", detail: error instanceof Error ? error.message : String(error), tone: "error", placement: "top" });
+                  });
+              }
+            }}
             onChange={(event) => {
               if (aiMode) {
                 setRequest(event.target.value);
@@ -594,23 +666,33 @@ export function SearchBar({
             })}
           </div>
         )}
-        {/* AI mode's key at the end of the row; while the AI works it stops it. Something dragged
-            onto it turns the row to Agent Mode with that thing attached. */}
-        {offered && <button
-          type="button"
-          className="kd-search-ai"
-          {...{ [AI_DROP_ATTR]: "" }}
-          aria-pressed={aiMode}
-          data-running={aiRunning || undefined}
-          aria-label={aiRunning ? "停止 AI" : aiMode ? "回到搜索" : "AI 模式"}
-          title={aiRunning ? "停止 AI" : aiMode ? "回到搜索" : "AI 模式"}
-          onClick={() => {
-            if (aiRunning) void useAiStore.getState().abort();
-            else useAiStore.getState().toggleMode();
-          }}
-        >
-          {aiRunning ? <LoaderCircle size={16} className="kd-spin" aria-hidden="true" /> : <Sparkles size={16} aria-hidden="true" />}
-        </button>}
+        {/* The keys at the end of the row: in Agent Mode first how hard the model thinks (a click
+            steps through 低 中 高 极高), then AI mode's key, which stops the AI while it works.
+            Something dragged onto the row turns it to Agent Mode with that thing attached. */}
+        {offered && <span className="kd-search-ai-keys">
+          {aiMode && <button
+            type="button"
+            className="kd-search-thinking"
+            title={`推理强度：${THINKING_LABEL[thinking]} · 点击切换`}
+            aria-label={`推理强度${THINKING_LABEL[thinking]}，点击切换为${THINKING_LABEL[nextThinking(thinking)]}`}
+            onClick={() => void cycleThinking()}
+          >{THINKING_LABEL[thinking]}</button>}
+          <button
+            type="button"
+            className="kd-search-ai"
+            {...{ [AI_DROP_ATTR]: "" }}
+            aria-pressed={aiMode}
+            data-running={aiRunning || undefined}
+            aria-label={aiRunning ? "停止 AI" : aiMode ? "回到搜索" : "AI 模式"}
+            title={aiRunning ? "停止 AI" : aiMode ? "回到搜索" : "AI 模式"}
+            onClick={() => {
+              if (aiRunning) void useAiStore.getState().abort();
+              else useAiStore.getState().toggleMode();
+            }}
+          >
+            {aiRunning ? <LoaderCircle size={16} className="kd-spin" aria-hidden="true" /> : <Sparkles size={16} aria-hidden="true" />}
+          </button>
+        </span>}
       </div>
       {!aiMode && presets.menu}
     </form>

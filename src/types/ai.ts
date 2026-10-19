@@ -24,6 +24,8 @@ export interface AiStatus {
   model: string | null;
   /** pi is running. */
   running: boolean;
+  /** How hard the model thinks; high unless the listener chose otherwise. */
+  thinking: AiThinking;
   /** Remotion in the AI's workspace (设置 → AI → 视频), which the video skill renders with. */
   remotion: {
     /** Installed version; null when it is not installed. */
@@ -43,6 +45,9 @@ export interface AiStatus {
     jina: boolean;
   };
 }
+
+/** pi's reasoning efforts that the key beside Agent Mode steps through. */
+export type AiThinking = "low" | "medium" | "high" | "xhigh";
 
 /** How the AI searches the web: pi-web-access, or one of KDJ's own ways. */
 export type AiWebMode = "access" | "deepseek" | "deepseek-jina" | "jina";

@@ -68,6 +68,9 @@ const INSTALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const ACCESS_PACKAGE: &str = "npm:pi-web-access";
 /// Its tools, hidden while another way of searching is chosen.
 const ACCESS_TOOLS: &str = "web_search,fetch_content,get_search_content,source_check";
+/// The reasoning efforts the listener steps through (the key beside Agent Mode), pi's names.
+const THINKING_LEVELS: &[&str] = &["low", "medium", "high", "xhigh"];
+const DEFAULT_THINKING: &str = "high";
 /// The ways of searching the web: pi-web-access, or KDJ's own (kdj-web.ts).
 const WEB_MODES: &[&str] = &["access", "deepseek", "deepseek-jina", "jina"];
 
@@ -318,6 +321,16 @@ impl AiBridge {
         Ok(())
     }
 
+    /// How hard the model thinks (`thinking` in kdj-ai.json): high unless the listener chose
+    /// otherwise. pi fits it to what the model can do.
+    fn thinking(&self) -> String {
+        read_object(&self.paths.config)
+            .ok()
+            .and_then(|config| config.get("thinking").and_then(Value::as_str).map(str::to_string))
+            .filter(|level| THINKING_LEVELS.contains(&level.as_str()))
+            .unwrap_or_else(|| DEFAULT_THINKING.to_string())
+    }
+
     /// How the AI searches the web (`web` in kdj-ai.json); pi-web-access when nothing was chosen.
     fn web_mode(&self) -> String {
         read_object(&self.paths.config)
@@ -385,6 +398,7 @@ impl AiBridge {
                 "error": self.install_error.lock().unwrap_or_else(|e| e.into_inner()).clone(),
                 "jina": configured.iter().any(|id| id == "jina"),
             },
+            "thinking": self.thinking(),
             "remotion": {
                 "version": self.remotion_version(),
                 "installing": self.remotion_installing.load(Ordering::Relaxed),
@@ -467,6 +481,7 @@ impl AiBridge {
         if let (Some(provider), Some(model)) = (&choice.provider, &choice.model) {
             command.args(["--provider", provider.as_str(), "--model", model.as_str()]);
         }
+        command.args(["--thinking", self.thinking().as_str()]);
         if web_mode != "access" && self.access_installed() {
             command.args(["--exclude-tools", ACCESS_TOOLS]);
         }
@@ -661,6 +676,25 @@ pub async fn set_provider(State(state): State<Arc<AppState>>, Json(body): Json<P
 #[derive(Deserialize)]
 pub struct PromptBody {
     message: String,
+    /// Pictures that go with the request (pasted, or image files dragged in), by path: the model
+    /// sees them with the words.
+    #[serde(default)]
+    images: Vec<String>,
+}
+
+/// A picture is handed to the model at most this wide and tall.
+const PROMPT_IMAGE_PX: u32 = 1600;
+/// More pictures than this in one request are left out.
+const PROMPT_IMAGES: usize = 8;
+/// A pasted picture larger than this is refused.
+pub const PASTE_BYTES: usize = 30 * 1024 * 1024;
+
+/// One picture for pi's `prompt`: decoded and fitted into PROMPT_IMAGE_PX, as PNG.
+fn prompt_image(path: &Path) -> anyhow::Result<Value> {
+    use base64::Engine;
+    anyhow::ensure!(kdj_providers::workshop_images::is_image_path(path), "不是图片：{}", path.display());
+    let png = kdj_providers::workshop_images::frame_png(path, false, 0, PROMPT_IMAGE_PX)?;
+    Ok(json!({ "type": "image", "data": base64::engine::general_purpose::STANDARD.encode(png), "mimeType": "image/png" }))
 }
 
 pub async fn prompt(State(state): State<Arc<AppState>>, Json(body): Json<PromptBody>) -> ApiResult<Json<Value>> {
@@ -668,8 +702,16 @@ pub async fn prompt(State(state): State<Arc<AppState>>, Json(body): Json<PromptB
     if message.is_empty() {
         return Err(ApiError::bad_request("消息为空"));
     }
+    let paths: Vec<PathBuf> = body.images.iter().take(PROMPT_IMAGES).map(PathBuf::from).collect();
+    let images = tokio::task::spawn_blocking(move || paths.iter().map(|path| prompt_image(path)).collect::<anyhow::Result<Vec<_>>>())
+        .await
+        .map_err(anyhow::Error::from)?
+        .map_err(|error| ApiError::bad_request(format!("图片读不出来：{error:#}")))?;
     let process = bridge(&state).process(&state).await?;
     let mut command = json!({ "type": "prompt", "message": message });
+    if !images.is_empty() {
+        command["images"] = json!(images);
+    }
     if process.streaming.load(Ordering::Relaxed) {
         command["streamingBehavior"] = json!("steer");
     }
@@ -704,6 +746,69 @@ pub async fn reset(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>>
         process.send(json!({ "type": "new_session" })).await?;
     }
     Ok(Json(json!({})))
+}
+
+// ---------------------------------------------------------------- reasoning effort
+
+#[derive(Deserialize)]
+pub struct ThinkingBody {
+    level: String,
+}
+
+/// Sets how hard the model thinks: kept in kdj-ai.json for every start of pi, and given to a pi
+/// that runs now, so the next request already thinks this hard.
+pub async fn set_thinking(State(state): State<Arc<AppState>>, Json(body): Json<ThinkingBody>) -> ApiResult<Json<Value>> {
+    let bridge = bridge(&state);
+    if !THINKING_LEVELS.contains(&body.level.as_str()) {
+        return Err(ApiError::bad_request(format!("未知的推理强度：{}", body.level)));
+    }
+    update_object(&bridge.paths.config, |config| {
+        config.insert("thinking".into(), json!(body.level));
+    })?;
+    let running = bridge.process.lock().await.clone();
+    if let Some(process) = running {
+        process.send(json!({ "type": "set_thinking_level", "level": body.level })).await?;
+    }
+    let status = bridge.status(false).await;
+    state.hub.publish("ai.status", &status);
+    Ok(Json(status))
+}
+
+// ---------------------------------------------------------------- pasted pictures
+
+/// The file name a pasted picture keeps in the workspace's `pasted/`, by its type.
+fn pasted_extension(content_type: &str) -> Option<&'static str> {
+    match content_type.split(';').next().unwrap_or("").trim() {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/webp" => Some("webp"),
+        "image/gif" => Some("gif"),
+        "image/bmp" => Some("bmp"),
+        _ => None,
+    }
+}
+
+/// A picture pasted into Agent Mode: kept in the AI's workspace (`pasted/`), where the AI can use
+/// it as a source as well as look at it. Returns its path.
+pub async fn paste(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<Json<Value>> {
+    let content_type = headers.get(axum::http::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or("");
+    let extension = pasted_extension(content_type).ok_or_else(|| ApiError::bad_request("只能粘贴图片"))?;
+    if bytes.is_empty() || bytes.len() > PASTE_BYTES {
+        return Err(ApiError::bad_request("图片为空或太大"));
+    }
+    let dir = bridge(&state).paths.workspace.join("pasted");
+    std::fs::create_dir_all(&dir).map_err(anyhow::Error::from)?;
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let path = (1..)
+        .map(|n| dir.join(if n == 1 { format!("{stamp}.{extension}") } else { format!("{stamp}-{n}.{extension}") }))
+        .find(|path| !path.exists())
+        .expect("a free name");
+    std::fs::write(&path, &bytes).map_err(anyhow::Error::from)?;
+    Ok(Json(json!({ "path": path })))
 }
 
 // ---------------------------------------------------------------- the history
@@ -1013,6 +1118,36 @@ mod tests {
             remotion_installing: AtomicBool::new(false),
             remotion_error: Mutex::new(String::new()),
         }
+    }
+
+    #[test]
+    fn the_model_thinks_hard_unless_the_listener_chose_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = bridge_in(dir.path());
+        assert_eq!(bridge.thinking(), "high");
+        update_object(&bridge.paths.config, |config| { config.insert("thinking".into(), json!("low")); }).unwrap();
+        assert_eq!(bridge.thinking(), "low");
+        update_object(&bridge.paths.config, |config| { config.insert("thinking".into(), json!("ludicrous")); }).unwrap();
+        assert_eq!(bridge.thinking(), "high", "a level pi does not know is not passed on");
+    }
+
+    #[test]
+    fn a_pasted_picture_goes_to_the_model_as_a_png() {
+        use base64::Engine;
+        // The smallest PNG there is: one transparent pixel.
+        let pixel = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pasted.png");
+        std::fs::write(&path, pixel).unwrap();
+        let image = prompt_image(&path).unwrap();
+        assert_eq!((image["type"].as_str(), image["mimeType"].as_str()), (Some("image"), Some("image/png")));
+        assert!(!image["data"].as_str().unwrap().is_empty());
+        assert!(prompt_image(&dir.path().join("notes.txt")).is_err(), "only pictures go along");
+        assert_eq!(pasted_extension("image/jpeg"), Some("jpg"));
+        assert_eq!(pasted_extension("image/png; charset=binary"), Some("png"));
+        assert_eq!(pasted_extension("text/plain"), None);
     }
 
     #[test]

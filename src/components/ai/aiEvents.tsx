@@ -303,9 +303,10 @@ function tell(callId: string, args: Fields) {
 
 /**
  * `text` is the listener's words as shown; `sent` is what pi got (the words and the dragged-in
- * cards, aiAttachments.ts), by which its echo is recognised; `attached` names the cards.
+ * cards, aiAttachments.ts), by which its echo is recognised; `attached` names the cards and `images`
+ * are the pictures that went with it, sent again with it if it is sent again.
  */
-interface UserLine { id: string; text: string; sent: string; attached: string[] }
+interface UserLine { id: string; text: string; sent: string; attached: string[]; images: string[] }
 interface UserTask extends UserLine { supplements: string[]; working: boolean }
 
 /** The request under way, and the lines sent since that the AI has not taken in yet. */
@@ -363,15 +364,15 @@ function startRun(line: UserLine, supplements: string[] = []) {
 }
 
 /** The listener sent a request: a task of its own, or a supplement to the one under way. */
-export function userRequest(text: string, running: boolean, sent = text, attached: string[] = []): string {
+export function userRequest(text: string, running: boolean, sent = text, attached: string[] = [], images: string[] = []): string {
   taskSeq += 1;
   if (!mainTask) {
-    mainTask = { id: `t${taskSeq}`, text, sent, attached, supplements: [], working: running };
+    mainTask = { id: `t${taskSeq}`, text, sent, attached, images, supplements: [], working: running };
     startRun(mainTask);
     drawMain();
     return mainTask.id;
   }
-  const line = { id: `s${taskSeq}`, text, sent, attached };
+  const line = { id: `s${taskSeq}`, text, sent, attached, images };
   waiting.push(line);
   drawWaiting(line);
   return line.id;
@@ -400,7 +401,7 @@ async function takeBack(id: string) {
   waiting = waiting.filter(line => line.id !== id);
   try {
     await aiApi.clearQueue();
-    for (const line of waiting) await aiApi.prompt(line.sent);
+    for (const line of waiting) await aiApi.prompt(line.sent, line.images);
   } catch (error) {
     aiProblem(error instanceof Error ? error.message : String(error));
   }

@@ -6,7 +6,7 @@
 import { create } from "zustand";
 import { aiApi } from "../lib/api";
 import { getBridge } from "../lib/bridge";
-import { withAttachments, type AiAttachment } from "../lib/aiAttachments";
+import { imagesOf, withAttachments, type AiAttachment } from "../lib/aiAttachments";
 import type { AiStatus } from "../types/ai";
 import type { WsEvent } from "../types";
 
@@ -146,12 +146,13 @@ export const useAiStore = create<AiStore>((set, get) => ({
     // cards go with it and leave the field.
     const attached = get().attachments;
     const sent = withAttachments(text, attached);
+    const images = imagesOf(attached);
     set({ attachments: [] });
     const module = await events();
-    const task = module.userRequest(text, get().running, sent, attached.map(item => item.title));
+    const task = module.userRequest(text, get().running, sent, attached.map(item => item.title), images);
     set({ running: true });
     try {
-      await aiApi.prompt(sent);
+      await aiApi.prompt(sent, images);
     } catch (error) {
       module.requestFailed(task);
       set({ running: false });

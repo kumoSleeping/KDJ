@@ -1297,6 +1297,7 @@ export const TrackTable = memo(function TrackTable({
     const paintTarget = (x: number, y: number) => {
       clearTargets();
       const ai = aiDropElementAt(x, y);
+      ghost?.hint(ai ? "交给 AI" : null);
       if (ai) {
         ai.setAttribute("data-kd-pointer-ai-over", "");
         return;

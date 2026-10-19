@@ -1,6 +1,6 @@
 /**
- * What the listener drags into Agent Mode (docs/ai-dock.md): songs and videos from the library,
- * the search results, or the computer's own files. Each becomes a card above the field and goes
+ * What the listener drags or pastes into Agent Mode (docs/ai-dock.md): songs and videos from the
+ * library, the search results, the computer's own files, and pictures. Each becomes a card above the field and goes
  * to the AI with the request, in a `<kdj-attachments>` block (kdj-prompt.md): where the thing
  * is, how long it is, and the time the listener marked on it — the range held on the waveform
  * (Shift + drag, playRange.ts) or, for the song that is playing, where it is now.
@@ -14,13 +14,15 @@ import { firstSourceShareLink } from "./shareLink";
 import { streamMeta } from "./streamTrack";
 import type { ActiveSearchDrag } from "./searchDrag";
 import type { SongSource, TrackSummary, VideoDownloadRequest } from "../types";
-import { isVideoTrack } from "./format";
+import { isImageTrack, isVideoTrack } from "./format";
 
 export interface AiAttachment {
   /** One card per thing: the same song dropped twice is one card. */
   key: string;
   kind: "local" | "online" | "file";
   video: boolean;
+  /** A picture: the model is shown it with the request (kdj-server reads it from `path`). */
+  image?: boolean;
   title: string;
   artist?: string;
   cover?: string;
@@ -122,14 +124,26 @@ export function fromSearchDrag(drag: ActiveSearchDrag): AiAttachment[] {
 export function fromFiles(paths: readonly string[]): AiAttachment[] {
   return paths.map(path => {
     const name = path.split(/[\\/]/).pop() || path;
+    const extension = name.split(".").pop() ?? "";
     return {
       key: `file:${path}`,
       kind: "file",
-      video: isVideoTrack(name.split(".").pop() ?? ""),
+      video: isVideoTrack(extension),
+      image: isImageTrack(extension) || undefined,
       title: name,
       path,
     };
   });
+}
+
+/** A pasted picture, kept in the AI's workspace at `path`; `preview` shows it on its card. */
+export function fromPastedImage(path: string, preview: string): AiAttachment {
+  return { key: `file:${path}`, kind: "file", video: false, image: true, title: "粘贴的图片", path, cover: preview };
+}
+
+/** The pictures that go with a request, by path. */
+export function imagesOf(items: readonly AiAttachment[]): string[] {
+  return items.filter(item => item.image && item.path).map(item => item.path!);
 }
 
 /**
@@ -139,7 +153,7 @@ export function fromFiles(paths: readonly string[]): AiAttachment[] {
 export function withAttachments(text: string, items: readonly AiAttachment[]): string {
   if (items.length === 0) return text;
   const lines = items.map(item => JSON.stringify({
-    kind: item.video ? "video" : "audio",
+    kind: item.image ? "image" : item.video ? "video" : "audio",
     title: item.title,
     artist: item.artist,
     track_id: item.trackId,

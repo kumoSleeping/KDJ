@@ -740,6 +740,32 @@
   from { --kd-agent-sweep: 0deg; }
   to { --kd-agent-sweep: 360deg; }
 }
+/* The keys at the end of the row: the reasoning effort (Agent Mode only) and AI mode's key. */
+.kd-search-ai-keys {
+  display: flex;
+  align-items: flex-start;
+  align-self: start;
+  gap: 0.15rem;
+}
+/* The reasoning effort: its word, in ink, a click steps it. */
+.kd-search-thinking {
+  appearance: none;
+  flex: none;
+  min-width: 1.9rem;
+  height: var(--kd-search-h);
+  padding: 0 0.4rem;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.kd-search-thinking:hover { background: var(--kd-hover); color: var(--kd-text); }
+.kd-search-thinking:focus-visible { outline: 2px solid var(--kd-focus, var(--kd-text)); outline-offset: 1px; }
 .kd-search-ai {
   appearance: none;
   display: grid;
@@ -816,14 +842,14 @@
 .kd-ai-chip-remove:focus-visible { outline: 2px solid var(--kd-focus, var(--kd-text)); outline-offset: 0; }
 /* Something dragged over the row or the key: the field's edge lights in its own colours. */
 .kd-searchbar[data-kd-pointer-ai-over] .kd-searchbar-copy {
-  box-shadow: inset 0 0 0 1.5px var(--kd-agent-a);
+  box-shadow: inset 0 0 0 1.5px var(--kd-agent-a, var(--kd-text));
 }
 .kd-search-ai[data-kd-pointer-ai-over] { color: var(--kd-text); background: var(--kd-hover); }
 /* A tall window stacks the row: the key stays at the end of its first line. */
 .kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top .kd-searchbar[data-has-ai] {
   grid-template-columns: minmax(0, 1fr);
 }
-.kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top .kd-searchbar[data-has-ai] .kd-search-ai {
+.kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top .kd-searchbar[data-has-ai] .kd-search-ai-keys {
   grid-row: 1;
   grid-column: 1;
   justify-self: end;

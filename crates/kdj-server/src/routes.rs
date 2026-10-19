@@ -58,6 +58,9 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/ai/web", axum::routing::put(crate::ai::set_web))
         .route("/api/ai/web/install", post(crate::ai::install_access))
         .route("/api/ai/remotion/install", post(crate::ai::install_remotion))
+        .route("/api/ai/thinking", axum::routing::put(crate::ai::set_thinking))
+        // A screenshot is easily larger than axum's default 2 MB body.
+        .route("/api/ai/paste", post(crate::ai::paste).layer(axum::extract::DefaultBodyLimit::max(crate::ai::PASTE_BYTES)))
         .route("/api/ai/sessions", get(crate::ai::list_sessions))
         .route("/api/ai/sessions/detail", get(crate::ai::session_detail))
         .route("/api/ai/sessions/switch", post(crate::ai::switch_session))
