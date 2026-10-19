@@ -188,14 +188,36 @@ pub fn project(doc: &Doc, base: &Path, probed: &HashMap<PathBuf, Probed>) -> Res
     for (t, track) in doc.tracks.iter().enumerate() {
         let mut clips = vec![];
         for (n, c) in track.clips.iter().enumerate() {
-            let where_ = format!("第 {} 条轨道第 {} 个片段", t + 1, n + 1);
+            // Names the clip the way the AI can find it again in its own document: track, index,
+            // where it sits in the project and which file it plays.
+            let file = Path::new(&c.src).file_name().map_or(c.src.clone(), |f| f.to_string_lossy().into_owned());
+            let where_ = format!("tracks[{t}].clips[{n}]（第 {} 条轨道第 {} 个片段，at {:.3} 秒，{file}）", t + 1, n + 1, c.at);
             let sid = source_id(&c.src).with_context(|| format!("{where_}：找不到素材"))?;
             if !(c.at.is_finite() && c.at >= 0. && c.from.is_finite() && c.from >= 0. && c.out.is_finite() && c.out > c.from) {
-                bail!("{where_}：at、in、out 无效（秒，out 要大于 in）")
+                bail!("{where_}：at、in、out 无效（at {}，in {}，out {}；秒，out 要大于 in）", c.at, c.from, c.out)
             }
             let source = sources.iter().find(|s| s.id == sid).expect("source listed above");
             if !source.image() && c.out * 1000. > source.duration_ms + 50. {
-                bail!("{where_}：out 超出素材长度 {:.3} 秒", source.duration_ms / 1000.)
+                bail!("{where_}：out {:.3} 超出素材长度 {:.3} 秒", c.out, source.duration_ms / 1000.)
+            }
+            // The last 50 ms past a source's end is rounding between the length a library or a
+            // container reports and the one its streams decode to; such an out ends the clip at the
+            // source's end instead of failing the workshop's exact bound.
+            let out_ms = if source.image() { c.out * 1000. } else { (c.out * 1000.).min(source.duration_ms) };
+            if out_ms <= c.from * 1000. {
+                bail!("{where_}：in {:.3} 不在素材长度 {:.3} 秒以内", c.from, source.duration_ms / 1000.)
+            }
+            for (field, value, low, high) in [
+                ("speed", c.speed, 0.5, 2.),
+                ("volume", c.volume, 0., 2.),
+                ("x", c.x, 0., 1.),
+                ("y", c.y, 0., 1.),
+                ("scale", c.scale, 0.1, 2.),
+                ("opacity", c.opacity, 0., 1.),
+            ] {
+                if !(value.is_finite() && (low..=high).contains(&value)) {
+                    bail!("{where_}：{field} 是 {value}，要在 {low}–{high} 之间")
+                }
             }
             let mut clip = Clip {
                 video_transition: None,
@@ -205,14 +227,14 @@ pub fn project(doc: &Doc, base: &Path, probed: &HashMap<PathBuf, Probed>) -> Res
                 source_id: sid.clone(),
                 start_ms: c.at * 1000.,
                 source_in_ms: c.from * 1000.,
-                source_out_ms: c.out * 1000.,
+                source_out_ms: out_ms,
                 speed: Speed {
                     preset: "constant".into(),
                     start: c.speed,
                     middle: c.speed,
                     end: c.speed,
                     domain_start_ms: c.from * 1000.,
-                    domain_end_ms: c.out * 1000.,
+                    domain_end_ms: out_ms,
                 },
                 picture: Picture {
                     x: c.x,
@@ -230,6 +252,17 @@ pub fn project(doc: &Doc, base: &Path, probed: &HashMap<PathBuf, Probed>) -> Res
                 clip.display_duration_ms = Some((c.out - c.from) * 1000.);
             }
             let span = clip.duration();
+            for (field, value) in [
+                ("fade_in", Some(c.fade_in)),
+                ("fade_out", Some(c.fade_out)),
+                ("audio_fade_in", c.audio_fade_in),
+                ("audio_fade_out", c.audio_fade_out),
+            ] {
+                let Some(value) = value else { continue };
+                if !(value.is_finite() && value >= 0. && value * 1000. <= span / 2. + 0.01) {
+                    bail!("{where_}：{field} {value} 秒超过这一段在成片里长度 {:.3} 秒的一半（最多 {:.3} 秒）", span / 1000., span / 2000.)
+                }
+            }
             clip.fades = Fades {
                 offset_ms: 0.,
                 span_ms: span,
@@ -712,5 +745,29 @@ mod kdjv_tests {
         let probed = HashMap::from([(PathBuf::from("/a.mp4"), video())]);
         let error = project(&doc, Path::new("/"), &probed).unwrap_err().to_string();
         assert!(error.contains("超出素材长度"), "{error}");
+    }
+
+    #[test]
+    fn a_refused_clip_is_named_with_the_value_and_its_limit() {
+        let probed = HashMap::from([(PathBuf::from("/a.mp4"), video())]);
+        let error = |clip: &str| {
+            let doc = parse(&format!(r#"{{"kdjv":1,"tracks":[{{"clips":[{{"src":"/a.mp4","at":0,"in":0,"out":4}}]}},{{"clips":[{clip}]}}]}}"#)).unwrap();
+            project(&doc, Path::new("/"), &probed).map(|_| ()).unwrap_err().to_string()
+        };
+        let fade = error(r#"{"src":"/a.mp4","at":16.6,"in":0,"out":0.5,"fade_out":0.3}"#);
+        assert!(fade.contains("tracks[1].clips[0]") && fade.contains("at 16.600") && fade.contains("a.mp4"), "{fade}");
+        assert!(fade.contains("fade_out 0.3") && fade.contains("最多 0.250"), "{fade}");
+        let speed = error(r#"{"src":"/a.mp4","at":0,"in":0,"out":4,"speed":3}"#);
+        assert!(speed.contains("speed 是 3") && speed.contains("0.5–2"), "{speed}");
+        let over = error(r#"{"src":"/a.mp4","at":0,"in":10,"out":61}"#);
+        assert!(over.contains("out 61.000") && over.contains("60.000"), "{over}");
+    }
+
+    #[test]
+    fn an_out_a_rounding_past_the_source_end_stops_at_the_end() {
+        let doc = parse(r#"{"kdjv":1,"tracks":[{"clips":[{"src":"/a.mp4","at":0,"in":30,"out":60.03}]}]}"#).unwrap();
+        let probed = HashMap::from([(PathBuf::from("/a.mp4"), video())]);
+        let p = project(&doc, Path::new("/"), &probed).unwrap();
+        assert_eq!(p.layers[0].clips[0].source_out_ms, 60_000.);
     }
 }
