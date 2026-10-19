@@ -48,13 +48,15 @@ const PROMPTS: &[(&str, &str)] = &[
     ("tools.md", include_str!("prompts/tools.md")),
     ("skills/kdj-video/SKILL.md", include_str!("prompts/skills/kdj-video/SKILL.md")),
     ("skills/kdj-video/references/kdjv.md", include_str!("prompts/skills/kdj-video/references/kdjv.md")),
-    ("skills/kdj-video/references/preset-vj.md", include_str!("prompts/skills/kdj-video/references/preset-vj.md")),
-    ("skills/kdj-video/references/preset-cut.md", include_str!("prompts/skills/kdj-video/references/preset-cut.md")),
-    ("skills/kdj-video/references/preset-merge.md", include_str!("prompts/skills/kdj-video/references/preset-merge.md")),
-    (
-        "skills/kdj-video/references/preset-visualizer.md",
-        include_str!("prompts/skills/kdj-video/references/preset-visualizer.md"),
-    ),
+    ("skills/kdj-video/references/plan.md", include_str!("prompts/skills/kdj-video/references/plan.md")),
+    ("skills/kdj-video/references/confirm.md", include_str!("prompts/skills/kdj-video/references/confirm.md")),
+    ("skills/kdj-video/references/song.md", include_str!("prompts/skills/kdj-video/references/song.md")),
+    ("skills/kdj-video/references/footage.md", include_str!("prompts/skills/kdj-video/references/footage.md")),
+    ("skills/kdj-video/references/visualizer.md", include_str!("prompts/skills/kdj-video/references/visualizer.md")),
+    ("skills/kdj-video/references/cut.md", include_str!("prompts/skills/kdj-video/references/cut.md")),
+    ("skills/kdj-video/references/custom.md", include_str!("prompts/skills/kdj-video/references/custom.md")),
+    ("skills/kdj-video/references/align.md", include_str!("prompts/skills/kdj-video/references/align.md")),
+    ("skills/kdj-video/references/edit.md", include_str!("prompts/skills/kdj-video/references/edit.md")),
 ];
 /// What the Remotion project holds: Remotion's packages move in lockstep, so `latest` of each
 /// is one release.
@@ -477,8 +479,8 @@ impl AiBridge {
         // Where the prompt and the skill were written before they moved into prompts/.
         let _ = std::fs::remove_file(paths.agent.join("kdj").join("kdj-prompt.md"));
         let _ = std::fs::remove_dir_all(paths.agent.join("kdj").join("skills"));
-        // FFmpeg and Remotion are the model's own to write; their recipes are gone.
-        for gone in ["ffmpeg.md", "remotion.md"] {
+        // FFmpeg and Remotion are the model's own to write; the four presets became the stages.
+        for gone in ["ffmpeg.md", "remotion.md", "preset-vj.md", "preset-cut.md", "preset-merge.md", "preset-visualizer.md"] {
             let _ = std::fs::remove_file(paths.skill().join("references").join(gone));
         }
         Ok(())
@@ -1250,9 +1252,9 @@ mod tests {
         let skill = std::fs::read_to_string(bridge.paths.skill().join("SKILL.md")).unwrap();
         assert!(skill.starts_with("---\nname: kdj-video\n"), "{skill}");
         assert!(bridge.paths.skill().join("references").join("kdjv.md").is_file());
-        std::fs::write(bridge.paths.skill().join("references").join("ffmpeg.md"), "old").unwrap();
+        std::fs::write(bridge.paths.skill().join("references").join("preset-vj.md"), "old").unwrap();
         bridge.write_extension().unwrap();
-        assert!(!bridge.paths.skill().join("references").join("ffmpeg.md").exists(), "the old recipes are cleared");
+        assert!(!bridge.paths.skill().join("references").join("preset-vj.md").exists(), "the old presets are cleared");
         assert!(bridge.paths.skill().starts_with(bridge.paths.prompts()));
         for prompt in ["README.md", "preamble.md", "system.md", "blind.md", "tools.md"] {
             assert!(bridge.paths.prompts().join(prompt).is_file(), "{prompt}");
