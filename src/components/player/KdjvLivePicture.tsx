@@ -137,37 +137,41 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
 
   useEffect(() => () => engine.current?.dispose(), []);
 
-  // One ref per clip for as long as its element lives: a new callback on each render would
-  // unload and reload the decoder every time the prepared set changes.
-  const refs = useRef(new Map<string, (node: HTMLVideoElement | HTMLImageElement | null) => void>());
+  // One ref callback per clip for as long as its element lives: a new callback makes React detach
+  // and attach again, which unloads the decoder and loads it from the start. The parent renders
+  // several times a second (the transport report), so a callback that went missing from this map
+  // once — a detach deleting it, as StrictMode's mount-time detach did — kept every clip black.
+  // A detach is the callback's cleanup and leaves the map alone; entries of clips no longer drawn
+  // are dropped below, in the render that stops drawing them.
+  const refs = useRef(new Map<string, (node: HTMLVideoElement | HTMLImageElement | null) => (() => void) | undefined>());
   const refFor = (n: number, src: string) => {
     const id = `${n}:${src}`;
     let bind = refs.current.get(id);
     if (!bind) {
       bind = node => {
-        if (node) {
+        if (!node) return undefined;
+        if (node instanceof HTMLVideoElement) {
+          configurePictureVideo(node);
+          node.src = src;
+          node.load();
+        }
+        nodes.current.set(n, node);
+        return () => {
           if (node instanceof HTMLVideoElement) {
-            configurePictureVideo(node);
-            node.src = src;
+            engine.current?.releaseClock(node);
+            node.pause();
+            node.removeAttribute("src");
             node.load();
           }
-          nodes.current.set(n, node);
-          return;
-        }
-        const old = nodes.current.get(n);
-        if (old instanceof HTMLVideoElement) {
-          engine.current?.releaseClock(old);
-          old.pause();
-          old.removeAttribute("src");
-          old.load();
-        }
-        nodes.current.delete(n);
-        refs.current.delete(id);
+          if (nodes.current.get(n) === node) nodes.current.delete(n);
+        };
       };
       refs.current.set(id, bind);
     }
     return bind;
   };
+  const drawn = new Set(prepared.map(n => `${n}:${api.kdjvSourceUrl(trackId, project.clips[n].source)}`));
+  for (const id of refs.current.keys()) if (!drawn.has(id)) refs.current.delete(id);
 
   // The first track is on top; within a track a later clip covers an earlier one.
   const tracks = Math.max(0, ...project.clips.map(c => c.track)) + 1;
