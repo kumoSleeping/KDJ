@@ -95,6 +95,27 @@ pub enum Commands {
         #[command(subcommand)]
         command: ProjectCmd,
     },
+    /// 可视化：不经编辑器，用歌曲封面和默认样式出画面
+    Visualizer {
+        #[command(subcommand)]
+        command: VisualizerCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum VisualizerCmd {
+    /// 给曲库里的一首歌渲染整首的可视化 MP4（30 fps；偶数宽高，320×180 至 2560×1440）；不覆盖已有文件，全部结束才返回
+    Render {
+        /// 曲库 id
+        id: i64,
+        /// 输出的 .mp4 绝对路径（文件夹要已存在）
+        #[arg(long)]
+        out: String,
+        #[arg(long)]
+        width: Option<u32>,
+        #[arg(long)]
+        height: Option<u32>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

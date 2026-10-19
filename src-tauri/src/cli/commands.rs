@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use serde_json::{json, Value};
 
-use super::args::{Cli, Commands, LibraryCmd, ProjectCmd};
+use super::args::{Cli, Commands, LibraryCmd, ProjectCmd, VisualizerCmd};
 use super::http::HttpClient;
 use super::{runtime, CliError};
 
@@ -108,6 +108,12 @@ fn run_inner(cli: Cli) -> Result<()> {
         Commands::Project { command } => match command {
             ProjectCmd::Check { path } => http.post_json_long("/api/kdjv/check", &json!({ "path": absolute(&path) }))?,
             ProjectCmd::Render { path } => http.post_json_long("/api/kdjv/render", &json!({ "path": absolute(&path) }))?,
+        },
+        Commands::Visualizer { command } => match command {
+            VisualizerCmd::Render { id, out, width, height } => http.post_json_long(
+                "/api/visualizer/render",
+                &json!({ "track_id": id, "output_path": absolute(&out), "width": width, "height": height }),
+            )?,
         },
     };
     emit_ok(data);
@@ -692,6 +698,7 @@ mod tests {
                 "kdj library get",
                 "kdj project check <PATH>",
                 "kdj project render <PATH>",
+                "kdj visualizer render <ID>",
             ]
         );
         let download = &commands[2]["options"];

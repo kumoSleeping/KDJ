@@ -34,6 +34,7 @@ KDJ 只提供 AI 自己做不到的事：平台搜索、登录、下载，曲库
 | `kdj align --ref <id\|path> --video <SOURCE>` | 把视频对齐到参考曲；在线 B 站视频只读音轨；读前 30 分钟 | 见下 |
 | `kdj project check <PATH>` | 打开一个 `.kdjv` 视频工程（`docs/kdjv.md`）：能否播放、为什么不能 | `title`、`duration`、`width`、`height`、`fps`、`sources[]`、`ready` |
 | `kdj project render <PATH>` | 把 `.kdjv` 工程渲染进 KDJ 的缓存，之后在 KDJ 里点开立即播放；全部结束才返回，中断命令不取消渲染 | `path`（渲染文件） |
+| `kdj visualizer render <ID> --out <MP4> [--width W --height H]` | 不经编辑器，用歌曲内嵌封面和默认场景渲染整首的可视化（30 fps，偶数宽高 320×180–2560×1440，仅 macOS/Windows）；不覆盖已有文件，全部结束才返回 | `path`、`duration`、`width`、`height`、`fps` |
 
 YouTube 在线视频的 peek / align 需要先 download（它的流要界面里的 WebView 准备）。
 
