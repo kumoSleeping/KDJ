@@ -381,18 +381,19 @@ fn plans(found: &RecordingMatch, video_ms: f64, reference_ms: f64, downbeats: &[
         .max_by(|a, b| (a.source_end_ms - a.source_start_ms).total_cmp(&(b.source_end_ms - b.source_start_ms)))
     {
         let similarity = verified.iter().map(|p| p.similarity).sum::<f64>() / verified.len() as f64;
+        // Only the part of the video that lands inside the reference: a video longer than the song
+        // (an intro scene, a staff card) would otherwise be laid past the song's end.
+        let speed = longest.speed;
+        let zero = longest.reference_start_ms - longest.source_start_ms / speed;
+        let video_in = (-zero * speed).max(0.);
+        let video_out = video_ms.min((reference_ms - zero) * speed);
         let mut whole = plan(
             "speed-whole",
             "变速对齐 · 保留完整",
             "verified",
             true,
             Some(similarity),
-            &[Segment {
-                video_in: 0.,
-                video_out: video_ms,
-                ref_at: longest.reference_start_ms - longest.source_start_ms / longest.speed,
-                speed: longest.speed,
-            }],
+            &[Segment { video_in, video_out, ref_at: zero + video_in / speed, speed }],
             downbeats,
         );
         whole["verified"] = json!(verified
@@ -448,9 +449,18 @@ pub async fn align(State(state): State<Arc<AppState>>, Json(body): Json<AlignBod
         _ => Vec::new(),
     };
     let plans = plans(&found, video_ms, reference_ms, &downbeats);
+    // A library row may not know its length yet; the decoded sound always does, and the AI needs
+    // it to see where the song runs without picture.
+    let described = |media: &Media, ms: f64| {
+        let mut value = media.describe();
+        if value["duration"].is_null() {
+            value["duration"] = json!(round(ms / 1000.));
+        }
+        value
+    };
     let mut result = json!({
-        "reference": reference.describe(),
-        "video": video.describe(),
+        "reference": described(&reference, reference_ms),
+        "video": described(&video, video_ms),
         "matched": !plans.is_empty(),
         "formula": "ref = ref_at + (video - video_in) / speed，单位秒",
         "plans": plans,
@@ -518,5 +528,26 @@ mod tests {
         assert_eq!(plans[1]["id"], "melody-1");
         assert_eq!(plans[1]["evidence"], "melody");
         assert_eq!(plans[1]["auto"], false);
+    }
+
+    #[test]
+    fn a_whole_slowed_video_stops_where_the_song_ends() {
+        // A 263 s PV slowed to 0.9065 from 14.4 s would run to 304.8 s of a 275.1 s song.
+        let speed = 0.9065;
+        let mut found = RecordingMatch::default();
+        found.fuzzy.verified = vec![FuzzyPlacement {
+            source_start_ms: 14_000., source_end_ms: 78_000., reference_start_ms: 14_401. + 14_000. / speed,
+            speed, similarity: 0.4, anchors: 4,
+        }];
+        let laid = plans(&found, 263_275., 275_140., &[]);
+        let segment = &laid[0]["segments"][0];
+        assert_eq!((segment["video_in"].clone(), segment["ref_at"].clone()), (json!(0.0), json!(14.401)));
+        assert_eq!(segment["video_out"], json!(round((275_140. - 14_401.) * speed / 1000.)));
+
+        // A video whose opening comes before the song starts begins where the song does.
+        found.fuzzy.verified[0].reference_start_ms = 14_000. / speed - 5_000.;
+        let laid = plans(&found, 263_275., 275_140., &[]);
+        let segment = &laid[0]["segments"][0];
+        assert_eq!((segment["video_in"].clone(), segment["ref_at"].clone()), (json!(round(5_000. * speed / 1000.)), json!(0.0)));
     }
 }
