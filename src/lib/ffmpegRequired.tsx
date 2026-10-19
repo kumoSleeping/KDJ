@@ -5,9 +5,9 @@ import { mediaToolsInstalling, useFfmpegStore } from "../stores/ffmpegStore";
 import { getBridge } from "./bridge";
 import { useSettingsFocus, useSettingsPage } from "./settingsPages";
 
-/** 设置 → 系统，翻到媒体工具（FFmpeg）的安装处。 */
+/** 设置 → FFmpeg，媒体工具的安装处。 */
 export function openMediaToolsSettings(): void {
-  useSettingsPage.getState().setPage("system");
+  useSettingsPage.getState().setPage("ffmpeg");
   useSettingsFocus.getState().focus("ffmpeg");
   useAppStore.getState().openSettingsPanel();
 }

@@ -33,6 +33,7 @@ pub use pi::{PiState, PiStatus};
 
 const TOOLS: &str = include_str!("kdj-tools.ts");
 const WEB: &str = include_str!("kdj-web.ts");
+const FOLDERS: &str = include_str!("kdj-folders.ts");
 const PROMPT: &str = include_str!("kdj-prompt.md");
 /// How long a command waits for pi's response. `prompt` answers when the run is accepted, not
 /// when it ends.
@@ -119,6 +120,9 @@ impl Paths {
     }
     fn web(&self) -> PathBuf {
         self.agent.join("kdj").join("kdj-web.ts")
+    }
+    fn folders(&self) -> PathBuf {
+        self.agent.join("kdj").join("kdj-folders.ts")
     }
     fn prompt(&self) -> PathBuf {
         self.agent.join("kdj").join("kdj-prompt.md")
@@ -372,6 +376,7 @@ impl AiBridge {
         }
         write_if_changed(&paths.tools(), TOOLS)?;
         write_if_changed(&paths.web(), WEB)?;
+        write_if_changed(&paths.folders(), FOLDERS)?;
         write_if_changed(&paths.prompt(), PROMPT)?;
         write_if_changed(&paths.agent.join("web-search.json"), ACCESS_CONFIG)?;
         // The browser earlier versions drove is gone, with what it left behind.
@@ -603,6 +608,16 @@ pub async fn abort(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>>
         process.send(json!({ "type": "abort" })).await?;
     }
     Ok(Json(json!({})))
+}
+
+/// Takes back the lines still waiting for pi (steering not yet handed to the model); the window
+/// sends again the ones the listener kept.
+pub async fn clear_queue(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
+    let running = bridge(&state).process.lock().await.clone();
+    let Some(process) = running else {
+        return Ok(Json(json!({ "steering": [], "followUp": [] })));
+    };
+    Ok(Json(process.send(json!({ "type": "clear_queue" })).await?))
 }
 
 pub async fn reset(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {

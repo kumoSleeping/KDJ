@@ -62,7 +62,8 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   window, with the same gap on its left and its right; `regular` and `small` keep their size
   and stack above it at the right, where they rise from behind it.
 - **The stay.** Each kind chooses its own `stay`: the playing song 5 s, a short note such as
-  "没有找到歌词" 3 s. `stay` in ms; left out, the tone decides (`TASK_STAY_MS`: 5 s, an error 10 s).
+  "没有找到歌词" 3 s. `stay` in ms; left out, the listener's own length decides (设置 → 通用 → 提示停留, 30 s by default;
+  `taskDefaultStay`), an error twice that, and downloads twice that too.
   `stay: 0` keeps the bubble until it is dismissed — a pinned or opened bubble. The ring shows the
   time that is left and stops while the stack is hovered or focused. Every bubble can be rolled
   down by hand; `escape: true` also lets Esc do it (only for a bubble the user called up).
@@ -248,4 +249,7 @@ Name the source in the `sources` of the window's `<TaskBubbleHost>`.
 | A search result dropped on the 下载 entry could not be queued ("加入队列失败…") | `notice:<text>` | top | `downloadDropEntry.ts` |
 | Cancelling an import from the list's work rail failed ("取消导入失败…") | `notice:<text>` | top | `LibraryWorkRail.tsx` |
 | A YouTube video, its preview or its download stopped for a login ("YouTube 登录已失效", "YouTube 需要先登录") | `login-needed:youtube`, its 登录 key opens that source's ways to log in | bottom | `loginNeeded.tsx` `reportLoginNeeded` |
+| The AI's steps, a message it sends (`tell_user`), what went wrong (`docs/ai-dock.md`) | `ai:<call>`, `ai-tell:<call>`, `ai:problem` | top | `components/ai/aiEvents.tsx` |
+| The listener's request to the AI and its supplements, until done | `ai-task:<id>`, kept up | bottom | `aiEvents.tsx` |
+| A question from the AI (`ask_user`): songs and choices, the listener's words, pause | `ai-ask:<call>`, the AI's countdown | bottom | `aiEvents.tsx` |
 | Every other former toast (window, fullscreen, import-drop, visualizer memory errors) | `notice:<text>` | bottom | `showNotice` |

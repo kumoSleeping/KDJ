@@ -9,8 +9,10 @@
  * Written into KDJ's own pi directory by kdj-server; edits here, not there.
  */
 import { spawn } from "node:child_process";
+import { basename, relative } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { folderScore, walk } from "./kdj-folders.ts";
 import { registerWeb } from "./kdj-web.ts";
 
 const CLI = process.env.KDJ_CLI || "kdj";
@@ -94,6 +96,60 @@ const status = defineTool({
   },
 });
 
+// ---------------------------------------------------------------- folders
+
+/** The library's roots (kdj status), asked again after a minute. */
+let roots: { at: number; dirs: string[] } | null = null;
+async function libraryRoots(signal?: AbortSignal): Promise<string[]> {
+  if (roots && Date.now() - roots.at < 60_000) return roots.dirs;
+  const status = await kdj(["status"], signal) as { download?: { library_roots?: unknown; default_dir?: unknown } };
+  const dirs = Array.isArray(status?.download?.library_roots)
+    ? status.download.library_roots.filter((dir): dir is string => typeof dir === "string" && dir.length > 0)
+    : [];
+  roots = { at: Date.now(), dirs };
+  return dirs;
+}
+
+const folders = defineTool({
+  name: "kdj_folders",
+  label: "找文件夹",
+  description: "在曲库根目录和它们的全部子文件夹里按名字找文件夹（不分空格、分隔符，八=8，yue=月），按相似度排序，返回绝对路径 path、相对路径和歌曲数。下到某个文件夹前先用它找到准确的 path，不要自己猜路径。query 留空则列出全部文件夹。",
+  parameters: Type.Object({
+    query: Type.Optional(Type.String({ description: "用户说的文件夹名" })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
+  }),
+  async execute(_id, params, signal) {
+    const query = params.query?.trim() ?? "";
+    const dirs = await libraryRoots(signal);
+    const found = dirs.flatMap(rootDir => walk(rootDir).map(folder => {
+      const rel = relative(rootDir, folder.path) || ".";
+      const score = Math.max(folderScore(basename(folder.path), query), folderScore(rel, query) - 5);
+      return { path: folder.path, relative: rel, root: rootDir, songs: folder.songs, score };
+    }));
+    const ranked = found
+      .filter(folder => folder.score > 0)
+      .sort((a, b) => b.score - a.score || a.relative.split("/").length - b.relative.split("/").length || a.relative.length - b.relative.length)
+      .slice(0, params.limit ?? (query ? 8 : 50));
+    return result({ query, roots: dirs, folders: ranked });
+  },
+});
+
+/** What a search found, by ref: a question can offer those songs with their covers. */
+type Song = { ref: string; title: string; artists: string[]; platform: string; cover: string; duration: number | null };
+const songs = new Map<string, Song>();
+function remember(data: unknown) {
+  const items = (data as { items?: unknown[] } | null)?.items;
+  if (!Array.isArray(items)) return;
+  for (const raw of items) {
+    const item = raw as Partial<Song> & { ref?: string };
+    if (!item.ref) continue;
+    songs.set(item.ref, {
+      ref: item.ref, title: item.title ?? item.ref, artists: Array.isArray(item.artists) ? item.artists : [],
+      platform: item.platform ?? "", cover: item.cover ?? "", duration: typeof item.duration === "number" ? item.duration : null,
+    });
+  }
+}
+
 const search = defineTool({
   name: "kdj_search",
   label: "搜索",
@@ -105,7 +161,9 @@ const search = defineTool({
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "每个平台的结果数" })),
   }),
   async execute(_id, params, signal) {
-    return result(await kdj(["search", params.text, ...flags({ kind: params.kind, platform: params.platforms, limit: params.limit })], signal));
+    const data = await kdj(["search", params.text, ...flags({ kind: params.kind, platform: params.platforms, limit: params.limit })], signal);
+    remember(data);
+    return result(data);
   },
 });
 
@@ -210,21 +268,55 @@ const align = defineTool({
  * the bottom right of the KDJ window, with a countdown when `timeout` is given — when it runs
  * out, `default` is taken.
  */
+/**
+ * The question is drawn by the KDJ window from this call's partial result (the songs with their
+ * covers); the answer comes back through an editor dialog titled `kdj:ask:<call id>`, as JSON
+ * `{ choices, note }`.
+ */
 const askUser = defineTool({
   name: "ask_user",
   label: "询问",
-  description: "需要用户决定时调用：在 KDJ 右下角弹出一句问题和 2 到 4 个简短选项。给了 timeout（秒）就显示倒计时，到时没选则按 default（必须是选项之一）。返回 choice：用户选的选项；用户关掉为 null。",
+  description: "需要用户决定时调用：KDJ 右下角弹出一句问题，可以给文字选项（options），也可以给歌曲选项（songs：kdj_search 给出的 ref，显示封面、歌名、艺术家和来源），multiple 允许多选。用户还可以写一句补充（note），要照着做。给了 timeout（秒）就显示倒计时，到时没选则按 default。返回 choices（选中的选项文字或 ref）和 note；用户关掉则 choices 为空。",
   parameters: Type.Object({
     question: Type.String(),
-    options: Type.Array(Type.String(), { minItems: 2, maxItems: 4 }),
-    default: Type.Optional(Type.String()),
-    timeout: Type.Optional(Type.Integer({ minimum: 3, maximum: 120 })),
+    options: Type.Optional(Type.Array(Type.String(), { maxItems: 6 })),
+    songs: Type.Optional(Type.Array(Type.String(), { maxItems: 8, description: "kdj_search 给出的 ref" })),
+    multiple: Type.Optional(Type.Boolean()),
+    default: Type.Optional(Type.Array(Type.String(), { description: "选项文字或 ref" })),
+    timeout: Type.Optional(Type.Integer({ minimum: 3, maximum: 300 })),
   }),
-  async execute(_id, params, signal, _onUpdate, ctx) {
+  async execute(id, params, signal, onUpdate, ctx) {
+    const asked = {
+      question: params.question,
+      options: params.options ?? [],
+      songs: (params.songs ?? []).map(ref => songs.get(ref) ?? { ref, title: ref, artists: [], platform: ref.split(":")[0], cover: "", duration: null }),
+      multiple: params.multiple ?? false,
+      defaults: params.default ?? [],
+      timeout: params.timeout ?? 0,
+    };
+    onUpdate?.({ content: [{ type: "text", text: "等待用户回答" }], details: asked });
     const timeout = params.timeout ? params.timeout * 1000 : undefined;
-    const choice = await ctx.ui.select(params.question, params.options, { signal, timeout });
-    const fallback = timeout && params.default && params.options.includes(params.default) ? params.default : null;
-    return result({ choice: choice ?? fallback });
+    const reply = await ctx.ui.editor(`kdj:ask:${id}`, "", { signal, timeout });
+    let answer: { choices?: unknown; note?: unknown } = {};
+    try { answer = reply ? JSON.parse(reply) : {}; } catch { answer = { note: reply }; }
+    const choices = Array.isArray(answer.choices) ? answer.choices.filter((item): item is string => typeof item === "string") : [];
+    const note = typeof answer.note === "string" && answer.note.trim() ? answer.note.trim() : null;
+    if (reply === undefined && timeout) return result({ choices: asked.defaults, note: null, timedOut: true });
+    return result({ choices, note });
+  },
+});
+
+/** A message for the listener, as a bubble at the top; it stays `seconds`, or until put away. */
+const tellUser = defineTool({
+  name: "tell_user",
+  label: "告诉用户",
+  description: "给用户发一条消息，显示在 KDJ 顶部。少用：只在用户问了问题、需要你回答时用；用户让你做事，做完不要发完成消息。seconds 是停留秒数，不给则一直停留到用户关掉。",
+  parameters: Type.Object({
+    message: Type.String(),
+    seconds: Type.Optional(Type.Integer({ minimum: 3, maximum: 600 })),
+  }),
+  async execute(_id, params) {
+    return result({ shown: true, seconds: params.seconds ?? null });
   },
 });
 
@@ -240,7 +332,7 @@ const play = defineTool({
 });
 
 export default function (pi: ExtensionAPI) {
-  for (const tool of [status, search, download, login, libraryList, libraryGet, peek, align, play, askUser]) {
+  for (const tool of [status, search, download, folders, login, libraryList, libraryGet, peek, align, play, askUser, tellUser]) {
     pi.registerTool(tool);
   }
   registerWeb(pi);

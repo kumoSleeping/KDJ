@@ -1329,6 +1329,7 @@ export const aiApi = {
     request<{ disposition: string }>("/ai/prompt", { method: "POST", body: JSON.stringify({ message }) }, null),
   abort: () => request<void>("/ai/abort", { method: "POST" }, null),
   reset: () => request<void>("/ai/reset", { method: "POST" }, null),
+  clearQueue: () => request<{ steering: string[]; followUp: string[] }>("/ai/clear-queue", { method: "POST" }, null),
   answer: (body: { id: string; value?: string; confirmed?: boolean; cancelled?: boolean }) =>
     request<void>("/ai/answer", { method: "POST", body: JSON.stringify(body) }, null),
   installAccess: () => request<import("../types/ai").AiStatus>("/ai/web/install", { method: "POST" }, null),

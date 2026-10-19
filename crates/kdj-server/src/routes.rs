@@ -51,6 +51,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/ai/prompt", post(crate::ai::prompt))
         .route("/api/ai/abort", post(crate::ai::abort))
         .route("/api/ai/reset", post(crate::ai::reset))
+        .route("/api/ai/clear-queue", post(crate::ai::clear_queue))
         .route("/api/ai/answer", post(crate::ai::answer))
         .route("/api/ai/global", get(crate::ai::global_logins))
         .route("/api/ai/import", post(crate::ai::import_login))

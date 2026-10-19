@@ -295,7 +295,6 @@ export function SearchBar({
   const aiMode = useAiStore(state => state.mode) && offered;
   const aiRunning = useAiStore(state => state.running);
   const [request, setRequest] = useState("");
-  const sentRef = useRef("");
   const seed = useAiStore(state => state.seed);
   useEffect(() => {
     if (!seed || !offered) return;
@@ -303,12 +302,6 @@ export function SearchBar({
     useAiStore.setState({ seed: null });
     inputRef.current?.focus();
   }, [seed, offered]);
-  useEffect(() => {
-    // A request stays in the field while the AI carries it out, unless a new one was written.
-    if (aiRunning) return;
-    setRequest(current => (current === sentRef.current ? "" : current));
-    sentRef.current = "";
-  }, [aiRunning]);
   // Turning the mode over puts the caret in the field; arriving on screen does not.
   const modeWas = useRef(aiMode);
   useEffect(() => {
@@ -319,7 +312,8 @@ export function SearchBar({
   const sendRequest = () => {
     const text = request.trim();
     if (!text) return;
-    sentRef.current = request;
+    // Sent, the request leaves the field for its task at the bottom right.
+    setRequest("");
     void useAiStore.getState().send(text);
   };
   const [inputFocused, setInputFocused] = useState(false);
@@ -336,7 +330,10 @@ export function SearchBar({
   const waveSawBusyRef = useRef(false);
   const lastNonceRef = useRef(burstNonce);
   const canSubmit = query.trim().length > 0 && !busy;
-  const inputRows = batch ? Math.min(5, Math.max(2, query.split("\n").length)) : 1;
+  // Agent Mode's request grows with its lines (Shift + Enter) like a batch of keywords does.
+  const shown = aiMode ? request : query;
+  const inputRows = aiMode ? Math.min(5, Math.max(1, request.split("\n").length))
+    : batch ? Math.min(5, Math.max(2, query.split("\n").length)) : 1;
   const currentKindIndex = searchKinds.indexOf(searchKind);
   const nextSearchKind = searchKinds.length
     ? searchKinds[(Math.max(-1, currentKindIndex) + 1) % searchKinds.length]
@@ -427,7 +424,7 @@ export function SearchBar({
         data-ai={aiMode || undefined}
         data-ai-running={aiMode && aiRunning || undefined}
         data-has-ai={offered || undefined}
-        data-batch={batch || undefined}
+        data-batch={batch && !aiMode || undefined}
         data-stacked={stacked || undefined}
         data-platforms-expanded={stacked && platformsExpanded ? "true" : undefined}
         data-searching={wavePhase ?? undefined}
@@ -449,6 +446,7 @@ export function SearchBar({
               onClick={() => onSearchKindChange(nextSearchKind)}
             >
               {/* The kind turns over into Agent Mode; while the agent works the field's edge runs. */}
+              {aiMode && <Sparkles size={12} className="kd-search-agent-mark" aria-hidden="true" />}
               <RollText text={aiMode ? "Agent Mode" : SEARCH_KIND_LABEL[searchKind]} className="kd-search-kind-text" />
             </button>
           )}
@@ -462,7 +460,7 @@ export function SearchBar({
         </div>
         <div
           className="kd-searchbar-copy"
-          data-empty={!query || undefined}
+          data-empty={!shown || undefined}
           data-input-focused={inputFocused ? "true" : undefined}
           onPointerDown={() => {
             if (stacked && platformsExpanded) setPlatformsExpanded(false);
@@ -744,11 +742,11 @@ export const SearchPlatforms = memo(function SearchPlatforms({
                 ? searchMarkState(searchPhase, item.id, searchOutcome)
                 : undefined
             }
-            style={
-              searchPhase && asked.includes(item)
-                ? ({ "--kd-plat-i": asked.indexOf(item) } as CSSProperties)
-                : undefined
-            }
+            style={{
+              // Its place in the row: the marks come back out of Agent Mode one after another.
+              "--kd-plat-n": index,
+              ...(searchPhase && asked.includes(item) ? { "--kd-plat-i": asked.indexOf(item) } : {}),
+            } as CSSProperties}
             draggable={false}
             title={
               item.video

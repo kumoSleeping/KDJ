@@ -659,17 +659,81 @@
    the key stops it. Ink only: the key that is on is full ink and heavier, like any selected
    control. */
 .kd-searchbar[data-has-ai] { grid-template-columns: auto minmax(0, 1fr) auto; }
+/* The sources fold away into Agent Mode and come back out of it: the row's width moves on the
+   large-surface clock, and each mark fades and slides back into place one step after the one
+   before it (--kd-plat-n), so they come back as a row instead of appearing at once. Leaving,
+   they go together, without the stagger. */
 .kd-searchbar .kd-plats {
   max-width: 40rem;
-  transition: max-width var(--kd-motion-in) var(--kd-ease-out), opacity var(--kd-motion-micro) var(--kd-ease-out);
+  transition: max-width var(--kd-motion-in) var(--kd-ease-out);
+}
+.kd-searchbar[data-has-ai] .kd-plat {
+  transition:
+    color 0.12s, border-color 0.12s, background 0.12s,
+    opacity var(--kd-motion-in) var(--kd-ease-out) calc(80ms + var(--kd-plat-n, 0) * 36ms),
+    translate var(--kd-motion-in) var(--kd-ease-out) calc(80ms + var(--kd-plat-n, 0) * 36ms),
+    scale var(--kd-motion-in) var(--kd-ease-out) calc(80ms + var(--kd-plat-n, 0) * 36ms);
 }
 .kd-searchbar[data-ai] .kd-plats {
   max-width: 0;
   overflow: hidden;
-  opacity: 0;
   pointer-events: none;
+  transition-timing-function: var(--kd-ease-in);
+  transition-duration: var(--kd-motion-out);
 }
-.kd-searchbar[data-ai] .kd-search-kind { min-width: max-content; color: var(--kd-text); font-weight: 700; cursor: default; }
+.kd-searchbar[data-ai] .kd-plat {
+  opacity: 0;
+  translate: -6px 0;
+  scale: 0.86;
+  transition:
+    color 0.12s, border-color 0.12s, background 0.12s,
+    opacity var(--kd-motion-micro-out) var(--kd-ease-in),
+    translate var(--kd-motion-micro-out) var(--kd-ease-in),
+    scale var(--kd-motion-micro-out) var(--kd-ease-in);
+}
+/* Agent Mode's own look: an iridescent field — cool blue, violet and teal mixed thinly into the
+   panel, drifting slowly — and the name written in the same light. No warm hues: the interface
+   has no red. */
+.kd-searchbar[data-ai] {
+  --kd-agent-a: #5b7cfa;
+  --kd-agent-b: #9a6bff;
+  --kd-agent-c: #2fbfb8;
+}
+.kd-searchbar[data-ai] .kd-searchbar-copy,
+.kd-searchbar[data-ai]:hover .kd-searchbar-copy {
+  background:
+    linear-gradient(115deg,
+      color-mix(in srgb, var(--kd-agent-a) 15%, var(--kd-panel)) 0%,
+      color-mix(in srgb, var(--kd-agent-b) 13%, var(--kd-panel)) 38%,
+      color-mix(in srgb, var(--kd-agent-c) 13%, var(--kd-panel)) 72%,
+      color-mix(in srgb, var(--kd-agent-a) 15%, var(--kd-panel)) 100%);
+  background-size: 220% 100%;
+  animation: kd-agent-drift 14s ease-in-out infinite alternate;
+}
+.kd-searchbar[data-ai-running] .kd-searchbar-copy { animation-duration: 5s; }
+@keyframes kd-agent-drift {
+  from { background-position: 0% 50%; }
+  to { background-position: 100% 50%; }
+}
+/* A request is a sentence: it wraps instead of scrolling sideways. */
+.kd-searchbar[data-ai] .kd-searchbar-input { white-space: pre-wrap; overflow-wrap: anywhere; }
+.kd-searchbar[data-ai] .kd-search-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: max-content;
+  padding-inline: 0.2rem;
+  cursor: default;
+}
+.kd-search-agent-mark { flex: none; color: var(--kd-agent-b); }
+.kd-searchbar[data-ai] .kd-search-kind-text .kd-roll-line {
+  background: linear-gradient(90deg, var(--kd-agent-a), var(--kd-agent-b) 55%, var(--kd-agent-c));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
 /* The running edge: one soft arc of ink, a hairline wide, going round the field once every few
    seconds. Drawn on the field's own outline (a masked ring), so nothing moves or is laid out. */
 @property --kd-agent-sweep {
@@ -677,7 +741,7 @@
   inherits: false;
   initial-value: 0deg;
 }
-.kd-searchbar[data-ai-running] .kd-searchbar-copy::after {
+.kd-searchbar[data-ai-running] .kd-searchbar-copy::before {
   content: "";
   position: absolute;
   z-index: 2;
@@ -731,9 +795,12 @@
   justify-self: end;
 }
 @media (prefers-reduced-motion: reduce) {
-  .kd-searchbar .kd-plats { transition: none; }
+  .kd-searchbar .kd-plats,
+  .kd-searchbar[data-has-ai] .kd-plat,
+  .kd-searchbar[data-ai] .kd-plat { transition: none; }
+  .kd-searchbar[data-ai] .kd-searchbar-copy { animation: none; }
   /* Still: the edge stays lit instead of running. */
-  .kd-searchbar[data-ai-running] .kd-searchbar-copy::after {
+  .kd-searchbar[data-ai-running] .kd-searchbar-copy::before {
     animation: none;
     background: color-mix(in srgb, var(--kd-text) 30%, transparent);
   }

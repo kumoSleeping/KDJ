@@ -10,7 +10,7 @@ test("a search says what it looks for, then how much it found", () => {
 });
 
 test("downloads, playing and questions report elsewhere", () => {
-  for (const tool of ["kdj_download", "kdj_play", "ask_user", "kdj_status"]) {
+  for (const tool of ["kdj_download", "kdj_play", "ask_user", "tell_user", "kdj_status"]) {
     assert.equal(noticeOnStart(tool, {}), null);
     assert.equal(noticeOnEnd(tool, {}, {}, false, ""), null);
   }

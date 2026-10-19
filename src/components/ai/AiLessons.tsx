@@ -44,7 +44,7 @@ export function AiLessons() {
     </li>
     <li>
       <p>以 DeepSeek 为例：在 <Link href={DEEPSEEK_KEYS}>DeepSeek 开放平台</Link> 创建一个 API Key，
-        然后在 <button type="button" className="kd-ai-link" onClick={openAiSettings}>设置 → 系统 → AI</button> 里选 DeepSeek，粘贴 Key 添加；全局 pi 里已有的 Key 可以直接导入。
+        然后在 <button type="button" className="kd-ai-link" onClick={openAiSettings}>设置 → AI</button> 里选 DeepSeek，粘贴 Key 添加；全局 pi 里已有的 Key 可以直接导入。
         网页搜索默认用 pi-web-access，在同一处点「安装」。</p>
     </li>
     <li>

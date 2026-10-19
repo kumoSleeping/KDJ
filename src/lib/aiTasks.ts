@@ -29,7 +29,7 @@ const PLATFORM_NAMES: Record<string, string> = {
 };
 
 /** Tools that report elsewhere, or not at all. */
-const SILENT = new Set(["kdj_download", "kdj_play", "kdj_status", "ask_user"]);
+const SILENT = new Set(["kdj_download", "kdj_play", "kdj_status", "ask_user", "tell_user"]);
 
 function hostOf(url: string): string {
   try {
@@ -57,6 +57,8 @@ function running(tool: string, args: Fields): Omit<AiNotice, "tone"> {
       return { icon: "library", title: str(args.q) ? `查曲库“${str(args.q)}”` : "查曲库" };
     case "kdj_library_get":
       return { icon: "library", title: "读取曲目" };
+    case "kdj_folders":
+      return { icon: "library", title: str(args.query) ? `找文件夹“${str(args.query)}”` : "列出文件夹" };
     case "kdj_peek":
       return { icon: "video", title: `截帧 ${sourceName(args.source)}` };
     case "kdj_align":
@@ -93,6 +95,10 @@ function outcome(tool: string, details: Fields): string | undefined {
       return "已登录";
     case "kdj_library_list":
       return `${count(details.items)} 首`;
+    case "kdj_folders": {
+      const first = fields(Array.isArray(details.folders) ? details.folders[0] : null);
+      return count(details.folders) ? `${count(details.folders)} 个 · ${str(first.relative)}` : "没有找到";
+    }
     case "kdj_peek":
       return `${count(details.frames)} 张`;
     case "kdj_align":

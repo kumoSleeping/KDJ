@@ -2,7 +2,7 @@ import { useLayoutEffect, useMemo, useRef } from "react";
 import { Download, Settings, TextQuote } from "lucide-react";
 import { shownLyricsExtent, useLyricsExtent, useLyricsExtentShape } from "../../lib/lyricsExtent";
 import type { PlayingLyrics } from "../../lib/playingLyrics";
-import { settingsPages, useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
+import { shownSettingsPages, useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
 import { useSidePanels } from "../../lib/sidePanels";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { visualizerExportActive } from "../../lib/visualizerExportQueue";
@@ -23,14 +23,12 @@ import { requestPlayingLyrics } from "../player/lyricsEntry";
 import { DownloadTaskPages, taskViews } from "../player/TaskPanels";
 import { SettingsPanel } from "../settings/SettingsPanel";
 
-const settingsPageIds = settingsPages.map(page => page.id);
-
 /** The settings sections of one page; a page starts at its top. */
 function DrawerSettings() {
   const page = useSettingsPage(state => state.page);
   const host = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => { host.current?.querySelector(".kd-scroll")?.scrollTo({ top: 0 }); }, [page]);
-  return <SlidePages page={page} order={settingsPageIds}>
+  return <SlidePages page={page} order={shownSettingsPages().map(item => item.id)}>
     <div ref={host} className="kd-drawer-settings"><SettingsPanel preferences page={page} /></div>
   </SlidePages>;
 }
@@ -85,7 +83,7 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
     id: "settings",
     title: "设置",
     extent: "fit",
-    pages: settingsPages,
+    pages: shownSettingsPages(),
     usePage: useSettingsPageInView,
     onPage: id => useSettingsPage.getState().setPage(id as SettingsPage),
     body: <DrawerSettings />,

@@ -8,6 +8,7 @@ import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelSto
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import { createBatchReporter, type BatchMember } from "./taskBatch";
+import { taskDefaultStay } from "./taskBubbleSchema";
 import { dismissTask, showTask } from "./taskBubbleStore";
 import { downloadTaskCover, projectTaskCovers, visualizerTaskCover } from "./taskCovers";
 
@@ -33,6 +34,8 @@ function watchDownloads(): () => void {
   const reporter = createBatchReporter({
     // Downloads report at the top, with every other notice the search row's work brings.
     id: "downloads", kind: "download", unit: "首", placement: "top",
+    // A download is worth a longer look: twice the usual length.
+    stay: () => taskDefaultStay("info") * 2,
     started: "开始下载", running: "下载中", finished: "下载完成", failed: "下载失败",
     listed: () => tasksShow("downloads"),
     open: finished => openTasks(finished ? "history" : "downloads"),

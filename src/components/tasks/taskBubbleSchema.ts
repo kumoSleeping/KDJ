@@ -1,3 +1,4 @@
+import { useTaskStayPref } from "../../lib/taskStayPref";
 import type { ReactNode } from "react";
 
 /**
@@ -97,7 +98,8 @@ export interface TaskBubbleSpec {
   /**
    * How long the bubble stays, in ms, before it rolls back down. Each kind of task chooses its
    * own: a song 5 s, a short note 3 s. 0 keeps it up until it is
-   * dismissed: a pinned or opened bubble. Left out, the tone decides (see TASK_STAY_MS).
+   * dismissed: a pinned or opened bubble. Left out, the listener's length and the tone decide
+   * (see taskDefaultStay).
    */
   stay?: number;
   /** The bubble itself was clicked (not one of its actions). */
@@ -151,8 +153,14 @@ export interface TaskBubbleSpec {
   onDismiss?(reason: TaskDismissReason): void;
 }
 
-/** How long a bubble stays when its spec does not say. An error stays readable for longer. */
-export const TASK_STAY_MS: Record<TaskTone, number> = { info: 5_000, success: 5_000, error: 10_000 };
+/**
+ * How long a bubble stays when its spec does not say: the listener's own length (设置 → 通用 →
+ * 提示停留, src/lib/taskStayPref.ts). An error stays readable for twice as long.
+ */
+export function taskDefaultStay(tone: TaskTone = "info"): number {
+  const ms = useTaskStayPref.getState().seconds * 1000;
+  return tone === "error" ? ms * 2 : ms;
+}
 /** More bubbles than this in one place, and the oldest there that are not kept up leave. */
 export const TASK_VISIBLE_LIMIT = 3;
 /** Covers drawn before the rest is counted. */
@@ -163,5 +171,5 @@ export function taskPlacement(spec: Pick<TaskBubbleSpec, "placement">): TaskPlac
 }
 
 export function taskStay(spec: Pick<TaskBubbleSpec, "stay" | "tone">): number {
-  return spec.stay ?? TASK_STAY_MS[spec.tone ?? "info"];
+  return spec.stay ?? taskDefaultStay(spec.tone);
 }

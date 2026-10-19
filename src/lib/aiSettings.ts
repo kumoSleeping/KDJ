@@ -1,9 +1,8 @@
 import { useAppStore } from "../stores/appStore";
-import { useSettingsFocus, useSettingsPage } from "./settingsPages";
+import { useSettingsPage } from "./settingsPages";
 
-/** 设置 → 系统, at the AI section (docs/ai-dock.md). */
+/** 设置 → AI (docs/ai-dock.md). */
 export function openAiSettings(): void {
-  useSettingsPage.getState().setPage("system");
-  useSettingsFocus.getState().focus("ai");
+  useSettingsPage.getState().setPage("ai");
   useAppStore.getState().openSettingsPanel();
 }

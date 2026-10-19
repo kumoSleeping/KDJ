@@ -101,12 +101,16 @@ export const useAiStore = create<AiStore>((set, get) => ({
       void events().then(module => module.aiBlocked(blocked));
       return;
     }
+    // The request becomes a task at the bottom right (a supplement when the AI is at work).
+    const module = await events();
+    const task = module.userRequest(text, get().running);
     set({ running: true });
     try {
       await aiApi.prompt(text);
     } catch (error) {
+      module.requestFailed(task);
       set({ running: false });
-      void events().then(module => module.aiProblem(message(error)));
+      module.aiProblem(message(error));
     }
   },
   async abort() {

@@ -201,7 +201,7 @@ function WebGroup({ status, onError }: { status: AiStatus; onError(text: string)
 }
 
 /**
- * 设置 → 系统 → AI (docs/ai-dock.md): pi, the logins of KDJ's own pi directory (never the global
+ * 设置 → AI (docs/ai-dock.md): pi, the logins of KDJ's own pi directory (never the global
  * ~/.pi; a key it already has can be brought over), and how the AI searches the web.
  */
 export function AiPanel() {

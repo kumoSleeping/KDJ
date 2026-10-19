@@ -10,14 +10,14 @@ test("task bubbles: one bubble per id, a capped stack, and one bubble for a run 
   const dom = new JSDOM("<!doctype html><div id='root'></div>");
   Object.assign(globalThis, { window: dom.window, document: dom.window.document });
   const { useTaskBubbles, showTask, updateTask, dismissTask, taskIsUp } = await import("../src/components/tasks/taskBubbleStore");
-  const { TASK_STAY_MS, TASK_VISIBLE_LIMIT, taskStay } = await import("../src/components/tasks/taskBubbleSchema");
+  const { taskDefaultStay, TASK_VISIBLE_LIMIT, taskStay } = await import("../src/components/tasks/taskBubbleSchema");
   const { createBatchReporter, TASK_BATCH_SETTLE_MS } = await import("../src/components/tasks/taskBatch");
   const { noticeTone } = await import("../src/stores/toastStore");
   const up = () => useTaskBubbles.getState().entries.filter(entry => !entry.leaving).map(entry => entry.spec.id);
   const spec = (id: string) => useTaskBubbles.getState().entries.find(entry => entry.spec.id === id && !entry.leaving)?.spec;
   const clear = () => useTaskBubbles.setState({ entries: [] });
 
-  assert.equal(taskStay({}), TASK_STAY_MS.info);
+  assert.equal(taskStay({}), taskDefaultStay("info"));
   assert.ok(taskStay({ tone: "error" }) > taskStay({ tone: "info" }), "an error stays readable for longer");
   assert.equal(taskStay({ stay: 0, tone: "error" }), 0);
   assert.equal(noticeTone("播放失败：x"), "error");

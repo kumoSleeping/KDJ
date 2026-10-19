@@ -1,4 +1,4 @@
-/* 设置 → 系统 → AI (docs/ai-dock.md). Rows in the settings' own groups: a line of state on the
+/* 设置 → AI (docs/ai-dock.md). Rows in the settings' own groups: a line of state on the
    left, its keys on the right; the login in use in full ink and weight, the others muted. No
    lines between rows. */
 .kd-ai-panel .kd-ai-row {
