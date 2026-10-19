@@ -6,6 +6,7 @@ import { copyText } from "../../lib/copyText";
 import { useAiStore } from "../../stores/aiStore";
 import type { AiGlobalLogin, AiModel, AiStatus, AiWebMode } from "../../types/ai";
 import { Button, InlineNotice, Panel } from "../common";
+import { AiSessions } from "../ai/AiSessions";
 import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";
 import "./AiPanel.css";
@@ -237,8 +238,8 @@ function VideoGroup({ status, onError }: { status: AiStatus; onError(text: strin
 
 /**
  * 设置 → AI (docs/ai-dock.md): pi, the logins of KDJ's own pi directory (never the global
- * ~/.pi; a key it already has can be brought over), how the AI searches the web, and what it
- * makes videos with.
+ * ~/.pi; a key it already has can be brought over), how the AI searches the web, what it
+ * makes videos with, and the sessions it has had (one per request).
  */
 export function AiPanel() {
   const status = useAiStore(state => state.status);
@@ -252,6 +253,10 @@ export function AiPanel() {
       {status && <LoginsGroup status={status} onError={setError} />}
       {status && <WebGroup status={status} onError={setError} />}
       {status && <VideoGroup status={status} onError={setError} />}
+      {status && <div className="kd-djp-group">
+        <span className="kd-djp-label">会话历史</span>
+        <AiSessions />
+      </div>}
       <InlineNotice text={error || statusError} block onDismiss={error ? () => setError("") : undefined} />
     </div>
   </Panel>;

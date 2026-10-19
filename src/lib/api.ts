@@ -1283,8 +1283,9 @@ export const aiApi = {
   saveProvider: (body: { provider: string; key?: string; model?: string | null }) =>
     request<import("../types/ai").AiStatus>("/ai/provider", { method: "PUT", body: JSON.stringify(body) }, null),
   /** `images`: paths of pictures that go with the request; the model sees them. */
-  prompt: (message: string, images: string[] = []) =>
-    request<{ disposition: string }>("/ai/prompt", { method: "POST", body: JSON.stringify({ message, images }) }, null),
+  /** A request of its own opens a new session; `follow` (a supplement) goes on in the open one. */
+  prompt: (message: string, images: string[] = [], follow = false) =>
+    request<{ disposition: string }>("/ai/prompt", { method: "POST", body: JSON.stringify({ message, images, follow }) }, null),
   /** A picture pasted into Agent Mode, kept in the AI's workspace. */
   paste: (image: Blob) =>
     request<{ path: string }>("/ai/paste", { method: "POST", headers: { "Content-Type": image.type || "image/png" }, body: image }, null),

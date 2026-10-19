@@ -57,3 +57,7 @@
 .kd-ai-model { flex: 0 1 14rem; min-width: 8rem; }
 .kd-ai-add .kd-input { flex: 1 1 10rem; min-width: 0; }
 .kd-ai-add .kd-select { flex: 0 1 12rem; min-width: 8rem; }
+
+/* 会话历史: the AI drawer's list (AiSessions.tsx). Its rows keep their hover plate, so the group
+   steps out by the plate's padding to line its words up with the rows above. */
+.kd-ai-panel .kd-ai-sessions-group { margin-inline: -0.6rem; }

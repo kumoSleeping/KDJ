@@ -149,10 +149,11 @@ export const useAiStore = create<AiStore>((set, get) => ({
     const images = imagesOf(attached);
     set({ attachments: [] });
     const module = await events();
-    const task = module.userRequest(text, get().running, sent, attached.map(item => item.title), images);
+    const running = get().running;
+    const task = module.userRequest(text, running, sent, attached.map(item => item.title), images);
     set({ running: true });
     try {
-      await aiApi.prompt(sent, images);
+      await aiApi.prompt(sent, images, running);
     } catch (error) {
       module.requestFailed(task);
       set({ running: false });
@@ -171,7 +172,7 @@ export const useAiStore = create<AiStore>((set, get) => ({
     const now = Date.now();
     if (lastChange.text === change && now - lastChange.at < 3_000) return;
     lastChange = { text: change, at: now };
-    void aiApi.prompt(`用户改变了页面：${change}。以用户为准，接着完成任务。`).catch(() => undefined);
+    void aiApi.prompt(`用户改变了页面：${change}。以用户为准，接着完成任务。`, [], true).catch(() => undefined);
   },
 
   handleEvent(event) {

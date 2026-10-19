@@ -221,6 +221,12 @@ struct PiProcess {
     next_id: AtomicU64,
     /// From `agent_start` until `agent_settled`: a line sent now steers the run.
     streaming: AtomicBool,
+    /// The open session has had no request yet (pi just started, or a new session was opened):
+    /// the next request needs no new one.
+    fresh: AtomicBool,
+    /// The listener chose an earlier session to go on with (历史 → 继续): the next request
+    /// continues it instead of starting its own.
+    resume: AtomicBool,
     /// KDJ ended it (a new key or provider): its exit is not news.
     stopping: AtomicBool,
     stderr: Mutex<VecDeque<String>>,
@@ -318,6 +324,20 @@ impl AiBridge {
                 };
             }
         })?;
+        Ok(())
+    }
+
+    /// Opens a new session in a running pi. pi builds it from its start-up arguments, so the model
+    /// and the reasoning effort chosen since in 设置 are given to it again.
+    async fn new_session(&self, process: &PiProcess) -> ApiResult<()> {
+        process.send(json!({ "type": "new_session" })).await?;
+        let choice = self.choice();
+        if let (Some(provider), Some(model)) = (&choice.provider, &choice.model) {
+            process.send(json!({ "type": "set_model", "provider": provider, "modelId": model })).await?;
+        }
+        process.send(json!({ "type": "set_thinking_level", "level": self.thinking() })).await?;
+        process.fresh.store(true, Ordering::Relaxed);
+        process.resume.store(false, Ordering::Relaxed);
         Ok(())
     }
 
@@ -516,6 +536,8 @@ impl AiBridge {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             streaming: AtomicBool::new(false),
+            fresh: AtomicBool::new(true),
+            resume: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
             stderr: Mutex::new(VecDeque::new()),
         });
@@ -680,6 +702,10 @@ pub struct PromptBody {
     /// sees them with the words.
     #[serde(default)]
     images: Vec<String>,
+    /// A supplement to the task under way (or one sent again after a take-back), not a request of
+    /// its own: it goes on in the open session.
+    #[serde(default)]
+    follow: bool,
 }
 
 /// A picture is handed to the model at most this wide and tall.
@@ -707,13 +733,21 @@ pub async fn prompt(State(state): State<Arc<AppState>>, Json(body): Json<PromptB
         .await
         .map_err(anyhow::Error::from)?
         .map_err(|error| ApiError::bad_request(format!("图片读不出来：{error:#}")))?;
-    let process = bridge(&state).process(&state).await?;
+    let bridge = bridge(&state);
+    let process = bridge.process(&state).await?;
     let mut command = json!({ "type": "prompt", "message": message });
     if !images.is_empty() {
         command["images"] = json!(images);
     }
+    // Every request is a session of its own; a supplement joins the open one (steering it while
+    // the AI works), and so does the first request after 历史 → 继续.
+    let fresh = process.fresh.swap(false, Ordering::Relaxed);
+    let resume = process.resume.swap(false, Ordering::Relaxed);
     if process.streaming.load(Ordering::Relaxed) {
         command["streamingBehavior"] = json!("steer");
+    } else if !body.follow && !fresh && !resume {
+        bridge.new_session(&process).await?;
+        process.fresh.store(false, Ordering::Relaxed);
     }
     let data = process.send(command).await?;
     Ok(Json(json!({ "disposition": data["disposition"] })))
@@ -738,12 +772,13 @@ pub async fn clear_queue(State(state): State<Arc<AppState>>) -> ApiResult<Json<V
 }
 
 pub async fn reset(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
-    let running = bridge(&state).process.lock().await.clone();
+    let bridge = bridge(&state);
+    let running = bridge.process.lock().await.clone();
     if let Some(process) = running {
         if process.streaming.load(Ordering::Relaxed) {
             process.send(json!({ "type": "abort" })).await?;
         }
-        process.send(json!({ "type": "new_session" })).await?;
+        bridge.new_session(&process).await?;
     }
     Ok(Json(json!({})))
 }
@@ -813,13 +848,17 @@ pub async fn paste(
 
 // ---------------------------------------------------------------- the history
 
-/// The sessions in KDJ's sessions folder (sessions.rs), and the one pi has open, if it runs.
+/// The sessions in KDJ's sessions folder (sessions.rs), and the one the AI is in: the session of
+/// the task under way, or the one the next request continues (历史 → 继续). Between tasks there
+/// is none, as the next request starts its own.
 pub async fn list_sessions(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
     let bridge = bridge(&state);
     let running = bridge.process.lock().await.clone();
     let current = match running {
-        Some(process) => process.send(json!({ "type": "get_state" })).await.ok().and_then(|data| data["sessionId"].as_str().map(str::to_string)),
-        None => None,
+        Some(process) if process.streaming.load(Ordering::Relaxed) || process.resume.load(Ordering::Relaxed) => {
+            process.send(json!({ "type": "get_state" })).await.ok().and_then(|data| data["sessionId"].as_str().map(str::to_string))
+        }
+        _ => None,
     };
     let dir = bridge.paths.sessions.clone();
     let listed = tokio::task::spawn_blocking(move || sessions::list(&dir)).await.map_err(anyhow::Error::from)?;
@@ -848,6 +887,8 @@ pub async fn switch_session(State(state): State<Arc<AppState>>, Json(body): Json
         return Err(ApiError::bad_request("AI 正在做事，停下后再切换"));
     }
     process.send(json!({ "type": "switch_session", "sessionPath": path })).await?;
+    process.fresh.store(false, Ordering::Relaxed);
+    process.resume.store(true, Ordering::Relaxed);
     Ok(Json(json!({})))
 }
 

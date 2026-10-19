@@ -401,7 +401,7 @@ async function takeBack(id: string) {
   waiting = waiting.filter(line => line.id !== id);
   try {
     await aiApi.clearQueue();
-    for (const line of waiting) await aiApi.prompt(line.sent, line.images);
+    for (const line of waiting) await aiApi.prompt(line.sent, line.images, true);
   } catch (error) {
     aiProblem(error instanceof Error ? error.message : String(error));
   }
