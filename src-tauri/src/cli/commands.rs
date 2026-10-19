@@ -21,7 +21,7 @@ const NOTES: [&str; 9] = [
     "下载完成后 KDJ 自动入库并分析。移动、改名、删除、整理文件请直接用你自己的文件工具；放进 download.library_roots 下的文件会被 KDJ 自动跟上。",
     "library get 缺少分析时会当场补齐再返回（可能要几十秒）；时间单位都是秒，grid.downbeats 是小节线。",
     "peek 把截图存成 JPEG 文件并返回路径（多张时另有一张按时间顺序拼好的 sheet），用你看图片的工具打开即可；截图只用来核对画面内容，判断不了音画是否同步。",
-    "align 返回几套 plans：segments 里 ref = ref_at + (video - video_in) / speed（秒）。evidence 为 verified 的是声学核实过的，auto=true 的可以直接采用；melody / partial 只是候选，需要用户试听确认。ref_bar 是参考曲的小节号。剪辑请用你自己的工具（例如 ffmpeg）按这些时间去做。",
+    "align 返回几套 plans：segments 里 ref = ref_at + (video - video_in) / speed（秒）。evidence 为 verified 的是声学核实过的，auto=true 的可以直接采用；melody / partial 只是候选，需要用户试听确认。ref_bar 是参考曲的小节号。剪辑可以写成 KDJ 的 .kdjv 视频工程（docs/kdjv.md）放进曲库，用 project check 检查、project render 预先渲染；要的效果工程表达不了，用你自己的工具（例如 ffmpeg）做出片段再放进工程。",
     "扫码登录会在用户屏幕上打开二维码图片，请让用户用对应 App 扫码；youtube / ytm / soundcloud 从本机浏览器导入登录状态，需要用户先在该浏览器里登录。",
     "除了 KDJ，也可以结合你自己的网络搜索或浏览器工具寻找素材，再把链接交给 search 或 download。",
 ];
