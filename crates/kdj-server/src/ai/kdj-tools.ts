@@ -4,11 +4,16 @@
  * `{"ok":false,"error":{…}}`. `data` goes to the model as text and to KDJ's AI corner as the
  * result's `details`, where the step is drawn from it.
  *
+ * The model is not told that a CLI is behind them: the descriptions name what KDJ does, and
+ * what the CLI says about itself (its commands, notes and usage hints) is left out of what the
+ * model gets. KDJ's own AI uses KDJ's tools; the CLI is for AIs outside KDJ.
+ *
  * Beside them: a web search, pi-web-access's or one of KDJ's built-in ways (kdj-web.ts).
  *
  * Written into KDJ's own pi directory by kdj-server; edits here, not there.
  */
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { basename, relative } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -61,9 +66,11 @@ function kdj(args: string[], signal?: AbortSignal, onProgress?: (progress: Progr
       try { reply = JSON.parse(last); } catch { /* not JSON: told below */ }
       if (reply?.ok) { resolve(reply.data); return; }
       const error = reply?.error;
-      const message = typeof error === "string" ? error
-        : error && typeof error === "object" ? JSON.stringify(error)
-          : (err + partial).trim() || `kdj 退出码 ${code}`;
+      // The CLI's hint points at its own usage, which the model does not have.
+      const told = error && typeof error === "object" ? { ...(error as Record<string, unknown>), hint: undefined } : error;
+      const message = typeof told === "string" ? told
+        : told && typeof told === "object" ? JSON.stringify(told)
+          : (err + partial).trim() || `KDJ 出错（退出码 ${code}）`;
       reject(new Error(message));
     });
   });
@@ -89,10 +96,13 @@ function flags(values: Record<string, string | number | boolean | string[] | und
 const status = defineTool({
   name: "kdj_status",
   label: "KDJ 状态",
-  description: "kdj status：KDJ 的命令说明、各平台登录状态与登录方式、本机浏览器、账号歌单 ref、下载位置。",
+  description: "KDJ 的状态：各平台登录状态与登录方式、本机浏览器、账号歌单 ref、下载位置。",
   parameters: Type.Object({}),
   async execute(_id, _params, signal) {
-    return result(await kdj(["status"], signal));
+    // What the CLI says about itself is for AIs outside KDJ.
+    const { cli: _cli, commands: _commands, notes: _notes, hint: _hint, running: _running, kdj: _kdj, ...state } =
+      await kdj(["status"], signal) as Record<string, unknown>;
+    return result(state);
   },
 });
 
@@ -153,7 +163,7 @@ function remember(data: unknown) {
 const search = defineTool({
   name: "kdj_search",
   label: "搜索",
-  description: "kdj search：和 KDJ 搜索框同一路径。text 可以是关键词、分享链接或之前给出的 ref；集合 ref 会直接展开。结果里的 ref 交给 kdj_download。",
+  description: "在 KDJ 的聚合搜索里搜索，搜索页同时显示这次搜索。text 可以是关键词、分享链接或之前给出的 ref；集合 ref 会直接展开。结果里的 ref 交给 kdj_download。",
   parameters: Type.Object({
     text: Type.String({ description: "关键词、链接或 ref" }),
     kind: Type.Optional(Type.Union([Type.Literal("song"), Type.Literal("playlist"), Type.Literal("album"), Type.Literal("artist"), Type.Literal("radio")])),
@@ -170,7 +180,7 @@ const search = defineTool({
 const download = defineTool({
   name: "kdj_download",
   label: "下载",
-  description: "kdj download：立即下载 search 给出的 ref（或链接），用户能在下载栏看到，全部结束才返回路径和 track_id。",
+  description: "立即下载 kdj_search 给出的 ref（或链接），用户能在下载栏看到，全部结束才返回路径和 track_id。",
   parameters: Type.Object({
     refs: Type.Array(Type.String(), { minItems: 1 }),
     to: Type.Optional(Type.String({ description: "目标文件夹的绝对路径，须在曲库根目录内；默认下载文件夹" })),
@@ -191,7 +201,7 @@ const download = defineTool({
 const login = defineTool({
   name: "kdj_login",
   label: "登录",
-  description: "kdj login：登录平台。wyy/qqm/bilibili 默认扫码，二维码会在用户屏幕上打开；youtube/ytm/soundcloud 或给了 browser 时从本机浏览器导入（见 kdj_status 的 browsers）。完成才返回。",
+  description: "登录平台。wyy/qqm/bilibili 默认扫码，二维码会在用户屏幕上打开；youtube/ytm/soundcloud 或给了 browser 时从本机浏览器导入（见 kdj_status 的 browsers）。完成才返回。",
   parameters: Type.Object({
     platform: Type.String(),
     browser: Type.Optional(Type.String()),
@@ -205,7 +215,7 @@ const login = defineTool({
 const libraryList = defineTool({
   name: "kdj_library_list",
   label: "曲库",
-  description: "kdj library list：按文本、调性、BPM 区间（如 124..130）、能量或文件夹筛选本地曲库，不触发分析。",
+  description: "按文本、调性、BPM 区间（如 124..130）、能量或文件夹（绝对路径）筛选本地曲库，不触发分析；KDJ 的曲库页同时显示这次筛选。",
   parameters: Type.Object({
     q: Type.Optional(Type.String()),
     key: Type.Optional(Type.String()),
@@ -223,7 +233,7 @@ const libraryList = defineTool({
 const libraryGet = defineTool({
   name: "kdj_library_get",
   label: "曲目",
-  description: "kdj library get：曲目详情（bpm、调性、小节线、段落、cue），缺分析时当场补齐。按 id、文件路径或唯一匹配的文本取。",
+  description: "曲目详情（bpm、调性、小节线、段落、cue），缺分析时当场补齐（可能要几十秒）。按 id、文件路径或唯一匹配的文本取。时间单位都是秒，grid.downbeats 是小节线。",
   parameters: Type.Object({
     id: Type.Optional(Type.Array(Type.Integer())),
     path: Type.Optional(Type.String()),
@@ -238,7 +248,7 @@ const libraryGet = defineTool({
 const peek = defineTool({
   name: "kdj_peek",
   label: "截帧",
-  description: "kdj peek：从曲库视频、文件路径、bilibili ref 或链接截帧（在线 B 站不用下载），返回图片路径和拼好的 sheet。at 是逗号分隔的时间（75,1:30），或用 every 秒数均匀截取。",
+  description: "看视频的画面：从曲库视频、文件路径、bilibili ref 或链接截帧（在线 B 站不用下载），截下的画面直接给你看（多张时是按时间顺序拼好的一张）。at 是逗号分隔的时间（75,1:30），或用 every 秒数均匀截取。画面只用来核对内容，判断不了音画是否同步。",
   parameters: Type.Object({
     source: Type.String(),
     at: Type.Optional(Type.String()),
@@ -246,14 +256,31 @@ const peek = defineTool({
     width: Type.Optional(Type.Integer()),
   }),
   async execute(_id, params, signal) {
-    return result(await kdj(["peek", params.source, ...flags({ at: params.at, every: params.every, width: params.width })], signal));
+    const data = await kdj(["peek", params.source, ...flags({ at: params.at, every: params.every, width: params.width })], signal);
+    const told = result(data);
+    return { ...told, content: [...told.content, ...await pictures(data)] };
   },
 });
+
+/** What peek cut, as pictures the model sees: the sheet when there is one, else the frames. */
+async function pictures(data: unknown) {
+  const peeked = data as { sheet?: { path?: unknown }; frames?: { path?: unknown }[] } | null;
+  const paths = typeof peeked?.sheet?.path === "string"
+    ? [peeked.sheet.path]
+    : (peeked?.frames ?? []).map(frame => frame.path).filter((path): path is string => typeof path === "string").slice(0, 4);
+  const out: { type: "image"; data: string; mimeType: string }[] = [];
+  for (const path of paths) {
+    try {
+      out.push({ type: "image", data: (await readFile(path)).toString("base64"), mimeType: "image/jpeg" });
+    } catch { /* A frame that cannot be read is left out; its path is still in the text. */ }
+  }
+  return out;
+}
 
 const align = defineTool({
   name: "kdj_align",
   label: "对齐",
-  description: "kdj align：把视频对齐到参考曲，返回定位表 plans。auto=false 的方案需要用户试听确认。",
+  description: "把视频对齐到参考曲，返回几套定位方案 plans：segments 里 ref = ref_at + (video - video_in) / speed（秒）；ref_bar 是参考曲的小节号。evidence 为 verified 的经过声学核实，auto=true 的可以直接采用；melody / partial 只是候选，auto=false 的方案需要用户试听确认。",
   parameters: Type.Object({
     ref: Type.String({ description: "参考曲：曲库 id 或文件路径" }),
     video: Type.String({ description: "视频：曲库 id、文件路径、bilibili ref 或链接" }),
