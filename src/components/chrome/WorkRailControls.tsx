@@ -9,6 +9,7 @@ function LibrarySearchField({
   onChange,
   onClear,
   onBlurEmpty,
+  placeholder,
 }: {
   inputRef?: React.RefObject<HTMLInputElement | null>;
   value: string;
@@ -16,6 +17,7 @@ function LibrarySearchField({
   onChange(value: string): void;
   onClear(): void;
   onBlurEmpty?: () => void;
+  placeholder?: string;
 }) {
   return (
     <label className="kd-activity-search kd-activity-search-expanded">
@@ -25,14 +27,15 @@ function LibrarySearchField({
         type="search"
         value={value}
         placeholder={
-          folder && !isOutsideFolder(folder) ? "在当前文件夹中搜索" : "在全部歌曲中搜索"
+          placeholder ?? (folder && !isOutsideFolder(folder) ? "在当前文件夹中搜索" : "在全部歌曲中搜索")
         }
         aria-label={
-          folder && !isOutsideFolder(folder)
-            ? "搜索当前文件夹的曲目名称"
-            : folder
-              ? "搜索目录外曲目的名称"
-              : "搜索全部曲目的名称"
+          placeholder
+            ?? (folder && !isOutsideFolder(folder)
+              ? "搜索当前文件夹的曲目名称"
+              : folder
+                ? "搜索目录外曲目的名称"
+                : "搜索全部曲目的名称")
         }
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={(event) => {
@@ -58,12 +61,16 @@ function LibrarySearchField({
   );
 }
 
-/** Shared local search: a small icon that expands in the work rail. */
-export function LibrarySearchTools({ value, folder, selecting = false, onChange, children }: {
+/**
+ * Shared list search: a small icon that expands in the work rail. `placeholder` names what is
+ * searched where it is not the library (an opened online playlist).
+ */
+export function LibrarySearchTools({ value, folder, selecting = false, onChange, placeholder, children }: {
   value: string;
   folder: string;
   selecting?: boolean;
   onChange(value: string): void;
+  placeholder?: string;
   children?: ReactNode;
 }) {
   const [open, setOpen] = useState(() => Boolean(value.trim()));
@@ -78,10 +85,11 @@ export function LibrarySearchTools({ value, folder, selecting = false, onChange,
   const expanded = !selecting && open;
   return <span className="kd-activity-trailing-tools" data-searching={expanded ? "true" : undefined}>
     {expanded ? <LibrarySearchField inputRef={inputRef} value={value} folder={folder}
+      placeholder={placeholder}
       onChange={onChange} onClear={() => { onChange(""); setOpen(false); }}
       onBlurEmpty={() => setOpen(false)} /> : <button type="button"
         className="kd-activity-search-toggle" aria-label="搜索曲目"
-        title={folder && !isOutsideFolder(folder) ? "在当前文件夹中搜索" : "在全部歌曲中搜索"}
+        title={placeholder ?? (folder && !isOutsideFolder(folder) ? "在当前文件夹中搜索" : "在全部歌曲中搜索")}
         onClick={() => setOpen(true)}>
         <Search size={14} strokeWidth={2.25} />
       </button>}

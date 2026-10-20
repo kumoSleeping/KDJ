@@ -7,6 +7,7 @@ import {
   collectionReveal,
   collectionRowsInHand,
   fetchedCollectionTotal,
+  filteredCollectionItem,
   nextCollectionBatch,
   RESTORED_FETCH_ROWS,
   restoredCollectionView,
@@ -149,4 +150,30 @@ test("a playlist is reopened as far as it was shown, unless that means a long fe
   assert.equal(session.stream.shown, 150);
   assert.equal(normalizeWorkspaceSession({ stream: { shown: -4 } }).stream.shown, 0);
   assert.equal(normalizeWorkspaceSession({ stream: {} }).stream.shown, 0);
+});
+
+test("a search within an opened collection keeps the songs holding every word, with their ids", () => {
+  const list = item("playlist", "a", 0);
+  const song = (key: string, title: string, artist: string, album: string) => ({
+    ...group(key),
+    title,
+    artists: [artist],
+    album,
+  });
+  list.groups = [
+    song("1", "Ｈｅｌｌｏ World", "Adele", "25"),
+    song("2", "晴天", "周杰伦", "叶惠美"),
+    song("3", "七里香", "周杰伦", "七里香"),
+  ];
+
+  assert.equal(filteredCollectionItem(list, "  "), list);
+  assert.deepEqual(filteredCollectionItem(list, "周杰伦").groups.map((g) => g.group_id), ["list:2", "list:3"]);
+  assert.deepEqual(filteredCollectionItem(list, "周杰伦 叶惠美").groups.map((g) => g.group_id), ["list:2"]);
+  // Full-width letters and case do not matter.
+  assert.deepEqual(filteredCollectionItem(list, "hello adele").groups.map((g) => g.group_id), ["list:1"]);
+  assert.equal(filteredCollectionItem(list, "周杰伦").kind, "playlist");
+
+  const none = filteredCollectionItem(list, "不存在");
+  assert.equal(none.kind, "search");
+  assert.equal(none.groups.length, 0);
 });

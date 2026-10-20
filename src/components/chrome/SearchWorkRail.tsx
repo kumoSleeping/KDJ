@@ -1,4 +1,4 @@
-import { WorkRailCollapse } from "./WorkRailControls";
+import { LibrarySearchTools, WorkRailCollapse } from "./WorkRailControls";
 import {
   ArrowLeft,
   Download,
@@ -58,6 +58,10 @@ export interface SearchWorkRailProps {
   canGoBack: boolean;
   onGoBack(): void;
   onDownloadCollection(): void;
+  /** The search within the opened collection, and how many of its songs it keeps (null: none typed). */
+  collectionFilter?: string;
+  collectionMatches?: number | null;
+  onCollectionFilterChange?(value: string): void;
   /** 查询仍在进行时，零条目不等于最终没有结果。 */
   loading: boolean;
   selectionCount: number;
@@ -114,6 +118,9 @@ export function SearchWorkRail({
   canGoBack,
   onGoBack,
   onDownloadCollection,
+  collectionFilter = "",
+  collectionMatches = null,
+  onCollectionFilterChange,
   loading,
   selectionCount,
   selecting,
@@ -231,7 +238,7 @@ export function SearchWorkRail({
       if (opened.total !== null) {
         texts.push(
           <span key={`opened-count:${opened.id}`} className="kd-collection-rail-count">
-            {opened.total} {unit}
+            {collectionMatches != null ? `${collectionMatches} / ` : ""}{opened.total} {unit}
           </span>,
         );
       }
@@ -245,7 +252,7 @@ export function SearchWorkRail({
             <button
               type="button"
               className="kd-collection-rail-download"
-              disabled={collection.groups.length === 0}
+              disabled={collection.groups.length === 0 || loading}
               aria-label={`全部下载「${opened.title}」`}
               title="全部下载"
               onClick={onDownloadCollection}
@@ -375,6 +382,18 @@ export function SearchWorkRail({
       idle={idle}
       glyphs={glyphs}
       texts={texts}
+      trailing={
+        collection && onCollectionFilterChange ? (
+          <LibrarySearchTools
+            key={`collection-search:${collection.entry}`}
+            value={collectionFilter}
+            folder=""
+            selecting={selecting}
+            placeholder={`在${COLLECTION_LABEL[collection.kind as keyof typeof COLLECTION_LABEL] ?? "列表"}中搜索`}
+            onChange={onCollectionFilterChange}
+          />
+        ) : null
+      }
       actions={
         <>
           <WorkRailCollapse label="收起在线结果" onClick={onClose} />

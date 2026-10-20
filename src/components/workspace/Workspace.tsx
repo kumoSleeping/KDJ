@@ -126,6 +126,7 @@ import {
   collectionListWindow,
   collectionRowsInHand,
   fetchedCollectionTotal,
+  filteredCollectionItem,
   nextCollectionBatch,
   openedCollectionItem,
   restoredCollectionView,
@@ -650,6 +651,20 @@ export function Workspace() {
   const openedCollectionWindow = useMemo(
     () => (openedCollection ? collectionListWindow(collectionTotal, collectionShown) : null),
     [collectionShown, collectionTotal, openedCollection],
+  );
+  /**
+   * A search within the opened collection: what is typed, and the list as it shows it — every
+   * matching song at once, not in batches. Another collection (or none) starts it empty.
+   */
+  const [collectionFilter, setCollectionFilter] = useState("");
+  const openedCollectionEntry = openedCollection?.entry ?? null;
+  useEffect(() => setCollectionFilter(""), [openedCollectionEntry]);
+  const collectionQuery = openedCollection ? collectionFilter.trim() : "";
+  const listedItems = useMemo(
+    () => (openedCollection && collectionQuery
+      ? [filteredCollectionItem(openedCollection, collectionQuery)]
+      : items ?? []),
+    [collectionQuery, items, openedCollection],
   );
   /**
    * The end of what is shown was reached: the next batch. Rows in hand are simply shown; a
@@ -2144,7 +2159,7 @@ export function Workspace() {
   /** 勾选整个「包」：全选中就全清，否则补齐——和文件管理器里点父目录一个手感。 */
   const toggleItemAll = useCallback(
     (index: number) => {
-      const item = items?.[index];
+      const item = listedItems[index];
       if (!item) return;
       // 视频行没有勾选框，别把它们悄悄勾上——那样底下会冒出一条
       // "已选 N 首"，但列表里根本找不到第 N 条被勾中的行
@@ -2159,7 +2174,7 @@ export function Workspace() {
         return next;
       });
     },
-    [items],
+    [listedItems],
   );
 
   const pickSource = useCallback((groupId: string, index: number) => {
@@ -2167,20 +2182,21 @@ export function Workspace() {
   }, []);
 
   const toggleAll = useCallback(() => {
-    const allKeys = (items ?? []).flatMap((item, index) =>
+    const allKeys = listedItems.flatMap((item, index) =>
       selectableGroups(item).map((group) => selectionKey(index, group.group_id)),
     );
     setChosen((current) => (current.size >= allKeys.length ? new Set() : new Set(allKeys)));
-  }, [items]);
+  }, [listedItems]);
+  // Everything shown: while searching within a collection, only the songs it keeps.
   const selectAllSearch = useCallback(() => {
     setChosen(
       new Set(
-        (items ?? []).flatMap((item, index) =>
+        listedItems.flatMap((item, index) =>
           selectableGroups(item).map((group) => selectionKey(index, group.group_id)),
         ),
       ),
     );
-  }, [items]);
+  }, [listedItems]);
 
   const loadCollection = useCallback(async (collection: CollectionResult) => {
     const requestId = ++resultRequestSeqRef.current;
@@ -2330,46 +2346,64 @@ export function Workspace() {
     [sourceIndex, settings?.default_quality, settings?.video_max_height, settings?.video_transcode, refreshStats, videoAudioOnly],
   );
 
-  const downloadOpenedCollection = useCallback(async () => {
-    let item = openedCollection;
-    if (!item) return;
-    // “全部下载”是明确的全量动作；只有这时才允许把尚未浏览的 B 站页补齐。
-    if (piecewiseList && piecewiseList.total > item.groups.length) {
-      const playlist = piecewiseList.playlist;
-      const requestId = ++resultRequestSeqRef.current;
-      setBusy(true);
-      setQueueError("");
-      try {
-        const response = await api.streamPlaylist(playlist, 0);
-        if (requestId !== resultRequestSeqRef.current) return;
-        // The whole folder is in hand now; the list on screen keeps its rows and how far it
-        // is shown, and goes on growing from what was fetched.
-        item = {
-          ...item,
-          groups: appendFetchedGroups(
-            item.groups,
-            streamPlaylistItem(playlist, response).groups,
-          ),
-        };
-        const total = item.groups.length;
-        setItems([item]);
-        setPiecewiseList({ playlist, total });
-        setOpenedStreamPlaylist((opened) =>
-          opened && opened.platform === playlist.platform && opened.key === playlist.key
-            ? { ...opened, count: total }
-            : opened,
-        );
-      } catch (error) {
-        if (requestId === resultRequestSeqRef.current) {
-          setQueueError(`读取完整收藏夹失败：${errorText(error)}`);
-        }
-        return;
-      } finally {
-        if (requestId === resultRequestSeqRef.current) setBusy(false);
+  /**
+   * The opened collection with every row in hand. A Bilibili favourites folder hands its list
+   * over in pieces; a whole-list action (全部下载, a search within it) fetches the rest first.
+   * Null when that failed or another list was opened meanwhile.
+   */
+  const completeOpenedCollection = useCallback(async (): Promise<IntakeItem | null> => {
+    const item = openedCollection;
+    if (!item) return null;
+    if (!piecewiseList || piecewiseList.total <= item.groups.length) return item;
+    const playlist = piecewiseList.playlist;
+    const requestId = ++resultRequestSeqRef.current;
+    setBusy(true);
+    setQueueError("");
+    try {
+      const response = await api.streamPlaylist(playlist, 0);
+      if (requestId !== resultRequestSeqRef.current) return null;
+      // The whole folder is in hand now; the list on screen keeps its rows and how far it
+      // is shown, and goes on growing from what was fetched.
+      const whole = {
+        ...item,
+        groups: appendFetchedGroups(
+          item.groups,
+          streamPlaylistItem(playlist, response).groups,
+        ),
+      };
+      const total = whole.groups.length;
+      setItems([whole]);
+      setPiecewiseList({ playlist, total });
+      setOpenedStreamPlaylist((opened) =>
+        opened && opened.platform === playlist.platform && opened.key === playlist.key
+          ? { ...opened, count: total }
+          : opened,
+      );
+      return whole;
+    } catch (error) {
+      if (requestId === resultRequestSeqRef.current) {
+        setQueueError(`读取完整收藏夹失败：${errorText(error)}`);
       }
+      return null;
+    } finally {
+      if (requestId === resultRequestSeqRef.current) setBusy(false);
     }
-    await downloadResolvedItem(item);
-  }, [downloadResolvedItem, openedCollection, piecewiseList]);
+  }, [openedCollection, piecewiseList]);
+
+  // A search within a folder that is only partly in hand searches all of it, so its rest is
+  // fetched once, when the first word is typed.
+  const completingForSearchRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!collectionQuery || !openedCollectionEntry) return;
+    if (completingForSearchRef.current === openedCollectionEntry) return;
+    completingForSearchRef.current = openedCollectionEntry;
+    void completeOpenedCollection();
+  }, [collectionQuery, completeOpenedCollection, openedCollectionEntry]);
+
+  const downloadOpenedCollection = useCallback(async () => {
+    const item = await completeOpenedCollection();
+    if (item) await downloadResolvedItem(item);
+  }, [completeOpenedCollection, downloadResolvedItem]);
 
   const downloadGroup = useCallback(
     async (group: MergedGroup) => {
@@ -2789,6 +2823,11 @@ export function Workspace() {
                         canGoBack={collectionSearchSnapshot !== null}
                         onGoBack={returnToCollectionSearch}
                         onDownloadCollection={() => void downloadOpenedCollection()}
+                        collectionFilter={collectionFilter}
+                        collectionMatches={
+                          collectionQuery ? listedItems.reduce((sum, item) => sum + item.groups.length, 0) : null
+                        }
+                        onCollectionFilterChange={setCollectionFilter}
                         loading={busy || loadingCollections.size > 0}
                         selectionCount={chosen.size}
                         selecting={searchSelectionMode || chosen.size > 0}
@@ -2848,7 +2887,7 @@ export function Workspace() {
                         }}
                       >
                         <ResultTable
-                          items={items ?? []}
+                          items={listedItems}
                           video={video}
                           loading={busy}
                           searched={hasResults}
@@ -2862,8 +2901,8 @@ export function Workspace() {
                           collapsedItems={collapsedItems}
                           sourceIndex={sourceIndex}
                           inspectedGroup={inspectedOnlineGroup}
-                          collectionShown={collectionShown}
-                          hasMoreRows={hasMoreCollectionRows}
+                          collectionShown={collectionQuery ? collectionRows : collectionShown}
+                          hasMoreRows={!collectionQuery && hasMoreCollectionRows}
                           loadingMoreRows={loadingMoreRows}
                           onShowMoreRows={showMoreCollectionRows}
                           onToggleSelect={toggleSelect}

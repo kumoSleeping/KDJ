@@ -223,3 +223,30 @@ export function openedCollectionItem(items: IntakeItem[]): IntakeItem | null {
   const item = items.length === 1 ? items[0] : undefined;
   return item && isResolvedCollectionItem(item) ? item : null;
 }
+
+function searchable(text: string): string {
+  return text.normalize("NFKC").toLocaleLowerCase();
+}
+
+/**
+ * The opened collection as a search within it shows it: only the songs whose title, artists or
+ * album hold every word of `query`. The rows keep their group ids, so a pick made while
+ * searching is the same pick without it. No song matches: the list is empty — a plain list with
+ * no rows, not a collection, which would be drawn as a package head.
+ */
+export function filteredCollectionItem(item: IntakeItem, query: string): IntakeItem {
+  const words = searchable(query).split(/\s+/).filter(Boolean);
+  if (words.length === 0) return item;
+  const groups = item.groups.filter((group) => {
+    const text = searchable([
+      group.title,
+      group.album,
+      ...group.artists,
+      ...group.sources.flatMap((source) => [source.title, source.album, ...source.artists]),
+    ].join("\n"));
+    return words.every((word) => text.includes(word));
+  });
+  return groups.length > 0
+    ? { ...item, groups }
+    : { ...item, kind: "search", groups: [], collections: [] };
+}
