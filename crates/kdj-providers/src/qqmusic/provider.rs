@@ -432,8 +432,9 @@ impl QqMusicProvider {
                 break;
             }
             page += 1;
-            // 挡住接口一直回 hasmore=1 的病态情况
-            if page > 50 {
+            // 挡住接口一直回 hasmore=1 的病态情况。只是护栏：50 页曾把五千首以上的
+            // 歌单悄悄截断，整包下载就少了后半。
+            if page > 200 {
                 break;
             }
         }

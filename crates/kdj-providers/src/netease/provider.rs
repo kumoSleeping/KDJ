@@ -155,9 +155,7 @@ impl NeteaseProvider {
                 payload([("c", Value::String(serde_json::to_string(&ids)?))]),
             )
             .await?;
-        if body.get("code").and_then(Value::as_i64) != Some(200) {
-            return Ok(Vec::new());
-        }
+        expect_ok(&body, "读取网易云曲目详情")?;
         Ok(body
             .get("songs")
             .and_then(Value::as_array)
@@ -212,8 +210,13 @@ impl NeteaseProvider {
         if !track_ids.is_empty() {
             let mut songs = Vec::with_capacity(track_ids.len());
             // 详情接口一次最多 1000 首，大歌单要分批
+            // 一段失败不能悄悄少掉几百首：重试一次，再失败就整个报错。
             for chunk in track_ids.chunks(500) {
-                songs.extend(self.track_detail(chunk).await?);
+                let detail = match self.track_detail(chunk).await {
+                    Ok(detail) => detail,
+                    Err(_) => self.track_detail(chunk).await?,
+                };
+                songs.extend(detail);
             }
             if !songs.is_empty() {
                 return Ok((title, songs));
