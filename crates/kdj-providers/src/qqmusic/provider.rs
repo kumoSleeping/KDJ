@@ -432,8 +432,9 @@ impl QqMusicProvider {
                 break;
             }
             page += 1;
-            // 挡住接口一直回 hasmore=1 的病态情况
-            if page > 50 {
+            // 挡住接口一直回 hasmore=1 的病态情况。只是护栏：50 页曾把五千首以上的
+            // 歌单悄悄截断，整包下载就少了后半。
+            if page > 200 {
                 break;
             }
         }
@@ -1222,7 +1223,9 @@ impl MusicProvider for QqMusicProvider {
             origin: "favorite".into(),
         }];
         let mut seen_keys = std::collections::HashSet::new();
-        if let Ok(data) = self
+        // A failed read is an error, not an account without playlists: an empty list would be
+        // shown and saved in the sidebar in place of the one it has.
+        let data = self
             .client
             .call(
                 "music.musicasset.PlaylistBaseRead",
@@ -1231,31 +1234,30 @@ impl MusicProvider for QqMusicProvider {
                 QqPlatform::Desktop,
             )
             .await
-        {
-            if let Some(entries) = playlist_entries(&data) {
-                for entry in entries {
-                    let Some(key) = qq_playlist_key(entry) else {
-                        continue;
-                    };
-                    let fallback_title = "QQ 音乐歌单";
-                    let title = qq_playlist_title(entry)
-                        .unwrap_or(fallback_title)
-                        .to_string();
-                    // `dirid=201` 就是“我喜欢/我的收藏”。上面已经放了稳定的
-                    // `__qq_favorite__` 虚拟 key，再保留这条会在侧栏出现两个同义节点。
-                    if is_qq_favorite_playlist(entry) || !seen_keys.insert(key.clone()) {
-                        continue;
-                    }
-                    playlists.push(StreamPlaylist {
-                        platform: Platform::Qqm,
-                        key,
-                        title,
-                        cover: qq_playlist_cover(entry),
-                        count: qq_playlist_count(entry),
-                        is_favorite: false,
-                        origin: qq_playlist_origin(entry).to_string(),
-                    });
+            .context("读取 QQ 音乐自建歌单失败")?;
+        if let Some(entries) = playlist_entries(&data) {
+            for entry in entries {
+                let Some(key) = qq_playlist_key(entry) else {
+                    continue;
+                };
+                let fallback_title = "QQ 音乐歌单";
+                let title = qq_playlist_title(entry)
+                    .unwrap_or(fallback_title)
+                    .to_string();
+                // `dirid=201` 就是“我喜欢/我的收藏”。上面已经放了稳定的
+                // `__qq_favorite__` 虚拟 key，再保留这条会在侧栏出现两个同义节点。
+                if is_qq_favorite_playlist(entry) || !seen_keys.insert(key.clone()) {
+                    continue;
                 }
+                playlists.push(StreamPlaylist {
+                    platform: Platform::Qqm,
+                    key,
+                    title,
+                    cover: qq_playlist_cover(entry),
+                    count: qq_playlist_count(entry),
+                    is_favorite: false,
+                    origin: qq_playlist_origin(entry).to_string(),
+                });
             }
         }
 

@@ -3,6 +3,7 @@ import type {
   CollectionResult,
   IntakeItem,
   MergedGroup,
+  SongSource,
 } from "../types";
 
 /**
@@ -222,4 +223,66 @@ export function isResolvedCollectionItem(item: IntakeItem): boolean {
 export function openedCollectionItem(items: IntakeItem[]): IntakeItem | null {
   const item = items.length === 1 ? items[0] : undefined;
   return item && isResolvedCollectionItem(item) ? item : null;
+}
+
+function payloadId(value: unknown): string {
+  if (typeof value === "number") return value > 0 ? String(value) : "";
+  return typeof value === "string" && value.trim() && value.trim() !== "0" ? value.trim() : "";
+}
+
+/**
+ * The album a song of an online list belongs to, as a collection that can be opened or
+ * downloaded whole — from the platform's own song record the source carries. Only the platforms
+ * that can list an album (NetEase, QQ Music) have one; a song outside any album has none.
+ */
+export function albumOfSource(source: SongSource): CollectionResult | null {
+  const payload = source.payload;
+  const field = (record: unknown, key: string) =>
+    record && typeof record === "object" ? (record as Record<string, unknown>)[key] : undefined;
+  let key = "";
+  if (source.platform === "wyy") {
+    key = payloadId(field(payload.al, "id")) || payloadId(field(payload.album, "id"));
+  } else if (source.platform === "qqm") {
+    key = payloadId(field(payload.album, "mid"))
+      || payloadId(payload.album_mid)
+      || payloadId(payload.albummid)
+      || payloadId(field(payload.album, "id"));
+  }
+  if (!key || !source.album.trim()) return null;
+  return {
+    kind: "album",
+    platform: source.platform,
+    key,
+    title: source.album,
+    subtitle: source.artists.join(" / "),
+    cover: source.cover,
+    count: 0,
+  };
+}
+
+function searchable(text: string): string {
+  return text.normalize("NFKC").toLocaleLowerCase();
+}
+
+/**
+ * The opened collection as a search within it shows it: only the songs whose title, artists or
+ * album hold every word of `query`. The rows keep their group ids, so a pick made while
+ * searching is the same pick without it. No song matches: the list is empty — a plain list with
+ * no rows, not a collection, which would be drawn as a package head.
+ */
+export function filteredCollectionItem(item: IntakeItem, query: string): IntakeItem {
+  const words = searchable(query).split(/\s+/).filter(Boolean);
+  if (words.length === 0) return item;
+  const groups = item.groups.filter((group) => {
+    const text = searchable([
+      group.title,
+      group.album,
+      ...group.artists,
+      ...group.sources.flatMap((source) => [source.title, source.album, ...source.artists]),
+    ].join("\n"));
+    return words.every((word) => text.includes(word));
+  });
+  return groups.length > 0
+    ? { ...item, groups }
+    : { ...item, kind: "search", groups: [], collections: [] };
 }

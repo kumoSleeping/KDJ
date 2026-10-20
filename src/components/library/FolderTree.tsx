@@ -4,8 +4,11 @@ import { useLayoutSignals } from "../../lib/useLayoutMode";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   AlertTriangle,
+  ArrowDownAZ,
   ChevronDown,
   ChevronRight,
+  History,
+  ListOrdered,
   BarChart3,
   ClipboardPaste,
   Copy,
@@ -61,7 +64,13 @@ import {
   isSearchDownloadDrag,
 } from "../../lib/searchDrag";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
-import { orderStreamPlaylistsByRecent, type StreamPlaylistRecentEntry } from "../../lib/streamPlaylistOrder";
+import {
+  orderStreamPlaylists,
+  STREAM_PLAYLIST_ORDERS,
+  type StreamPlaylistOrder,
+  type StreamPlaylistRecentEntry,
+} from "../../lib/streamPlaylistOrder";
+import { useStreamPlaylistOrderStore } from "../../stores/streamPlaylistOrderStore";
 import { withForegroundStreamPlaceholder } from "../../lib/streamStartup";
 import {
   finishTrackDrop,
@@ -75,6 +84,7 @@ import { useLibraryStore } from "../../stores/libraryStore";
 import { useSidebarVisibilityStore } from "../../stores/sidebarVisibilityStore";
 import {
   STREAM_BROWSE_PLATFORMS,
+  STREAM_PLAYLIST_FOCUS_MAX_AGE_MS,
   streamAccountBinding,
   useStreamBrowseStore,
   type ActiveStreamPlaylist,
@@ -164,12 +174,22 @@ function rootAccountState(
     ?? (states.includes(undefined) ? undefined : states.includes("expired") ? "expired" : states[0]);
 }
 
-function useStreamRootMenu() {
+const STREAM_ORDER_ICON: Record<StreamPlaylistOrder, typeof History> = {
+  recent: History,
+  platform: ListOrdered,
+  title: ArrowDownAZ,
+};
+
+/** A platform root's menu: read its playlists again, how they are ordered, and 收起. */
+function useStreamRootMenu(onRefresh: (platform: StreamBrowsePlatform) => void) {
   const [menu, setMenu] = useState<{
     platform: StreamBrowsePlatform;
     x: number;
     y: number;
   } | null>(null);
+  const orders = useStreamPlaylistOrderStore((state) => state.orders);
+  const members = menu ? rootMembers(streamRootOf(menu.platform)) : [];
+  const order = orders[members[0]] ?? "recent";
   return {
     openStreamRootMenu(event: React.MouseEvent, platform: StreamBrowsePlatform) {
       event.preventDefault();
@@ -178,6 +198,36 @@ function useStreamRootMenu() {
     },
     streamRootMenu: menu && (
       <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            onRefresh(menu.platform);
+            setMenu(null);
+          }}
+        >
+          <RefreshCw size={12} />
+          刷新
+        </button>
+        <div className="kd-menu-heading" role="presentation">排序</div>
+        {STREAM_PLAYLIST_ORDERS.map((item) => {
+          const Icon = STREAM_ORDER_ICON[item.id];
+          return (
+            <button
+              key={item.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={order === item.id}
+              onClick={() => {
+                useStreamPlaylistOrderStore.getState().setOrder(members, item.id);
+                setMenu(null);
+              }}
+            >
+              <Icon size={12} />
+              {item.label}
+            </button>
+          );
+        })}
         <button
           type="button"
           role="menuitem"
@@ -323,7 +373,8 @@ function writeNarrowRailSource(source: NarrowRailSource): void {
 
 /**
  * 宽树和手机窄轨互斥挂载，但两者都必须拥有同一套账号绑定与持久缓存。
- * 绑定账号只恢复本地目录；平台请求只允许由展开或刷新按钮触发。
+ * 绑定账号只恢复本地目录；平台请求由展开、刷新，以及已展开的根在账号就绪和
+ * 窗口回到前台时触发（都经过缓存时效判断，不会每次都访问平台）。
  * enabled=false 时保留 hook 顺序却不注册副作用，展开态交给内部 FolderTree 接管。
  */
 function useStreamBrowseLifecycle(enabled: boolean) {
@@ -331,6 +382,7 @@ function useStreamBrowseLifecycle(enabled: boolean) {
   const accountsError = useAppStore((state) => state.accountsError);
   const appBooting = useAppStore((state) => state.booting);
   const bindStreamAccount = useStreamBrowseStore((state) => state.bindAccount);
+  const refreshStreamIfStale = useStreamBrowseStore((state) => state.refreshIfStale);
   useEffect(() => {
     if (!enabled) return;
     for (const platform of STREAM_BROWSE_PLATFORMS) {
@@ -344,6 +396,32 @@ function useStreamBrowseLifecycle(enabled: boolean) {
       }
     }
   }, [accounts, accountsError, appBooting, bindStreamAccount, enabled]);
+
+  // An open root shows the account as it is now. A root left open at the last quit used to show
+  // the list saved then until it was closed and opened again, so a playlist made since never
+  // came; it is read once the accounts are known, and again when the window comes back to the
+  // front (a playlist just made on the phone or the platform's page).
+  useEffect(() => {
+    if (!enabled) return;
+    const refreshOpenRoots = (maxAgeMs?: number) => {
+      const { expanded } = useStreamBrowseStore.getState();
+      for (const platform of STREAM_BROWSE_PLATFORMS) {
+        if (!expanded[streamRootOf(platform).id]) continue;
+        const state = accounts.find((account) => account.platform === platform)?.state;
+        if (accountCanBrowse(state)) void refreshStreamIfStale(platform, { maxAgeMs });
+      }
+    };
+    refreshOpenRoots();
+    const onFront = () => {
+      if (document.visibilityState === "visible") refreshOpenRoots(STREAM_PLAYLIST_FOCUS_MAX_AGE_MS);
+    };
+    window.addEventListener("focus", onFront);
+    document.addEventListener("visibilitychange", onFront);
+    return () => {
+      window.removeEventListener("focus", onFront);
+      document.removeEventListener("visibilitychange", onFront);
+    };
+  }, [accounts, enabled, refreshStreamIfStale]);
 
   return { accounts, accountsError };
 }
@@ -505,7 +583,12 @@ export function NarrowFolderRail({
   const setFilter = useLibraryStore((state) => state.setFilter);
   const settings = useAppStore((state) => state.settings);
   const hiddenPlatforms = useSidebarVisibilityStore((state) => state.hiddenPlatforms);
-  const { openStreamRootMenu, streamRootMenu } = useStreamRootMenu();
+  const { openStreamRootMenu, streamRootMenu } = useStreamRootMenu((rootId) => {
+    for (const platform of rootMembers(streamRootOf(rootId))) {
+      const state = accounts.find((account) => account.platform === platform)?.state;
+      if (accountCanBrowse(state)) void loadStreamPlaylists(platform, true);
+    }
+  });
   const applyFolderOp = useLibraryStore((state) => state.applyFolderOp);
   const startScan = useLibraryStore((state) => state.startScan);
   const streamPlaylists = useStreamBrowseStore((state) => state.playlists);
@@ -634,6 +717,7 @@ export function NarrowFolderRail({
      lower list when another source is picked or its playlists have been read, a section's
      playlists when it is opened or closed. Nothing else moves an item. */
   const [railMotion] = useState(() => createSidebarMotion("button", ".kd-narrow-source-children"));
+  const playlistOrders = useStreamPlaylistOrderStore((state) => state.orders);
   const shownRecentlyOpened = useShownRecents(
     streamRecentlyOpened,
     railMotion,
@@ -793,9 +877,10 @@ export function NarrowFolderRail({
     const accountState = account?.state;
     const canBrowse = accountCanBrowse(accountState);
     const playlists = streamPlaylists[platform];
-    const orderedPlaylists = orderStreamPlaylistsByRecent(
+    const orderedPlaylists = orderStreamPlaylists(
       withForegroundStreamPlaceholder(playlists ?? [], platform, startupForeground),
       shownRecentlyOpened[platform],
+      playlistOrders[platform] ?? "recent",
     );
     const loading = streamLoading[platform];
     const platformError = streamErrors[platform];
@@ -1231,7 +1316,9 @@ export function FolderTree({
   const { accounts, accountsError } = useStreamBrowseLifecycle(true);
   const hiddenPlatforms = useSidebarVisibilityStore((state) => state.hiddenPlatforms);
   const countsShown = useSidebarCounts((state) => state.shown);
-  const { openStreamRootMenu, streamRootMenu } = useStreamRootMenu();
+  const { openStreamRootMenu, streamRootMenu } = useStreamRootMenu(
+    (rootId) => refreshStreamRoot(streamRootOf(rootId)),
+  );
   const saveSettings = useAppStore((state) => state.saveSettings);
   const streamPlaylists = useStreamBrowseStore((state) => state.playlists);
   const streamLoading = useStreamBrowseStore((state) => state.loading);
@@ -1558,6 +1645,7 @@ export function FolderTree({
      own toggle, announced with `expect` right before the state changes; every other render
      leaves the rows where they are. */
   const [treeMotion] = useState(() => createSidebarMotion(".kd-folder", ".kd-folder-list"));
+  const playlistOrders = useStreamPlaylistOrderStore((state) => state.orders);
   const shownRecentlyOpened = useShownRecents(
     streamRecentlyOpened,
     treeMotion,
@@ -1798,9 +1886,10 @@ export function FolderTree({
   /** One platform's part of a root: how its account stands, its favourites, then its sections. */
   const renderStreamPlatform = (platform: StreamBrowsePlatform, depth: number) => {
     const playlists = streamPlaylists[platform];
-    const orderedPlaylists = orderStreamPlaylistsByRecent(
+    const orderedPlaylists = orderStreamPlaylists(
       withForegroundStreamPlaceholder(playlists ?? [], platform, startupForeground),
       shownRecentlyOpened[platform],
+      playlistOrders[platform] ?? "recent",
     );
     const loading = streamLoading[platform];
     const error = streamErrors[platform];

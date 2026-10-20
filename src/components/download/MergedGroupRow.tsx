@@ -3,9 +3,11 @@ import {
   ChevronRight,
   Check,
   Copy,
+  Disc3,
   Download,
   Link2,
   ListMinus,
+  ListPlus,
   LoaderCircle,
   Play,
 } from "lucide-react";
@@ -18,7 +20,8 @@ import {
 } from "../../lib/songPreview";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import type { LayoutMode } from "../../lib/useLayoutMode";
-import type { MergedGroup, Platform, SongSource } from "../../types";
+import type { CollectionResult, MergedGroup, Platform, SongSource } from "../../types";
+import { albumOfSource } from "../../lib/searchCollections";
 import { copyText } from "../../lib/copyText";
 import { copyShareContent, songSourcesArtwork } from "../../lib/shareClipboard";
 import { firstSourceShareLink, formatShareText } from "../../lib/shareLink";
@@ -89,6 +92,9 @@ export interface MergedGroupRowProps {
   onRemoveFromStreamPlaylist?(): void;
   removeFromStreamPlaylistLabel?: string;
   removingFromStreamPlaylist?: boolean;
+  /** The album of the shown source (NetEase, QQ Music), opened as a list or downloaded whole. */
+  onOpenAlbum?(album: CollectionResult): void;
+  onDownloadAlbum?(album: CollectionResult): void;
   /** 正在解析或装载的在线来源；用于在用户双击的位置给出即时反馈。 */
   previewPendingSourceKey?: string;
   previewPendingLabel?: string;
@@ -134,6 +140,8 @@ export function MergedGroupRow({
   onRemoveFromStreamPlaylist,
   removeFromStreamPlaylistLabel,
   removingFromStreamPlaylist = false,
+  onOpenAlbum,
+  onDownloadAlbum,
   previewPendingSourceKey = "",
   previewPendingLabel = "解析中",
   followingSongs = [],
@@ -142,7 +150,8 @@ export function MergedGroupRow({
   onPointerDragStart,
 }: MergedGroupRowProps) {
   const active = group.sources[sourceIndex] ?? group.sources[0];
-  const shareLink = firstSourceShareLink(group.sources, sourceIndex);
+  const album = active ? albumOfSource(active) : null;
+  const shareLink =firstSourceShareLink(group.sources, sourceIndex);
   const shareContentMode = useSharePrefs((state) => state.contentMode);
   const multi = group.sources.length > 1;
   const pressTimerRef = useRef<number | null>(null);
@@ -649,6 +658,18 @@ export function MergedGroupRow({
             <Play size={12} />
             播放
           </button>
+          {album && onOpenAlbum && (
+            <button
+              type="button"
+              onClick={() => {
+                setRowMenu(null);
+                onOpenAlbum(album);
+              }}
+            >
+              <Disc3 size={12} />
+              打开此专辑
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {
@@ -714,6 +735,18 @@ export function MergedGroupRow({
             >
               <Download size={12} />
               加入下载队列
+            </button>
+          )}
+          {album && onDownloadAlbum && (
+            <button
+              type="button"
+              onClick={() => {
+                setRowMenu(null);
+                onDownloadAlbum(album);
+              }}
+            >
+              <ListPlus size={12} />
+              将此专辑添加到下载
             </button>
           )}
           {selectable && (

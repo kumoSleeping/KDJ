@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  albumOfSource,
   appendFetchedGroups,
   COLLECTION_BATCH_SIZE,
   collectionListWindow,
   collectionReveal,
   collectionRowsInHand,
   fetchedCollectionTotal,
+  filteredCollectionItem,
   nextCollectionBatch,
   RESTORED_FETCH_ROWS,
   restoredCollectionView,
@@ -149,4 +151,51 @@ test("a playlist is reopened as far as it was shown, unless that means a long fe
   assert.equal(session.stream.shown, 150);
   assert.equal(normalizeWorkspaceSession({ stream: { shown: -4 } }).stream.shown, 0);
   assert.equal(normalizeWorkspaceSession({ stream: {} }).stream.shown, 0);
+});
+
+test("a search within an opened collection keeps the songs holding every word, with their ids", () => {
+  const list = item("playlist", "a", 0);
+  const song = (key: string, title: string, artist: string, album: string) => ({
+    ...group(key),
+    title,
+    artists: [artist],
+    album,
+  });
+  list.groups = [
+    song("1", "Ｈｅｌｌｏ World", "Adele", "25"),
+    song("2", "晴天", "周杰伦", "叶惠美"),
+    song("3", "七里香", "周杰伦", "七里香"),
+  ];
+
+  assert.equal(filteredCollectionItem(list, "  "), list);
+  assert.deepEqual(filteredCollectionItem(list, "周杰伦").groups.map((g) => g.group_id), ["list:2", "list:3"]);
+  assert.deepEqual(filteredCollectionItem(list, "周杰伦 叶惠美").groups.map((g) => g.group_id), ["list:2"]);
+  // Full-width letters and case do not matter.
+  assert.deepEqual(filteredCollectionItem(list, "hello adele").groups.map((g) => g.group_id), ["list:1"]);
+  assert.equal(filteredCollectionItem(list, "周杰伦").kind, "playlist");
+
+  const none = filteredCollectionItem(list, "不存在");
+  assert.equal(none.kind, "search");
+  assert.equal(none.groups.length, 0);
+});
+
+test("a NetEase or QQ song names its album as a collection; a song outside an album does not", () => {
+  const source = (platform: "wyy" | "qqm" | "bilibili", album: string, payload: Record<string, unknown>) => ({
+    ...group("s").sources[0],
+    platform,
+    album,
+    artists: ["周杰伦"],
+    cover: "c.jpg",
+    payload,
+  });
+  assert.deepEqual(albumOfSource(source("wyy", "叶惠美", { al: { id: 18915, name: "叶惠美" } })), {
+    kind: "album", platform: "wyy", key: "18915", title: "叶惠美", subtitle: "周杰伦", cover: "c.jpg", count: 0,
+  });
+  assert.equal(albumOfSource(source("wyy", "旧接口", { album: { id: 7 } }))?.key, "7");
+  assert.equal(albumOfSource(source("qqm", "叶惠美", { album: { id: 8220, mid: "003bSL0v4bpKAx" } }))?.key, "003bSL0v4bpKAx");
+  assert.equal(albumOfSource(source("qqm", "叶惠美", { album: { id: 8220, mid: "" } }))?.key, "8220");
+
+  assert.equal(albumOfSource(source("wyy", "", { al: { id: 0 } })), null);
+  assert.equal(albumOfSource(source("qqm", "单曲", { album: { mid: "", id: 0 } })), null);
+  assert.equal(albumOfSource(source("bilibili", "合集", { al: { id: 5 } })), null);
 });

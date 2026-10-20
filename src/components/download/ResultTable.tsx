@@ -188,6 +188,8 @@ export interface ResultTableProps {
   previewPendingLabel?: string;
   /** 作者/专辑集合必须先展开为歌曲，不能直接入队。 */
   onLoadCollection(collection: CollectionResult): void;
+  /** A song's album, from its row's menu: every song of it into the download queue. */
+  onDownloadCollection?(collection: CollectionResult): void;
   loadingCollections: Set<string>;
 }
 
@@ -217,6 +219,7 @@ type ResultTableHandlers = Required<Pick<
   | "onInspectGroup"
   | "onRemoveStreamGroup"
   | "onLoadCollection"
+  | "onDownloadCollection"
   | "onShowMoreRows"
 >>;
 
@@ -290,6 +293,7 @@ export function ResultTable(props: ResultTableProps) {
       onRemoveStreamGroup: (group, sourceIndex) =>
         latest.current.onRemoveStreamGroup?.(group, sourceIndex),
       onLoadCollection: (collection) => latest.current.onLoadCollection(collection),
+      onDownloadCollection: (collection) => latest.current.onDownloadCollection?.(collection),
       onShowMoreRows: () => latest.current.onShowMoreRows(),
     }),
     [],
@@ -346,6 +350,7 @@ const ResultTableView = memo(function ResultTableView({
   previewPendingSourceKey,
   previewPendingLabel,
   onLoadCollection,
+  onDownloadCollection,
   loadingCollections,
 }: ResultTableProps) {
   const selectedRef = useRef(selected);
@@ -1046,6 +1051,8 @@ const ResultTableView = memo(function ResultTableView({
         }
         removeFromStreamPlaylistLabel={removeStreamGroupLabel}
         removingFromStreamPlaylist={removingStreamGroupIds?.has(group.group_id)}
+        onOpenAlbum={onLoadCollection}
+        onDownloadAlbum={onDownloadCollection}
         previewPendingSourceKey={previewPendingSourceKey}
         previewPendingLabel={previewPendingLabel}
         onDragStart={(event) => {
