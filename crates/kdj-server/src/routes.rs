@@ -142,7 +142,15 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         )
         .route("/api/resolve", post(resolve))
         .route("/api/intake", post(intake))
-        .route("/api/downloads", get(list_downloads).post(enqueue))
+        .route(
+            "/api/downloads",
+            get(list_downloads)
+                .post(enqueue)
+                // 网易云 / QQ 的来源带着平台原始歌曲 JSON，整包下载一个上千首的歌单
+                // 就超过 axum 默认的 2MB（413，WebView2 上变成 Failed to fetch）。
+                // 本机、带令牌的入队没有理由限大小。
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         .route(
             "/api/downloads/preparations/pending",
             get(pending_download_preparations),

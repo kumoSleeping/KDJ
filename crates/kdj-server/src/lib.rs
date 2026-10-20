@@ -769,4 +769,43 @@ mod auth_tests {
 
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[tokio::test]
+    async fn a_whole_collection_download_is_not_refused_for_its_size() {
+        let root = std::env::temp_dir().join(format!(
+            "kdj-download-size-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = Arc::new(AppConfig::create(
+            root.join("data"),
+            root.join("downloads"),
+            0,
+        ));
+        let state = AppState::new(config).unwrap();
+        let app = build_app(
+            state,
+            AuthToken(Arc::from("0123456789abcdef")),
+            MediaToken(Arc::from("fedcba9876543210")),
+        )
+        .unwrap();
+
+        // Past axum's 2 MB default, as a big NetEase/QQ playlist is; empty so nothing is queued.
+        let body = format!("{{\"sources\":[]{}}}", " ".repeat(3 * 1024 * 1024));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/downloads")
+                    .header(header::AUTHORIZATION, "Bearer 0123456789abcdef")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
