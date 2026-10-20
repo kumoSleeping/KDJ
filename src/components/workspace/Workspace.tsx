@@ -59,6 +59,7 @@ import type { DrawerSpec } from "../drawer/drawerSchema";
 import { VisualizerPopup } from "../player/VisualizerPopup";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import { useAppStore } from "../../stores/appStore";
+import { showNotice } from "../../stores/toastStore";
 import { enqueueMediaDownloads } from "../../lib/mediaActions";
 import { useUpdateStore } from "../../stores/updateStore";
 import {
@@ -2340,7 +2341,8 @@ export function Workspace() {
         });
         void refreshStats();
       } catch (error) {
-        setQueueError(`整包下载失败：${errorText(error)}`);
+        // Not a selection's action: the selection rail that shows queueError is not up.
+        showNotice(`整包下载失败：${errorText(error)}`);
       }
     },
     [sourceIndex, settings?.default_quality, settings?.video_max_height, settings?.video_transcode, refreshStats, videoAudioOnly],
@@ -2382,7 +2384,7 @@ export function Workspace() {
       return whole;
     } catch (error) {
       if (requestId === resultRequestSeqRef.current) {
-        setQueueError(`读取完整收藏夹失败：${errorText(error)}`);
+        showNotice(`读取完整收藏夹失败：${errorText(error)}`);
       }
       return null;
     } finally {
@@ -2404,6 +2406,16 @@ export function Workspace() {
     const item = await completeOpenedCollection();
     if (item) await downloadResolvedItem(item);
   }, [completeOpenedCollection, downloadResolvedItem]);
+
+  // A song's album, from its row's menu: listed whole, then queued as 全部下载 queues an opened one.
+  const downloadAlbum = useCallback(async (album: CollectionResult) => {
+    try {
+      const response = await api.resolveCollection(album, 0);
+      await downloadResolvedItem(resolvedCollectionItem(album, response));
+    } catch (error) {
+      showNotice(`读取专辑失败：${errorText(error)}`);
+    }
+  }, [downloadResolvedItem]);
 
   const downloadGroup = useCallback(
     async (group: MergedGroup) => {
@@ -2928,6 +2940,7 @@ export function Workspace() {
                             previewPendingStatus === "resolving" ? "解析中" : "加载中"
                           }
                           onLoadCollection={(collection) => void loadCollection(collection)}
+                          onDownloadCollection={(album) => void downloadAlbum(album)}
                           loadingCollections={loadingCollections}
                         />
                       </div>

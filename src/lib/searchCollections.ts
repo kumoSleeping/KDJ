@@ -3,6 +3,7 @@ import type {
   CollectionResult,
   IntakeItem,
   MergedGroup,
+  SongSource,
 } from "../types";
 
 /**
@@ -222,6 +223,41 @@ export function isResolvedCollectionItem(item: IntakeItem): boolean {
 export function openedCollectionItem(items: IntakeItem[]): IntakeItem | null {
   const item = items.length === 1 ? items[0] : undefined;
   return item && isResolvedCollectionItem(item) ? item : null;
+}
+
+function payloadId(value: unknown): string {
+  if (typeof value === "number") return value > 0 ? String(value) : "";
+  return typeof value === "string" && value.trim() && value.trim() !== "0" ? value.trim() : "";
+}
+
+/**
+ * The album a song of an online list belongs to, as a collection that can be opened or
+ * downloaded whole — from the platform's own song record the source carries. Only the platforms
+ * that can list an album (NetEase, QQ Music) have one; a song outside any album has none.
+ */
+export function albumOfSource(source: SongSource): CollectionResult | null {
+  const payload = source.payload;
+  const field = (record: unknown, key: string) =>
+    record && typeof record === "object" ? (record as Record<string, unknown>)[key] : undefined;
+  let key = "";
+  if (source.platform === "wyy") {
+    key = payloadId(field(payload.al, "id")) || payloadId(field(payload.album, "id"));
+  } else if (source.platform === "qqm") {
+    key = payloadId(field(payload.album, "mid"))
+      || payloadId(payload.album_mid)
+      || payloadId(payload.albummid)
+      || payloadId(field(payload.album, "id"));
+  }
+  if (!key || !source.album.trim()) return null;
+  return {
+    kind: "album",
+    platform: source.platform,
+    key,
+    title: source.album,
+    subtitle: source.artists.join(" / "),
+    cover: source.cover,
+    count: 0,
+  };
 }
 
 function searchable(text: string): string {
