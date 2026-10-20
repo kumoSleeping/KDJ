@@ -3,7 +3,6 @@ import { PanelStack } from "../common/PanelStack";
 import { useSidePanels } from "../../lib/sidePanels";
 import { useWindowTaken, windowTaken } from "../../lib/windowTaken";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
-import { EditorDock } from "./EditorDock";
 import { useStore } from "zustand";
 import { createTemporaryLibrary, type TemporaryLibrary, type LibraryPaneStoreApi } from "../../stores/temporaryLibraryStore";
 import { useTemporaryFolderDrop } from "../../lib/temporaryFolderDrag";
@@ -49,7 +48,6 @@ import {
 import { getPlayerSessionState, subscribePlayerSession } from "../../lib/playerSession";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
 import { VisualizerDock } from "../composition/VisualizerDock";
-import { LiveVjPanel } from "../composition/LiveVjPanel";
 import { SidePanels } from "../player/SidePanels";
 import { useDrawerOrder } from "../drawer/useDrawerOrder";
 import { releaseDrawerHolds, useHeldDrawer } from "../../lib/drawerHold";
@@ -57,7 +55,6 @@ import { useDrawerApps } from "./drawerApps";
 import { DrawerHost } from "../drawer/Drawer";
 import type { DrawerSpec } from "../drawer/drawerSchema";
 import { VisualizerPopup } from "../player/VisualizerPopup";
-import { useWorkshopStore } from "../../stores/workshopStore";
 import { useAppStore } from "../../stores/appStore";
 import { enqueueMediaDownloads } from "../../lib/mediaActions";
 import { useUpdateStore } from "../../stores/updateStore";
@@ -103,7 +100,6 @@ import {
 } from "../../lib/workspacePanes";
 import {
   readLocalStorage,
-  removeLocalStorage,
   writeLocalStorageNow,
 } from "../../lib/storageWrite";
 import {
@@ -157,7 +153,6 @@ import {
 import { ChromeActions } from "../chrome/ChromeActions";
 import { LibraryWorkRail } from "../chrome/LibraryWorkRail";
 import { SearchWorkRail } from "../chrome/SearchWorkRail";
-import { CompositionWorkshop } from "../composition/CompositionWorkshop";
 import { DuplicateAnalysisPanel } from "../library/DuplicateAnalysisPanel";
 import { isApplyingNav, readPlace, registerWorkspaceNav, useNavStore, type NavPane } from "../../stores/navStore";
 import { ChromeHistory } from "../chrome/ChromeHistory";
@@ -170,7 +165,11 @@ import {
   SearchBar,
 } from "../download/SearchBar";
 import { SearchTipsPanel } from "../download/SearchTipsPanel";
-import { tipsPages, useTipsPage, type TipsPage } from "../../lib/tipsPages";
+import { AI_LIBRARY_EVENT, AI_SEARCH_EVENT, type AiLibraryDetail, type AiSearchDetail } from "../../lib/aiSearch";
+import { beginAiMove, registerSearchText } from "../../lib/aiPlace";
+import { interleaveSearches } from "../../lib/searchInterleave";
+import { useAiStore } from "../../stores/aiStore";
+import { shownTipsPages, useTipsPage, type TipsPage } from "../../lib/tipsPages";
 import { useTipsNudge } from "../../lib/tipsNudge";
 import { FolderTree, NarrowFolderRail } from "../library/FolderTree";
 import { DETAIL_EVENT } from "../library/TrackTable";
@@ -321,9 +320,7 @@ export function Workspace() {
   const lyricsSong = usePlayingLyrics();
   const dockRaised = useSidePanels(state => state.raised);
   /** A closed app is still sliding out of the right column. */
-  const compositionMode = useAppStore(state => state.compositionMode);
   const visualizerTrackOpen = useVisualizerStudioStore(state => state.track !== null);
-  const liveVjOpen = compositionMode === "live-vj";
   const settings = useAppStore((state) => state.settings);
   const searchCapabilities = useAppStore((state) => state.searchCapabilities);
   const listMode = useAppStore((state) => state.listMode);
@@ -337,7 +334,6 @@ export function Workspace() {
   const settingsPanelEpoch = useAppStore((state) => state.settingsPanelEpoch);
   const showQueue = useAppStore((state) => state.showQueue);
   const queuePanelEpoch = useAppStore((state) => state.queuePanelEpoch);
-  const showComposition = useAppStore((state) => state.showComposition);
   const [detailRestoreTarget, setDetailRestoreTarget] = useState<HTMLSpanElement | null>(null);
   const showPreview = useAppStore((state) => state.showPreview);
   const previewPanelEpoch = useAppStore((state) => state.previewPanelEpoch);
@@ -1071,7 +1067,8 @@ export function Workspace() {
       // The list on screen stayed there while this search ran; its answer replaces it as a new
       // list, from its top. Reset its controls here, not while the retained list is still on
       // screen: clearing collapsedItems early would unfold old packages during the request.
-      setItems(response.items);
+      // Several keyword lines are one list, interleaved (searchInterleave.ts).
+      setItems(interleaveSearches(response.items));
       setChosen(new Set());
       setExpandedGroups(new Set());
       setCollapsedItems(new Set());
@@ -1686,7 +1683,10 @@ export function Workspace() {
       onQueryChange={setQuery}
       batch={batch}
       busy={busy}
-      onSubmit={() => void submit()}
+      onSubmit={() => {
+        useAiStore.getState().noteUserChange(`用户自己搜索了“${query.trim()}”`);
+        void submit();
+      }}
       tipsOpen={showSearchTips}
       onTips={toggleSearchTipsPanel}
       burstNonce={searchBurstNonce}
@@ -1697,11 +1697,7 @@ export function Workspace() {
   );
   // 歌词和任务列表是右栏仅有的常驻内容；临时旁路关闭后它们原样回来。
   const activityAside = !realOverlayAside && (downloadsOpen || lyricsSong.visible);
-  // The VJ editors take the whole column; the visualizer configuration is one of its apps.
-  const editorAsideOpen = showComposition;
-  const hasAsideContent = showSettings || editorAsideOpen || visualizerTrackOpen || realOverlayAside || activityAside;
-  // On a wide window only the editors take a column; everything else comes down as a drawer.
-  const showAside = layout === "wide" && editorAsideOpen;
+  const hasAsideContent = showSettings || visualizerTrackOpen || realOverlayAside || activityAside;
 
   const closeAside = useCallback(() => {
     if (showSearchTips) {
@@ -1721,11 +1717,6 @@ export function Workspace() {
   }, [showSearchTips, layout, realOverlayAside, showSettings]);
 
   const closeAsideForUser = useCallback(() => {
-    if (useAppStore.getState().showComposition) {
-      void useWorkshopStore.getState().flush().then(() => useAppStore.setState({ showComposition: false }))
-        .catch(error => useWorkshopStore.setState({ error: String(error) }));
-      return;
-    }
     // Phone drawer: the visualizer configuration is what it shows while open.
     if (useVisualizerStudioStore.getState().track) {
       useVisualizerStudioStore.getState().requestClose();
@@ -1747,8 +1738,6 @@ export function Workspace() {
     if (layout === "narrow") closeAside();
   }, [activateWorkspacePane, layout, closeAside]);
 
-  const [workshopToolbarTarget, setWorkshopToolbarTarget] = useState<HTMLDivElement | null>(null);
-  const [workshopBackTarget, setWorkshopBackTarget] = useState<HTMLSpanElement | null>(null);
   const asideTools = previewAside ? (
     <span className="kd-detail-restore-tools" ref={setDetailRestoreTarget} />
   ) : null;
@@ -1764,23 +1753,6 @@ export function Workspace() {
         : previewAside
           ? "预览"
           : "";
-  const selectVideoMode = (mode: "workshop" | "live-vj") => {
-    void (async () => {
-      const editor = useVisualizerStudioStore.getState();
-      if (editor.track) {
-        if (editor.beforeClose) { if (!await editor.beforeClose()) return; }
-        else editor.close();
-      }
-      await useWorkshopStore.getState().flush();
-      const app = useAppStore.getState();
-      if (app.showComposition && app.compositionMode === mode) {
-        useAppStore.setState({ showComposition: false });
-        return;
-      }
-      if (mode === "live-vj") app.openLiveVjPanel();
-      else app.openCompositionPanel();
-    })().catch(error => useWorkshopStore.setState({error: String(error)}));
-  };
   const asidePanel = showSearchTips ? (
     <SearchTipsPanel stacked={layout !== "wide"} />
   ) : showFolders ? (
@@ -1817,7 +1789,7 @@ export function Workspace() {
     tools: asideTools,
     // 使用提示按功能分页：页签在标题上，选哪一类就教哪一类。
     ...(showSearchTips ? {
-      pages: tipsPages,
+      pages: shownTipsPages(),
       usePage: useTipsPageInView,
       onPage: (id: string) => useTipsPage.getState().setPage(id as TipsPage),
     } : {}),
@@ -1858,17 +1830,6 @@ export function Workspace() {
     <div className="kd-activity-panel-host" hidden={!activityAside}><SidePanels lyricsSong={lyricsSong} /></div>
     {asidePanel}
   </div>;
-  const closeEditorDock = closeAsideForUser;
-  const editorDock = showComposition ? <EditorDock
-    title={liveVjOpen ? "实时 VJ" : "VJ 剪辑"}
-    onClose={closeEditorDock}
-    leading={<span className="vj-workshop-back-slot" ref={setWorkshopBackTarget} />}
-    tools={<div className="vj-toolbar-slot" ref={setWorkshopToolbarTarget} />}>
-    <div className="kd-video-workspace">
-      {liveVjOpen ? <LiveVjPanel toolbarTarget={workshopToolbarTarget} backTarget={workshopBackTarget} />
-        : <CompositionWorkshop toolbarTarget={workshopToolbarTarget} backTarget={workshopBackTarget} />}
-    </div>
-  </EditorDock> : null;
   // 窄屏下换了标签（曲库 ↔ 搜索）就把抽屉收起来：抽屉里装的内容会跟着变，
   // 留在屏幕上等于突然换了一块东西，比自己收起来更让人迷惑
   useEffect(() => {
@@ -1942,7 +1903,6 @@ export function Workspace() {
   /* ------------------------------------------------------------ 导航栏 / 旁路栏拖宽 */
   const shellRef = useRef<HTMLDivElement | null>(null);
   const splitRef = useRef<HTMLDivElement | null>(null);
-  const localAsideRef = useRef<HTMLElement | null>(null);
 
   // 打开时恢复上次拖的宽度。存 px：百分比在窗口缩放时会把"我调好的那栏"再挤变形
   // 写在 section-body：顶栏左区与侧栏共用 --kd-left。
@@ -1978,9 +1938,8 @@ export function Workspace() {
     if (!shell || !el) return;
     event.preventDefault();
     const startX = event.clientX;
-    // The right handle is the editor column's edge, or the drawer's when no editor is open.
-    const target = side === "left" ? (el.firstElementChild as HTMLElement)
-      : useAppStore.getState().showComposition ? localAsideRef.current : drawerHostRef.current;
+    // The right handle is the drawer's edge.
+    const target = side === "left" ? (el.firstElementChild as HTMLElement) : drawerHostRef.current;
     if (!target) return;
     const startWidth = target.getBoundingClientRect().width;
     const rightHostWidth = Math.max(0, (target.parentElement?.getBoundingClientRect().width ?? 0) - 1);
@@ -2055,15 +2014,10 @@ export function Workspace() {
     window.addEventListener("blur", onUp);
   };
 
-  const resetColumn = (side: "left" | "right") => {
-    shellRef.current?.style.removeProperty(`--kd-${side}`);
-    if (side === "left") {
-      const state = readSidebarState(sidebarShape, compactTreeExpanded);
-      if (state.width !== null) writeSidebarState(sidebarShape, { ...state, width: null });
-      return;
-    }
-    removeLocalStorage("kd-split-right");
-    window.dispatchEvent(new Event("kd:pane-resize-end"));
+  const resetSidebarWidth = () => {
+    shellRef.current?.style.removeProperty("--kd-left");
+    const state = readSidebarState(sidebarShape, compactTreeExpanded);
+    if (state.width !== null) writeSidebarState(sidebarShape, { ...state, width: null });
   };
 
   /**
@@ -2080,6 +2034,56 @@ export function Workspace() {
     platforms: Platform[];
   } | null>(null);
   const [searchBurstNonce, setSearchBurstNonce] = useState(0);
+  // The AI searched (docs/ai-dock.md): the pane runs the same search, as the listener would.
+  const [aiSearchPending, setAiSearchPending] = useState<AiSearchDetail | null>(null);
+  // The AI's move in the window (aiPlace.ts): from its search until that search has answered.
+  const aiSearchMoveRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    const onAiSearch = (event: Event) => {
+      const detail = (event as CustomEvent<AiSearchDetail>).detail;
+      const q = detail?.query?.trim();
+      if (!q) return;
+      aiSearchMoveRef.current?.();
+      aiSearchMoveRef.current = beginAiMove(q);
+      setQuery(q);
+      if (detail.kind && searchKinds.includes(detail.kind)) setSearchKind(detail.kind);
+      setAiSearchPending({ ...detail, query: q });
+    };
+    window.addEventListener(AI_SEARCH_EVENT, onAiSearch);
+    return () => window.removeEventListener(AI_SEARCH_EVENT, onAiSearch);
+  }, [searchKinds]);
+  useEffect(() => {
+    if (!aiSearchPending || query !== aiSearchPending.query) return;
+    const kind = aiSearchPending.kind && searchKinds.includes(aiSearchPending.kind) ? aiSearchPending.kind : null;
+    if (kind && searchKind !== kind) return;
+    setAiSearchPending(null);
+    setSearchBurstNonce((n) => n + 1);
+    // Sources named by the AI apply to a song search, the only kind submit takes them for.
+    const plats = aiSearchPending.platforms?.length && (kind ?? "song") === "song" ? aiSearchPending.platforms : undefined;
+    const moved = aiSearchMoveRef.current;
+    aiSearchMoveRef.current = null;
+    void submit(plats).finally(() => moved?.());
+  }, [aiSearchPending, query, searchKind, searchKinds, submit]);
+  // The AI looked something up in the library: the library shows the same lookup, as if the
+  // listener had typed it in the rail. What the listener does meanwhile is told to the AI by
+  // aiPlace.ts, which also puts the window back when the task is done.
+  useEffect(() => {
+    const onAiLibrary = (event: Event) => {
+      const detail = (event as CustomEvent<AiLibraryDetail>).detail;
+      if (!detail) return;
+      const moved = beginAiMove();
+      const { folder, ...lookup } = detail;
+      activateWorkspacePane("local");
+      useLibraryStore.getState().setFilter(folder ? { ...lookup, folder } : lookup);
+      moved();
+    };
+    window.addEventListener(AI_LIBRARY_EVENT, onAiLibrary);
+    return () => window.removeEventListener(AI_LIBRARY_EVENT, onAiLibrary);
+  }, [activateWorkspacePane]);
+  const queryNowRef = useRef(query);
+  queryNowRef.current = query;
+  useEffect(() => registerSearchText({ read: () => queryNowRef.current, write: setQuery }), []);
+
   useEffect(() => {
     const onExplore = (event: Event) => {
       const detail = (event as CustomEvent<ExploreSearchDetail>).detail;
@@ -2530,7 +2534,6 @@ export function Workspace() {
     showQueue,
     showPreview,
     showFolders,
-    showComposition,
     listBusy,
     hasResults,
     temporaryLibrary,
@@ -2563,8 +2566,6 @@ export function Workspace() {
               onTasks={() => {
                 useSidePanels.getState().setDownloads(!downloadsOpen);
               }}
-              compositionOpen={showComposition}
-              onComposition={selectVideoMode}
               settingsOpen={showSettings}
               onSettings={openSettingsFromChrome}
               onOpenUpdate={openUpdateFromChrome}
@@ -2580,7 +2581,6 @@ export function Workspace() {
           data-layout={layout}
           data-tree={showTree ? "open" : undefined}
           data-compact-tree={compactTreeExpanded ? "open" : "closed"}
-          data-aside={showAside ? "open" : "closed"}
           ref={splitRef}
         >
           {/* 左侧文件夹树始终在一条线上常驻；窄屏只把右侧详情等旁路内容收进抽屉。 */}
@@ -2607,12 +2607,12 @@ export function Workspace() {
               aria-orientation="vertical"
               aria-label="调整文件夹栏宽度"
               onPointerDown={startColumnDrag("left")}
-              onDoubleClick={() => resetColumn("left")}
+              onDoubleClick={resetSidebarWidth}
             />
           )}
 
           <div className="kd-main-slot">
-            <div className="kd-table-wrap" data-aside={showAside ? "open" : "closed"} data-drawer-head={layout === "wide" || undefined}>
+            <div className="kd-table-wrap" data-drawer-head={layout === "wide" || undefined}>
             {/* The search spans this row; drawer apps open from the chrome and player bar. */}
             {layout === "wide" && <DrawerHost spec={drawerSpec}
               hostRef={drawerHostRef} onResizeStart={startColumnDrag("right")} />}
@@ -2633,7 +2633,7 @@ export function Workspace() {
               </PanelStack>
             ) : null}
             </div>
-            <div className="kd-local-list-slot" data-aside={showAside ? "open" : "closed"}>
+            <div className="kd-local-list-slot">
               {temporaryFolderDrop.offered && <div className="kd-temporary-folder-drop"
                 data-kd-temporary-folder-drop="true" data-hovered={temporaryFolderDrop.hovered || undefined}>
                 临时打开文件夹
@@ -2898,22 +2898,6 @@ export function Workspace() {
               </div>
 
             </div>
-              {layout === "wide" && (
-                <>
-                  <div
-                    className="kd-split-handle"
-                    role="separator"
-                    aria-orientation="vertical"
-                    aria-label="调整右侧栏宽度"
-                    hidden={!showAside}
-                    onPointerDown={startColumnDrag("right")}
-                    onDoubleClick={() => resetColumn("right")}
-                  />
-                  <aside className="kd-split-aside" ref={localAsideRef} hidden={!showAside}>
-                    {editorDock}
-                  </aside>
-                </>
-              )}
 
           </div>
           </div>
@@ -2924,16 +2908,15 @@ export function Workspace() {
         {layout === "narrow" && (
           <Sheet
             keepMounted
-            hideHeader={editorAsideOpen || visualizerTrackOpen || activityAside}
+            hideHeader={visualizerTrackOpen || activityAside}
             showClose={false}
-            open={editorAsideOpen || visualizerTrackOpen || (sheet === "aside" && hasAsideContent)}
-            title={editorAsideOpen ? liveVjOpen ? "实时 VJ" : "VJ 剪辑" : visualizerTrackOpen ? "可视化配置" : asideLabel || "面板"}
-            tools={editorAsideOpen || visualizerTrackOpen ? undefined : asideTools}
+            open={visualizerTrackOpen || (sheet === "aside" && hasAsideContent)}
+            title={visualizerTrackOpen ? "可视化配置" : asideLabel || "面板"}
+            tools={visualizerTrackOpen ? undefined : asideTools}
             onClose={closeAsideForUser}
           >
-            <div className="kd-aside-restorable" hidden={editorAsideOpen || visualizerTrackOpen}>{asideBody}</div>
-            {editorDock}
-            {visualizerTrackOpen && !editorAsideOpen && <VisualizerDock />}
+            <div className="kd-aside-restorable" hidden={visualizerTrackOpen}>{asideBody}</div>
+            {visualizerTrackOpen && <VisualizerDock />}
           </Sheet>
         )}
         </div>

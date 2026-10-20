@@ -5,11 +5,14 @@
 //! 播放器也要靠 Range 请求才能拖进度条。
 
 pub mod activity_log;
+pub mod ai;
 mod account_upkeep;
 mod browser_login;
 pub mod diagnostics;
 pub mod aggregate;
 pub mod cache_overview;
+pub mod cli_api;
+pub mod cli_media;
 pub mod compositions;
 pub mod downloads;
 pub mod error;
@@ -19,7 +22,6 @@ pub mod library_watch;
 pub mod lyrics;
 pub mod protected_media;
 pub mod routes;
-mod live_vj;
 pub mod rhythm;
 pub mod state;
 pub mod preview_policy;
@@ -147,10 +149,10 @@ fn media_path_allowed(path: &str) -> bool {
         segments.as_slice(),
         ["api", "video", "youtube", "hls", ticket] if !ticket.is_empty()
     ) || matches!(
+        // A project's live preview: only the files that project names (kdjv.rs `source`).
         segments.as_slice(),
-        ["api", "workshop", "media", ticket, "audio.wav"]
-        | ["api", "workshop", "media", ticket, "video", _, _] if !ticket.is_empty()
-    ) || matches!(segments.as_slice(), ["api","workshop",pid,"sources",sid,"frame"] if !pid.is_empty() && !sid.is_empty())
+        ["api", "kdjv", "source", id, n] if !id.is_empty() && !n.is_empty()
+    )
 }
 
 fn request_authorized(request: &Request<Body>, auth: &AuthState) -> bool {
@@ -410,15 +412,12 @@ pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) ->
         control: control.clone(),
         media: media.clone(),
     };
-    let compositions = compositions::CompositionManager::open(state.clone())?;
-    let workshop = compositions::workshop::Workshop::open(state.clone(), &compositions)?;
+    let workshop = compositions::workshop::Workshop::new(state.clone())?;
     let router = routes::router(ctx)
         .merge(compositions::workshop::routes::router(workshop))
         .merge(compositions::audio_visualizer::studio::router())
         .merge(themes::router())
         .merge(diagnostics::router())
-        .merge(live_vj::router())
-        .merge(compositions::routes::router(compositions))
         .route("/ws", axum::routing::get(ws::handler))
         .layer(Extension(control))
         .layer(Extension(media))
@@ -536,6 +535,14 @@ mod auth_tests {
                 "/api/library/audio/1?kdj_media_token=media-token",
                 None
             ),
+            &auth
+        ));
+        assert!(request_authorized(
+            &request(Method::GET, "/api/kdjv/source/7/0?kdj_media_token=media-token", None),
+            &auth
+        ));
+        assert!(!request_authorized(
+            &request(Method::POST, "/api/kdjv/preview?kdj_media_token=media-token", None),
             &auth
         ));
         assert!(request_authorized(

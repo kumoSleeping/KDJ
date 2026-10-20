@@ -10,14 +10,14 @@ test("task bubbles: one bubble per id, a capped stack, and one bubble for a run 
   const dom = new JSDOM("<!doctype html><div id='root'></div>");
   Object.assign(globalThis, { window: dom.window, document: dom.window.document });
   const { useTaskBubbles, showTask, updateTask, dismissTask, taskIsUp } = await import("../src/components/tasks/taskBubbleStore");
-  const { TASK_STAY_MS, TASK_VISIBLE_LIMIT, taskStay } = await import("../src/components/tasks/taskBubbleSchema");
+  const { taskDefaultStay, TASK_VISIBLE_LIMIT, taskStay } = await import("../src/components/tasks/taskBubbleSchema");
   const { createBatchReporter, TASK_BATCH_SETTLE_MS } = await import("../src/components/tasks/taskBatch");
   const { noticeTone } = await import("../src/stores/toastStore");
   const up = () => useTaskBubbles.getState().entries.filter(entry => !entry.leaving).map(entry => entry.spec.id);
   const spec = (id: string) => useTaskBubbles.getState().entries.find(entry => entry.spec.id === id && !entry.leaving)?.spec;
   const clear = () => useTaskBubbles.setState({ entries: [] });
 
-  assert.equal(taskStay({}), TASK_STAY_MS.info);
+  assert.equal(taskStay({}), taskDefaultStay("info"));
   assert.ok(taskStay({ tone: "error" }) > taskStay({ tone: "info" }), "an error stays readable for longer");
   assert.equal(taskStay({ stay: 0, tone: "error" }), 0);
   assert.equal(noticeTone("播放失败：x"), "error");
@@ -344,25 +344,24 @@ test("the host: a stack at the bottom and one at the top, and a base bubble that
   assert.equal(drawn("r1")?.lift, "128px", "nothing above it moved");
   assert.equal(rootStyle("--kd-info-lift"), "144px");
 
-  // --- The top place: a stack of its own, a mirror of the bottom one, which pushes the drawer.
+  // --- The top place: a stack of its own, a mirror of the bottom one, lying over the drawer.
   await act(async () => { note("t1", { placement: "top" }); });
   assert.equal(drawn("t1")?.place, "top");
   assert.equal(drawn("t1")?.lift, "0px");
   const topHost = page.querySelector<HTMLElement>('.kd-task-host[data-place="top"]')!;
   assert.equal(topHost.style.getPropertyValue("--kd-task-ceiling"), "87px", "it hangs under the search row");
   assert.equal(topHost.style.getPropertyValue("--kd-task-ceiling-right"), "300px", "and ends where the list's column ends");
-  assert.equal(rootStyle("--kd-info-drop"), "58px", "the drawer is pushed down by the gap, the bubble and the gap after it");
-  assert.equal(rootStyle("--kd-info-drop-clock"), "", "pushed on the arriving clock, the stylesheet's own");
+  assert.equal(rootStyle("--kd-info-drop"), "", "the drawer stays where it is: the bubble lies over it");
   assert.equal(drawn("r1")?.lift, "128px", "the bottom stack is not touched");
   assert.equal(drawn("song")?.lift, "0px");
   assert.equal(rootStyle("--kd-info-lift"), "144px");
   await act(async () => { note("t2", { kind: "report", placement: "top" }); });
   assert.equal(drawn("t2")?.lift, "0px", "the newest is nearest the top edge");
   assert.equal(drawn("t1")?.lift, "68px", "the older one is pushed down");
-  assert.equal(rootStyle("--kd-info-drop"), "126px");
-  // A top bubble that is kept up pushes the drawer too, and holds nothing up at the bottom.
+  assert.equal(rootStyle("--kd-info-drop"), "");
+  // A top bubble that is kept up holds nothing up at the bottom either.
   await act(async () => { note("t2", { kind: "report", placement: "top", stay: 0 }); });
-  assert.equal(rootStyle("--kd-info-drop"), "126px");
+  assert.equal(rootStyle("--kd-info-drop"), "");
   assert.equal(rootStyle("--kd-info-lift"), "144px");
   // The hold is a stack's own: the focus in the top stack stops its rings only.
   await act(async () => { drawn("t1")!.bubble.querySelector("button")!.focus(); });
@@ -371,18 +370,15 @@ test("the host: a stack at the bottom and one at the top, and a base bubble that
   assert.equal(drawn("r1")?.held, false, "the bottom stack keeps counting");
   await act(async () => { drawn("t1")!.bubble.querySelector("button")!.blur(); });
   assert.equal(drawn("t1")?.held, false);
-  // Leaving: the place is given up at once, so the drawer starts back as the bubble starts up.
+  // Leaving: the place is given up at once.
   await act(async () => { dismissTask("t2"); });
   assert.equal(drawn("t2", true)?.lift, "0px");
   assert.equal(drawn("t1")?.lift, "0px");
-  assert.equal(rootStyle("--kd-info-drop"), "58px");
-  assert.equal(rootStyle("--kd-info-drop-clock"), "var(--kd-motion-out) var(--kd-ease-in)", "released on the leaving clock");
+  assert.equal(rootStyle("--kd-info-drop"), "");
   await act(async () => { note("t3", { placement: "top" }); });
-  assert.equal(rootStyle("--kd-info-drop"), "106px");
-  assert.equal(rootStyle("--kd-info-drop-clock"), "", "and pushed again on the arriving one");
+  assert.equal(rootStyle("--kd-info-drop"), "");
   await act(async () => { dismissTask("t1"); dismissTask("t3"); });
-  assert.equal(rootStyle("--kd-info-drop"), "", "nothing is left at the top: the drawer is where it was");
-  assert.equal(rootStyle("--kd-info-drop-clock"), "var(--kd-motion-out) var(--kd-ease-in)");
+  assert.equal(rootStyle("--kd-info-drop"), "", "the drawer was never moved");
   await left();
   assert.equal(page.querySelector('.kd-task-host[data-place="top"]'), null);
   assert.ok(page.querySelector('.kd-task-host[data-place="bottom"]'));
@@ -411,7 +407,7 @@ test("the host: a stack at the bottom and one at the top, and a base bubble that
   assert.equal(drawn("m")?.place, "top");
   assert.equal(drawn("m", true)?.place, "bottom", "the old one rolls down where it was");
   assert.deepEqual(reasons, [], "its owner is not told that it was dismissed");
-  assert.equal(rootStyle("--kd-info-drop"), "58px");
+  assert.equal(rootStyle("--kd-info-drop"), "", "it lies over the drawer, which stays put");
   await left();
   assert.equal(page.querySelectorAll(".kd-task").length, 1);
   assert.equal(drawn("m")?.lift, "0px", "the one that arrived keeps its books when its twin has gone");

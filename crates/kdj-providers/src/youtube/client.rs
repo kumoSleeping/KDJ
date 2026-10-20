@@ -23,6 +23,9 @@ const DEFAULT_INNERTUBE_KEY: &str = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30";
 const IOS_VERSION: &str = "20.11.6";
 const IOS_USER_AGENT: &str =
     "com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)";
+const ANDROID_VERSION: &str = "20.10.38";
+const ANDROID_USER_AGENT: &str =
+    "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip";
 pub const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const VIDEO_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 
@@ -187,6 +190,24 @@ impl YoutubeClient {
         })
     }
 
+    fn android_context() -> Value {
+        json!({
+            "context": {
+                "client": {
+                    "clientName": "ANDROID",
+                    "clientVersion": ANDROID_VERSION,
+                    "androidSdkVersion": 30,
+                    "osName": "Android",
+                    "osVersion": "11",
+                    "hl": "en",
+                    "gl": "US"
+                }
+            },
+            "contentCheckOk": true,
+            "racyCheckOk": true
+        })
+    }
+
     pub async fn post_web(&self, endpoint: &str, body: &Value) -> Result<Value> {
         self.post_web_with_session(endpoint, body, self.auth.snapshot().as_ref())
             .await
@@ -313,6 +334,45 @@ impl YoutubeClient {
         Ok(self.remember_video(video_id, info))
     }
 
+    /// Streams for a download. Since 2026-07 the Safari watch page carries no HLS manifest, and
+    /// the adaptive URLs of music videos answer 403 to every client that has no GVS PO token.
+    /// ANDROID still returns plain URLs both for its adaptive formats (which download for
+    /// ordinary videos) and for the progressive 360p MP4, itag 18 (which downloads for music
+    /// videos too), so it is asked first; iOS/WEB remain the fallback. Not cached: a download
+    /// asks once, and the shared cache keeps the iOS client's URLs.
+    pub async fn download_info(&self, video_id: &str) -> Result<VideoInfo> {
+        let android = match self.player_android(video_id).await {
+            Ok(payload) => self.parse_player_with_mode(&payload, false).await,
+            Err(error) => Err(error),
+        };
+        match android {
+            Ok(info) if info.formats.iter().any(|format| !format.url.is_empty()) => Ok(info),
+            Ok(_) => self.video_info(video_id).await,
+            Err(error) => {
+                tracing::debug!("YouTube ANDROID player 不可用，改用 iOS/WEB：{error:#}");
+                self.video_info(video_id).await
+            }
+        }
+    }
+
+    async fn player_android(&self, video_id: &str) -> Result<Value> {
+        let mut body = Self::android_context();
+        body.as_object_mut()
+            .expect("ANDROID context is an object")
+            .insert("videoId".into(), Value::String(video_id.to_string()));
+        let response = self
+            .http
+            .post(format!("{BASE}/player?key={}&prettyPrint=false", self.key))
+            .header(reqwest::header::USER_AGENT, ANDROID_USER_AGENT)
+            .header("X-Youtube-Client-Name", "3")
+            .header("X-Youtube-Client-Version", ANDROID_VERSION)
+            .json(&body)
+            .send()
+            .await
+            .context("YouTube 请求失败：player/android")?;
+        read_json(response, "player/android").await
+    }
+
     fn video_request_gate(&self, video_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut requests = self
             .video_requests
@@ -388,15 +448,10 @@ impl YoutubeClient {
         // Since 2026-07 YouTube returns muxed Safari HLS only to a trusted browser session. The
         // authenticated watch page is the source of truth; a hand-built Player request can be
         // internally valid yet still return UNPLAYABLE for the same account.
-        let html = self
-            .protected_page_html(
-                &format!("https://www.youtube.com/watch?v={video_id}"),
-                user_agent,
-            )
-            .await?;
-        let Some(manifest) = extract_json_string_value(&html, "hlsManifestUrl") else {
-            return Err(missing_hls_reason(&html));
-        };
+        let page = format!("https://www.youtube.com/watch?v={video_id}");
+        let html = self.protected_page_html(&page, user_agent).await?;
+        let manifest = extract_json_string_value(&html, "hlsManifestUrl")
+            .ok_or_else(|| missing_hls_reason(&html))?;
         let player_url = extract_player_url(&html).context("YouTube 页面没有播放器脚本地址")?;
         Ok(ProtectedHlsContext {
             manifest: trusted_hls_url(&manifest)?,

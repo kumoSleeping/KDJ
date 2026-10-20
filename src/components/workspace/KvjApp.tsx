@@ -1,18 +1,15 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { LoaderCircle, RefreshCw } from "lucide-react";
 import { connectEvents, selectConnected, useAppStore } from "../../stores/appStore";
 import type { KvjTab } from "../../stores/kvjStore";
-import { useWorkshopDrop } from "../../lib/workshopDrop";
 import { api } from "../../lib/api";
 import { TaskBubbleHost } from "../tasks/TaskBubbleHost";
 import { AppChrome } from "../chrome/AppChrome";
 import { ChromeThemeButton } from "../chrome/ChromeActions";
-import { CompositionWorkshop } from "../composition/CompositionWorkshop";
-import { LiveVjPanel } from "../composition/LiveVjPanel";
 import "./KvjApp.css";
 
 const SettingsPanel = lazy(() => import("../settings/SettingsPanel").then(module => ({ default: module.SettingsPanel })));
-const labels: Record<KvjTab, string> = { workshop: "VJ 剪辑", visualizer: "歌曲可视化", "live-vj": "VJ 投放", preferences: "偏好设置" };
+const labels: Record<KvjTab, string> = { visualizer: "歌曲可视化", preferences: "偏好设置" };
 let bootingWindow: Promise<void> | null = null;
 function bootEditor(): Promise<void> {
   if (bootingWindow) return bootingWindow;
@@ -25,14 +22,9 @@ function bootEditor(): Promise<void> {
 }
 
 function EditorPanel({ tab }: { tab: KvjTab }) {
-  const [toolbar, setToolbar] = useState<HTMLDivElement | null>(null);
-  const [back, setBack] = useState<HTMLSpanElement | null>(null);
   return <section className="kd-kvj-panel" aria-label={labels[tab]}>
-    {tab === "live-vj" && <header className="kd-kvj-tools"><span ref={setBack} /><div ref={setToolbar} /></header>}
     <div className="kd-kvj-content">
-      {tab === "workshop" ? <CompositionWorkshop workspace />
-        : tab === "live-vj" ? <LiveVjPanel toolbarTarget={toolbar} backTarget={back} />
-        : tab === "preferences" ? <Suspense fallback={null}><SettingsPanel preferences /></Suspense>
+      {tab === "preferences" ? <Suspense fallback={null}><SettingsPanel preferences /></Suspense>
         // The visualizer window stays hidden and only runs the export queue (kvjWindow):
         // the configuration itself is an app of the main window's right column.
         : null}
@@ -46,7 +38,6 @@ export function KvjApp({ tab }: { tab: KvjTab }) {
   const error = useAppStore(state => state.bootError);
   const ready = connected && !booting;
   const platform = window.kdj?.platform;
-  useWorkshopDrop(ready && (tab === "workshop" || tab === "live-vj"));
   useEffect(() => {
     const stop = connectEvents();
     void bootEditor();

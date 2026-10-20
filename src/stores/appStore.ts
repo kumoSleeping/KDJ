@@ -1,13 +1,13 @@
 /**
  * 应用级状态：当前板块、health、设置、账号。
- * WS 事件也在这里统一分发给三个 store（见 connectEvents），
+ * WS 事件也在这里统一分发给各个 store（见 connectEvents），
  * 组件不要自己 events.subscribe——那样每个组件都会各自处理一遍同一条事件。
  */
 
 import { create } from "zustand";
 import { useTaskPanelStore } from "./taskPanelStore";
-import { usesKvjWindow, isEditorWindow } from "../lib/windowRole";
-import { showKvj, requestSettingsSave } from "../lib/kvjWindow";
+import { isEditorWindow } from "../lib/windowRole";
+import { requestSettingsSave } from "../lib/kvjWindow";
 import {
   THEME_CHANGE_EVENT,
   activeThemePack,
@@ -18,12 +18,11 @@ import { api, events } from "../lib/api";
 import { acknowledgeSettingsRollback, enqueueSettingsWrite } from "../lib/settingsWriteBarrier";
 import { isPlatformEnabled, normalizeEnabledPlatforms } from "../lib/enabledPlatforms";
 import { readWorkspaceSession } from "../lib/workspaceSession";
-import { readLocalStorage, writeLocalStorageNow } from "../lib/storageWrite";
+import { writeLocalStorageNow } from "../lib/storageWrite";
 import type { Account, Health, SearchCapabilities, Settings, WsEvent } from "../types";
 import { useDownloadStore } from "./downloadStore";
-import { useWorkshopStore } from "./workshopStore";
-import { useCompositionStore } from "./compositionStore";
 import { useLibraryStore } from "./libraryStore";
+import { useAiStore } from "./aiStore";
 import { useStreamBrowseStore } from "./streamBrowseStore";
 import { useSidebarVisibilityStore } from "./sidebarVisibilityStore";
 
@@ -123,10 +122,6 @@ export interface AppStore {
   queuePanelEpoch: number;
   /** 手动固定后，被动选歌/切换中间列表不能顶掉下载队列。 */
   queuePinned: boolean;
-  showComposition: boolean;
-  compositionMode: "workshop" | "live-vj";
-  compositionPanelEpoch: number;
-  compositionPinned: boolean;
   /** 右栏/抽屉显示搜索结果预览（音频试听或视频预览），与下载队列互斥。 */
   showPreview: boolean;
   previewPanelEpoch: number;
@@ -173,10 +168,6 @@ export interface AppStore {
   toggleQueuePanel(): void;
   openQueuePanel(): void;
   setQueuePinned(value: boolean): void;
-  toggleCompositionPanel(): void;
-  openCompositionPanel(): void;
-  openLiveVjPanel(): void;
-  setCompositionPinned(value: boolean): void;
   /** 打开预览旁路（点搜索结果音频/视频时走这条，不跟下载队列挤一栏）。 */
   openPreviewPanel(): void;
   toggleFoldersPanel(): void;
@@ -194,7 +185,6 @@ export interface AppStore {
   currentOverlay():
     | "settings"
     | "queue"
-    | "composition"
     | "preview"
     | "folders"
     | "duplicates"
@@ -225,7 +215,7 @@ function clearOverlays() {
 
 /** 被动导航尊重手动固定的下载栏；显式打开其它旁路仍走 clearOverlays。 */
 function clearPassiveOverlays(
-  state: Pick<AppStore, "showSettings" | "settingsPinned" | "showQueue" | "queuePinned" | "showComposition" | "compositionPinned">,
+  state: Pick<AppStore, "showSettings" | "settingsPinned" | "showQueue" | "queuePinned">,
 ) {
   if (state.showSettings && state.settingsPinned) {
     return { ...clearOverlays(), showSettings: true, settingsPinned: true } as const;
@@ -233,37 +223,12 @@ function clearPassiveOverlays(
   if (state.showQueue && state.queuePinned) {
     return { ...clearOverlays(), showQueue: true, queuePinned: true } as const;
   }
-  if (state.showComposition && state.compositionPinned) {
-    return { ...clearOverlays(), showComposition: true, compositionPinned: true } as const;
-  }
   return clearOverlays();
 }
 
-// 右侧三种可固定面板互斥。只保存当前仍打开且固定的面板；取消固定、关闭或
-// 显式切走后清空，重启时不把已经取消的固定状态偷偷恢复回来。
-const PINNED_OVERLAY_KEY = "kd-pinned-overlay-v1";
-type PinnedOverlay = "settings" | "queue" | "workshop" | "live-vj" | null;
-function readPinnedOverlay(): PinnedOverlay {
-  const value = readLocalStorage(PINNED_OVERLAY_KEY);
-  return value === "settings" || value === "queue" || value === "workshop" || value === "live-vj"
-    ? value
-    : null;
-}
-function pinnedOverlay(state: AppStore): PinnedOverlay {
-  if (state.showSettings && state.settingsPinned) return "settings";
-  if (state.showQueue && state.queuePinned) return "queue";
-  if (state.showComposition && state.compositionPinned) return state.compositionMode;
-  return null;
-}
-const restoredPinnedOverlay = readPinnedOverlay();
-
 // Visibility is transient; pinning is a separate, per-panel user preference. Closing or
 // replacing a panel must not overwrite an explicit "unpinned" choice.
-function panelPinPreference(panel: Exclude<PinnedOverlay, null>, fallback: boolean): boolean {
-  const value = readLocalStorage(`kd-panel-pin-${panel}-v1`);
-  return value === "1" ? true : value === "0" ? false : fallback;
-}
-function savePanelPinPreference(panel: Exclude<PinnedOverlay, null>, value: boolean): void {
+function savePanelPinPreference(panel: "settings" | "queue", value: boolean): void {
   writeLocalStorageNow(`kd-panel-pin-${panel}-v1`, value ? "1" : "0");
 }
 
@@ -313,10 +278,6 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   showQueue: false,
   queuePanelEpoch: 0,
   queuePinned: false,
-  showComposition: restoredPinnedOverlay === "workshop" || restoredPinnedOverlay === "live-vj",
-  compositionMode: restoredPinnedOverlay === "live-vj" ? "live-vj" : "workshop",
-  compositionPanelEpoch: 0,
-  compositionPinned: restoredPinnedOverlay === "workshop" || restoredPinnedOverlay === "live-vj",
   showPreview: false,
   previewPanelEpoch: 0,
   showFolders: false,
@@ -357,7 +318,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
 
   focusLibrary() {
     set((state) => (
-      (state.showSettings && state.settingsPinned) || (state.showQueue && state.queuePinned) || (state.showComposition && state.compositionPinned)
+      (state.showSettings && state.settingsPinned) || (state.showQueue && state.queuePinned)
     ) ? {
       listMode: "library",
       ...clearPassiveOverlays(state),
@@ -412,28 +373,6 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     if (!get().showQueue) return;
     savePanelPinPreference("queue", value);
     set({ queuePinned: value });
-  },
-
-  toggleCompositionPanel() {
-    if (usesKvjWindow()) { showKvj({ tab: "workshop" }); return; }
-    const open = !get().showComposition || get().compositionMode !== "workshop";
-    set({ showComposition: open, compositionMode: "workshop", compositionPinned: open && panelPinPreference("workshop", true),
-      compositionPanelEpoch: get().compositionPanelEpoch + (open ? 1 : 0) });
-  },
-  openCompositionPanel() {
-    if (usesKvjWindow()) { showKvj({ tab: "workshop" }); return; }
-    set({ showComposition: true, compositionMode: "workshop", compositionPinned: panelPinPreference("workshop", true),
-      compositionPanelEpoch: get().compositionPanelEpoch + 1 });
-  },
-  openLiveVjPanel() {
-    if (usesKvjWindow()) { showKvj({ tab: "live-vj" }); return; }
-    set({ showComposition: true, compositionMode: "live-vj", compositionPinned: panelPinPreference("live-vj", true),
-      compositionPanelEpoch: get().compositionPanelEpoch + 1 });
-  },
-  setCompositionPinned(value) {
-    if (!get().showComposition) return;
-    savePanelPinPreference(get().compositionMode, value);
-    set({ compositionPinned: value });
   },
 
   openPreviewPanel() {
@@ -498,7 +437,6 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     if (state.showSettings) return "settings";
     if (state.showPreview) return "preview";
     if (state.showQueue) return "queue";
-    if (state.showComposition) return "composition";
     if (state.showDuplicates) return "duplicates";
     if (state.showLyrics) return "lyrics";
     return null;
@@ -694,12 +632,6 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   },
 }));
 
-// 只在固定目标真的改变时同步落盘；启动读取和其它 store 更新不重写旧偏好。
-useAppStore.subscribe((state, previous) => {
-  const next = pinnedOverlay(state);
-  if (next !== pinnedOverlay(previous)) writeLocalStorageNow(PINNED_OVERLAY_KEY, next ?? "");
-});
-
 /** sidecar 是否可用：health 拿到过且没有连接错误。 */
 export function selectConnected(state: AppStore): boolean {
   return state.health !== null && state.bootError === "";
@@ -716,7 +648,6 @@ export async function bootAll(): Promise<void> {
     await Promise.allSettled([
       useAppStore.getState().bootstrap(),
       useDownloadStore.getState().refresh(),
-      useCompositionStore.getState().refresh(),
       useLibraryStore.getState().restoreFoldersForStartup(),
       useLibraryStore.getState().refreshStats(),
       useLibraryStore.getState().refreshUndo(),
@@ -748,8 +679,11 @@ export function connectEvents(): () => void {
   return events.subscribe((event) => {
     useAppStore.getState().handleEvent(event);
     useDownloadStore.getState().handleEvent(event);
-    useCompositionStore.getState().handleEvent(event);
-    useWorkshopStore.getState().handleEvent(event);
     useLibraryStore.getState().handleEvent(event);
+    useAiStore.getState().handleEvent(event);
+    if (event.type === "kdjv.progress") {
+      const payload = event.payload;
+      void import("../lib/kdjvPlay").then(module => module.handleKdjvProgress(payload));
+    }
   });
 }

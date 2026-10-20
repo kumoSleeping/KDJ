@@ -1,21 +1,23 @@
 import { useLayoutEffect, useMemo, useRef } from "react";
-import { Download, Settings, TextQuote } from "lucide-react";
+import { Download, Settings, Sparkles, TextQuote } from "lucide-react";
+import { AI_DRAWER_APP, aiDrawerPages, useAiDrawer, type AiDrawerPage } from "../../lib/aiDrawer";
 import { shownLyricsExtent, useLyricsExtent, useLyricsExtentShape } from "../../lib/lyricsExtent";
 import type { PlayingLyrics } from "../../lib/playingLyrics";
-import { settingsPages, useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
+import { shownSettingsPages, useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
 import { useSidePanels } from "../../lib/sidePanels";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { visualizerExportActive } from "../../lib/visualizerExportQueue";
 import { studioTabs, useStudioTab, type StudioTab } from "../../lib/visualizerStudioTabs";
+import { aiOffered } from "../../stores/aiStore";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelStore";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import { useVisualizerStudioStore, VISUALIZER_DOCK_APP } from "../../stores/visualizerStudioStore";
-import { useWorkshopStore } from "../../stores/workshopStore";
 import { VisualizerDock } from "../composition/VisualizerDock";
 import { SlidePages } from "../drawer/SlidePages";
 import type { DrawerEntry, DrawerSpec } from "../drawer/drawerSchema";
+import { AiDrawer, AiDrawerTools } from "../ai/AiDrawer";
 import { TrackMetaEditorDrawer } from "../library/TrackMetaEditor";
 import { DrawerLyrics } from "../player/SidePanels";
 import { SongColorBackdrop } from "../player/SongColorBackdrop";
@@ -23,14 +25,12 @@ import { requestPlayingLyrics } from "../player/lyricsEntry";
 import { DownloadTaskPages, taskViews } from "../player/TaskPanels";
 import { SettingsPanel } from "../settings/SettingsPanel";
 
-const settingsPageIds = settingsPages.map(page => page.id);
-
 /** The settings sections of one page; a page starts at its top. */
 function DrawerSettings() {
   const page = useSettingsPage(state => state.page);
   const host = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => { host.current?.querySelector(".kd-scroll")?.scrollTo({ top: 0 }); }, [page]);
-  return <SlidePages page={page} order={settingsPageIds}>
+  return <SlidePages page={page} order={shownSettingsPages().map(item => item.id)}>
     <div ref={host} className="kd-drawer-settings"><SettingsPanel preferences page={page} /></div>
   </SlidePages>;
 }
@@ -40,6 +40,7 @@ function DrawerSettings() {
 const useTaskView = () => useTaskPanelStore(state => state.view);
 const useSettingsPageInView = () => useSettingsPage(state => state.page);
 const useStudioTabInView = () => useStudioTab(state => state.tab);
+const useAiPageInView = () => useAiDrawer(state => state.page);
 
 /** Full-screen lyrics give the window back by becoming the longer drawer again. */
 const LYRICS_WINDOW = { label: "退出全屏", leave: () => useLyricsExtent.getState().setExtent("longer") };
@@ -55,6 +56,7 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
   const settings = useAppStore(state => state.showSettings);
   const visualizerTrack = useVisualizerStudioStore(state => state.track);
   const metaId = useTrackMetaEditor(state => state.trackId);
+  const ai = useAiDrawer(state => state.open);
   // How tall the lyrics are is the listener's choice (the menu on the panel, lyricsExtent.ts).
   // Full screen needs a song: the playing song's bubble is the other half of that window.
   const lyricsExtent = shownLyricsExtent(useLyricsExtent(state => state.extent), useLyricsExtentShape());
@@ -85,7 +87,7 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
     id: "settings",
     title: "设置",
     extent: "fit",
-    pages: settingsPages,
+    pages: shownSettingsPages(),
     usePage: useSettingsPageInView,
     onPage: id => useSettingsPage.getState().setPage(id as SettingsPage),
     body: <DrawerSettings />,
@@ -101,6 +103,17 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
     body: <VisualizerDock />,
     close: () => useVisualizerStudioStore.getState().requestClose(),
   });
+  if (ai) apps.push({
+    id: AI_DRAWER_APP,
+    title: "AI",
+    extent: "at-least-half",
+    pages: aiDrawerPages,
+    usePage: useAiPageInView,
+    onPage: id => useAiDrawer.getState().setPage(id as AiDrawerPage),
+    tools: <AiDrawerTools />,
+    body: <AiDrawer />,
+    close: () => useAiDrawer.getState().close(),
+  });
   if (metaId !== null) apps.push({
     id: "meta",
     title: "编辑 Meta",
@@ -111,9 +124,6 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
   return apps;
 }
 
-/** An export that is waiting or being written. */
-const exportRunning = (phase: string) => ["queued", "rendering", "validating", "committing", "importing"].includes(phase);
-
 /**
  * What the drawer's head offers while it is rolled up: the apps that are opened by hand. The
  * ids are those of the apps in `useDrawerApps`. 下载 carries the number of downloads and
@@ -121,9 +131,8 @@ const exportRunning = (phase: string) => ["queued", "rendering", "validating", "
  */
 export function useDrawerEntries(): DrawerEntry[] {
   const downloading = useDownloadStore(state => state.activeCount);
-  const exporting = useWorkshopStore(state => state.jobs.reduce((count, job) => count + (exportRunning(job.phase) ? 1 : 0), 0));
   const rendering = useVisualizerExportStore(state => state.tasks.reduce((count, task) => count + (visualizerExportActive(task) ? 1 : 0), 0));
-  const running = downloading + exporting + rendering;
+  const running = downloading + rendering;
   return useMemo(() => [
     {
       id: "downloads",
@@ -140,6 +149,13 @@ export function useDrawerEntries(): DrawerEntry[] {
       // No lyrics: a small note says so, under this entry; an empty panel does not come out.
       open: () => requestPlayingLyrics(undefined, "top"),
     },
+    ...(aiOffered() ? [{
+      id: AI_DRAWER_APP,
+      label: "AI",
+      title: "AI 任务与历史",
+      icon: <Sparkles size={15} aria-hidden="true" />,
+      open: () => useAiDrawer.getState().show(),
+    }] : []),
     {
       id: "settings",
       label: "设置",

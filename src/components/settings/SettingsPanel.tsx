@@ -53,6 +53,9 @@ import { AccountRow, linkedAccount, linkedPlatforms } from "./AccountRow";
 import { ActivityLogPanel } from "./ActivityLogPanel";
 import { UpdateRow } from "./UpdateRow";
 import { FfmpegPanel } from "./FfmpegPanel";
+import { AiPanel } from "./AiPanel";
+import { TASK_STAY_CHOICES, useTaskStayPref, type TaskStaySeconds } from "../../lib/taskStayPref";
+import { aiOffered } from "../../stores/aiStore";
 
 import "./Preferences.css";
 
@@ -472,12 +475,14 @@ export function SettingsPanel({ preferences = false, page }: {
     scrollToUpdate();
   }, [focusEpoch]);
 
+  const taskStaySeconds = useTaskStayPref((s) => s.seconds);
+  const setTaskStaySeconds = useTaskStayPref((s) => s.setSeconds);
   const ffmpegFocusEpoch = useSettingsFocus((s) => (s.section === "ffmpeg" ? s.epoch : 0));
   const ffmpegSectionRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!ffmpegFocusEpoch) return;
-    // The media tools sit at the end of the system page: open it, then scroll down to them.
-    useSettingsPage.getState().setPage("system");
+    // The media tools have a page of their own: open it at them.
+    useSettingsPage.getState().setPage("ffmpeg");
     useSettingsFocus.getState().clear(); // one request, one scroll: a later opening starts at the top
     let frame = 0;
     const scrollToFfmpeg = () => {
@@ -535,6 +540,13 @@ export function SettingsPanel({ preferences = false, page }: {
                 ]}
                 title="歌曲列表统一显示 Camelot 数字制或传统音名；不会改写曲目数据。"
                 onChange={(next) => void saveSettings({ key_notation: next }).catch(() => undefined)}
+              />
+              <CycleToggle<TaskStaySeconds>
+                label="提示停留"
+                value={taskStaySeconds}
+                options={TASK_STAY_CHOICES.map((value) => ({ id: value, text: `${value} 秒` }))}
+                title="顶部和底部的提示气泡停留多久；下载与出错的提示停两倍长，正在播放、由 AI 定时的提示按它们自己的时长。"
+                onChange={setTaskStaySeconds}
               />
               <CycleToggle<TimeDisplayMode>
                 label="计时方式"
@@ -785,8 +797,9 @@ export function SettingsPanel({ preferences = false, page }: {
 
         {on("system") && <ActivityLogPanel />}
 
-        {on("system") && ["darwin", "win32", "linux"].includes(getBridge().platform)
+        {on("ffmpeg") && ["darwin", "win32", "linux"].includes(getBridge().platform)
           ? <div ref={ffmpegSectionRef} id="kd-settings-ffmpeg"><FfmpegPanel /></div> : null}
+        {on("ai") && aiOffered() ? <div id="kd-settings-ai"><AiPanel /></div> : null}
       </div>
     </div>
   );

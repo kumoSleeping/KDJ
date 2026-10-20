@@ -957,6 +957,35 @@ export interface MaintenanceProgress {
  * 但前端已经没有浮层通知了，这条分支故意不在联合类型里：
  * 收到就当没这回事，各 store 的 switch 落到 default 直接忽略。
  */
+/** A `.kdjv` project as its live preview draws it (docs/kdjv.md, `kdjv.rs::Live`); seconds. */
+export interface KdjvLive {
+  duration: number;
+  width: number;
+  height: number;
+  sources: Array<{ kind: "video" | "image" | "gif" | "audio"; width: number; height: number; fps: number }>;
+  /** Picture clips; `track` 0 is the top one, `source` numbers `/api/kdjv/source/{track}/{n}`. */
+  clips: Array<{
+    source: number; track: number; at: number; in: number; out: number; length: number;
+    x: number; y: number; scale: number; opacity: number; fill: boolean; fade_in: number; fade_out: number;
+  }>;
+}
+
+/** What playing a project starts from: its sound, its render when there is one, its live picture. */
+export interface KdjvPreview {
+  sound: string;
+  render: string | null;
+  project: KdjvLive;
+}
+
+/** A `.kdjv` project being rendered for playing (docs/kdjv.md). */
+export interface KdjvProgress {
+  path: string;
+  track_id: number | null;
+  progress: number;
+  detail: string;
+  error: string | null;
+}
+
 export type WsEvent =
   | { type: "connection.open"; payload: Record<string, never> }
   | { type: "library.progress.snapshot"; payload: { events: Array<
@@ -964,10 +993,6 @@ export type WsEvent =
       { type: "analyze.progress"; payload: AnalyzeProgress } |
       { type: "maintenance.progress"; payload: MaintenanceProgress }
     > } }
-  | { type: "workshop.positions"; payload: import("./types/workshop").WorkshopPositionResults }
-  | { type: "workshop.updated"; payload: import("./types/workshop").WorkshopSnapshot }
-  | { type: "composition.list" | "composition.updated"; payload: import("./types/composition").CompositionSnapshot }
-  | { type: "composition.completed"; payload: { track_id: number; path: string; replaced: boolean } }
   | { type: "download.updated"; payload: DownloadTask }
   | { type: "download.list"; payload: DownloadTask[] }
   | { type: "scan.progress"; payload: ScanProgress }
@@ -975,7 +1000,10 @@ export type WsEvent =
   | { type: "maintenance.progress"; payload: MaintenanceProgress }
   | { type: "library.updated"; payload: { track_ids: number[] } }
   | { type: "library.folders.updated"; payload: Record<string, never> }
-  | { type: "account.changed"; payload: Account };
+  | { type: "account.changed"; payload: Account }
+  | { type: "kdjv.progress"; payload: KdjvProgress }
+  | { type: "ai.event"; payload: import("./types/ai").PiEvent }
+  | { type: "ai.status"; payload: import("./types/ai").AiStatus };
 
 /* ---------------------------------------------------------------- preload */
 
@@ -1164,9 +1192,8 @@ export interface KdjBridge {
   installMediaTools?: (action: "download" | "archive" | "folder") => Promise<boolean>;
   mediaToolsProgress?: () => Promise<FfmpegInstallProgress>;
   pickFolders: () => Promise<string[]>;
-  /** 桌面主窗口接收系统文件夹；原生端验证目录并授予与选择器相同的访问范围。 */
-  importWorkshopFiles?: (input: import("./types/workshop").WorkshopIntake) => Promise<import("./types/workshop").WorkshopIntakeResult>;
-  onMediaDrop?: (handler: (drop: import("./types/workshop").WorkshopNativeDrop) => void) => Promise<() => void>;
+  /** 桌面主窗口接收系统拖入的文件和文件夹（src/lib/mediaDrop.ts）。 */
+  onMediaDrop?: (handler: (drop: import("./lib/mediaDrop").NativeMediaDrop) => void) => Promise<() => void>;
   /** 安卓：媒体读取权限（READ_MEDIA_AUDIO）是否已授予；桌面恒为 true。 */
   mediaPermissionGranted: () => Promise<boolean>;
   /** 用系统浏览器开外链（Release 页等）。 */

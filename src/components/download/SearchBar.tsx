@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -9,7 +10,17 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { History, LoaderCircle, Music, Sparkles, Video, X } from "lucide-react";
+import { AI_DROP_ATTR, fromLocalTracks, fromPastedImage, fromSearchDrag, timeLabel } from "../../lib/aiAttachments";
+import { activeSearchDrag, finishSearchDrop, readSearchDrop } from "../../lib/searchDrag";
+import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
+import { useLibraryStore } from "../../stores/libraryStore";
+import { aiApi } from "../../lib/api";
+import { showTask } from "../tasks/taskBubbleStore";
+import { useAiDrawer } from "../../lib/aiDrawer";
+import type { AiThinking } from "../../types/ai";
 import type { Platform, SearchKind, TrackSummary } from "../../types";
+import { aiOffered, useAiStore } from "../../stores/aiStore";
 import { useSearchPresets } from "./useSearchPresets";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import {
@@ -20,6 +31,7 @@ import {
   SEARCH_PLATFORMS,
 } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
+import { MOTION_MICRO_OUT_MS, MOTION_REDUCED_MS, prefersReducedMotion } from "../../lib/motion";
 import { PlatformMark } from "./PlatformMark";
 import { HintBulbIcon } from "./HintBulbIcon";
 import {
@@ -33,6 +45,26 @@ import {
   type SearchPhase,
 } from "./searchMotion";
 import "./SearchBar.css";
+
+/** pi's reasoning efforts in the order the key steps through them. */
+const THINKING_ORDER: AiThinking[] = ["low", "medium", "high", "xhigh"];
+const THINKING_LABEL: Record<AiThinking, string> = { low: "低", medium: "中", high: "高", xhigh: "极高" };
+const nextThinking = (level: AiThinking) => THINKING_ORDER[(THINKING_ORDER.indexOf(level) + 1) % THINKING_ORDER.length];
+
+/** One step of the reasoning key: shown at once, kept by kdj-server and given to pi. */
+async function cycleThinking(): Promise<void> {
+  const ai = useAiStore.getState();
+  const status = ai.status;
+  if (!status) return;
+  const level = nextThinking(status.thinking ?? "high");
+  ai.setStatus({ ...status, thinking: level });
+  try {
+    ai.setStatus(await aiApi.setThinking(level));
+  } catch (error) {
+    ai.setStatus(status);
+    showTask({ id: "ai-thinking", kind: "notice", title: "推理强度没能切换", detail: error instanceof Error ? error.message : String(error), tone: "error", placement: "top" });
+  }
+}
 
 export {
   DEFAULT_PRIORITY,
@@ -287,6 +319,50 @@ export function SearchBar({
   // Some third-party dictation IMEs report Enter before React's isComposing
   // flag settles. Keep our own composition state and also honor keyCode 229.
   const composingRef = useRef(false);
+  // AI mode (docs/ai-dock.md): the same field takes a request for the AI. The search's own
+  // query is kept and comes back with the mode.
+  const offered = aiOffered();
+  const aiWanted = useAiStore(state => state.mode) && offered;
+  // The whole row turns over between the two modes by the schema's `turn`: the search row
+  // lifts away, and the Agent Mode row comes up in its place, laid out at once. The row shows
+  // one mode at a time, so what is drawn (`aiMode`) follows the store a gesture later.
+  const [aiMode, setAiMode] = useState(aiWanted);
+  const [rowTurn, setRowTurn] = useState<"out" | "in" | null>(null);
+  if (aiWanted !== aiMode && rowTurn !== "out") setRowTurn("out");
+  useEffect(() => {
+    if (rowTurn !== "out") return;
+    const timer = window.setTimeout(() => {
+      setAiMode(useAiStore.getState().mode && offered);
+      setRowTurn("in");
+    }, prefersReducedMotion() ? MOTION_REDUCED_MS : MOTION_MICRO_OUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [rowTurn, offered]);
+  const aiRunning = useAiStore(state => state.running);
+  const attachments = useAiStore(state => state.attachments);
+  const resume = useAiStore(state => state.resume);
+  const thinking = useAiStore(state => state.status?.thinking ?? "high");
+  const [request, setRequest] = useState("");
+  const seed = useAiStore(state => state.seed);
+  useEffect(() => {
+    if (!seed || !offered) return;
+    setRequest(seed.text);
+    useAiStore.setState({ seed: null });
+    inputRef.current?.focus();
+  }, [seed, offered]);
+  // Turning the mode over puts the caret in the field; arriving on screen does not.
+  const modeWas = useRef(aiMode);
+  useEffect(() => {
+    if (modeWas.current === aiMode) return;
+    modeWas.current = aiMode;
+    inputRef.current?.focus();
+  }, [aiMode]);
+  const sendRequest = () => {
+    const text = request.trim();
+    if (!text) return;
+    // Sent, the request leaves the field for its task at the bottom right.
+    setRequest("");
+    void useAiStore.getState().send(text);
+  };
   const [inputFocused, setInputFocused] = useState(false);
   const [platformsExpanded, setPlatformsExpanded] = useState(false);
   const [wavePhase, setWavePhase] = useState<SearchPhase | null>(null);
@@ -301,7 +377,40 @@ export function SearchBar({
   const waveSawBusyRef = useRef(false);
   const lastNonceRef = useRef(burstNonce);
   const canSubmit = query.trim().length > 0 && !busy;
-  const inputRows = batch ? Math.min(5, Math.max(2, query.split("\n").length)) : 1;
+  // Agent Mode's request grows with its lines like a batch of keywords does: the lines it breaks
+  // (Shift + Enter) and the ones a long sentence wraps into, measured from the field itself.
+  const shown = aiMode ? request : query;
+  const [wrapRows, setWrapRows] = useState(1);
+  useLayoutEffect(() => {
+    const element = inputRef.current;
+    if (!aiMode || !element) {
+      setWrapRows(1);
+      return;
+    }
+    const measure = () => {
+      const style = getComputedStyle(element);
+      const leading = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.4;
+      const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+      // Collapsed for the measure, the field's scroll height is what its text needs. The height's
+      // transition is held off meanwhile: under it the collapse still reads the old height, and a
+      // field that grew never came back to one line once its sentence was sent.
+      const { height, transition } = element.style;
+      element.style.transition = "none";
+      element.style.height = "0px";
+      const lines = request ? Math.max(1, Math.round((element.scrollHeight - padding) / leading)) : 1;
+      element.style.height = height;
+      void element.offsetHeight;
+      element.style.transition = transition;
+      setWrapRows(current => (current === lines ? current : lines));
+    };
+    measure();
+    // A narrower or wider row wraps the sentence again.
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [aiMode, request]);
+  const inputRows = aiMode ? Math.min(5, Math.max(1, request.split("\n").length, wrapRows))
+    : batch ? Math.min(5, Math.max(2, query.split("\n").length)) : 1;
   const currentKindIndex = searchKinds.indexOf(searchKind);
   const nextSearchKind = searchKinds.length
     ? searchKinds[(Math.max(-1, currentKindIndex) + 1) % searchKinds.length]
@@ -383,32 +492,75 @@ export function SearchBar({
       aria-busy={wavePhase === "run" || undefined}
       onSubmit={(event) => {
         event.preventDefault();
-        fireSubmit();
+        if (aiMode) sendRequest();
+        else fireSubmit();
       }}
     >
       <div
         className="kd-searchbar kd-grow"
-        data-batch={batch || undefined}
+        data-ai={aiMode || undefined}
+        data-ai-running={aiMode && aiRunning || undefined}
+        data-has-ai={offered || undefined}
+        data-batch={batch && !aiMode || undefined}
         data-stacked={stacked || undefined}
         data-platforms-expanded={stacked && platformsExpanded ? "true" : undefined}
         data-searching={wavePhase ?? undefined}
+        data-kd-turn={rowTurn ?? undefined}
+        data-attached={aiMode && attachments.length > 0 || undefined}
+        {...(offered ? { [AI_DROP_ATTR]: "" } : {})}
+        // Most drags are pointer drags that find this row themselves (TrackTable, searchDrag); a
+        // system drag of library rows or search results arrives here.
+        onDragOver={offered ? (event) => {
+          if (!isTrackDrag(event) && !activeSearchDrag()) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+          event.currentTarget.setAttribute("data-kd-pointer-ai-over", "");
+        } : undefined}
+        onDragLeave={offered ? (event) => event.currentTarget.removeAttribute("data-kd-pointer-ai-over") : undefined}
+        onDrop={offered ? (event) => {
+          event.currentTarget.removeAttribute("data-kd-pointer-ai-over");
+          const ids = isTrackDrag(event) ? readTrackDragIds(event.dataTransfer) : [];
+          const search = ids.length ? null : readSearchDrop(event.dataTransfer);
+          if (!ids.length && !search) return;
+          event.preventDefault();
+          event.stopPropagation();
+          if (search) {
+            finishSearchDrop();
+            useAiStore.getState().attach(fromSearchDrag(search));
+            return;
+          }
+          finishTrackDrop();
+          void useLibraryStore.getState().resolveSummaries(ids)
+            .then(tracks => useAiStore.getState().attach(fromLocalTracks(tracks)))
+            .catch(() => undefined);
+        } : undefined}
         style={barStyle}
+        onAnimationEnd={(event) => {
+          if (event.target === event.currentTarget && rowTurn === "in") setRowTurn(null);
+        }}
         onClick={(event) => {
           if ((event.target as HTMLElement).closest("button, select, input, textarea")) return;
           inputRef.current?.focus();
         }}
       >
         <div className="kd-searchbar-tools">
-          {searchKinds.length > 1 && (
+          {(searchKinds.length > 1 || aiMode) && (
             <button
               type="button"
               className="kd-search-kind"
-              data-kind={searchKind}
-              aria-label={`搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
-              title={`${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
-              onClick={() => onSearchKindChange(nextSearchKind)}
+              data-kind={aiMode ? "ai" : searchKind}
+              aria-label={aiMode ? (aiRunning ? "Agent Mode，工作中：打开 AI 任务与历史" : "Agent Mode：打开 AI 任务与历史") : `搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              title={aiMode ? "AI 任务与历史" : `${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              onClick={() => {
+                // In Agent Mode the name opens the AI's drawer app: the task under way and the history.
+                if (aiMode) useAiDrawer.getState().show("tasks");
+                else onSearchKindChange(nextSearchKind);
+              }}
             >
-              <RollText text={SEARCH_KIND_LABEL[searchKind]} className="kd-search-kind-text" />
+              {/* The row turns over into Agent Mode as a whole, so the kind does not roll on its own
+                  then (keyed by the mode); while the agent works the field's edge runs. */}
+              {aiMode && <Sparkles size={12} className="kd-search-agent-mark" aria-hidden="true" />}
+              <RollText key={aiMode ? "ai" : "search"} text={aiMode ? "Agent Mode" : SEARCH_KIND_LABEL[searchKind]} className="kd-search-kind-text" />
             </button>
           )}
           <SearchPlatforms
@@ -421,7 +573,7 @@ export function SearchBar({
         </div>
         <div
           className="kd-searchbar-copy"
-          data-empty={!query || undefined}
+          data-empty={!shown || undefined}
           data-input-focused={inputFocused ? "true" : undefined}
           onPointerDown={() => {
             if (stacked && platformsExpanded) setPlatformsExpanded(false);
@@ -450,7 +602,7 @@ export function SearchBar({
               </span>
             </span>
           ) : null}
-          {!query && (
+          {!query && !aiMode && (
             <SearchTipCarousel
               inputFocused={inputFocused}
               tipsOpen={tipsOpen}
@@ -462,23 +614,23 @@ export function SearchBar({
             className="kd-searchbar-input"
             rows={inputRows}
             style={{ "--kd-search-rows": inputRows } as CSSProperties}
-            value={query}
+            value={aiMode ? request : query}
             placeholder=""
             // Titles and links are not prose: no spelling marks under them.
             spellCheck={false}
             autoCorrect="off"
             autoCapitalize="off"
-            aria-label="关键词、单曲链接或歌单链接，支持多行，@ 选择歌曲名"
+            aria-label={aiMode ? "交给 AI 的事" : "关键词、单曲链接或歌单链接，支持多行，@ 选择歌曲名"}
             role="combobox"
-            {...presets.aria}
-            title="搜索（Enter；Shift + Enter 换行；@ 歌曲名）"
+            {...(aiMode ? {} : presets.aria)}
+            title={aiMode ? "交给 AI（Enter；Shift + Enter 换行）" : "搜索（Enter；Shift + Enter 换行；@ 歌曲名）"}
             onFocus={() => setInputFocused(true)}
             onBlur={event => {
               setInputFocused(false);
-              presets.onBlur(event.relatedTarget);
+              if (!aiMode) presets.onBlur(event.relatedTarget);
             }}
             // Only a query with an @ in it has suggestions to place; plain typing does not track the caret.
-            onSelect={query.includes("@") ? presets.syncCaret : undefined}
+            onSelect={!aiMode && query.includes("@") ? presets.syncCaret : undefined}
             onCompositionStart={() => {
               composingRef.current = true;
             }}
@@ -488,21 +640,105 @@ export function SearchBar({
             onKeyDown={(event) => {
               const nativeEvent = event.nativeEvent;
               const composing = composingRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229;
-              if (!composing && presets.onKeyDown(event)) return;
+              if (!aiMode && !composing && presets.onKeyDown(event)) return;
               // 普通 Enter 永远不换行：搜索中或空框时也不能把 "\n" 写进去，否则会被当成批量搜索。
               if (event.key === "Enter" && !event.shiftKey && !composing) {
                 event.preventDefault();
-                fireSubmit();
+                if (aiMode) sendRequest();
+                else fireSubmit();
+              }
+            }}
+            onPaste={(event) => {
+              // A picture pasted here goes to the AI: a card in Agent Mode (aiAttachments.ts).
+              if (!offered) return;
+              const images = Array.from(event.clipboardData?.items ?? [])
+                .filter(item => item.kind === "file" && item.type.startsWith("image/"))
+                .map(item => item.getAsFile())
+                .filter((file): file is File => file !== null);
+              if (!images.length) return;
+              event.preventDefault();
+              for (const image of images) {
+                const preview = URL.createObjectURL(image);
+                aiApi.paste(image)
+                  .then(({ path }) => useAiStore.getState().attach([fromPastedImage(path, preview)]))
+                  .catch(error => {
+                    URL.revokeObjectURL(preview);
+                    showTask({ id: "ai-paste", kind: "notice", title: "图片没能粘贴", detail: error instanceof Error ? error.message : String(error), tone: "error", placement: "top" });
+                  });
               }
             }}
             onChange={(event) => {
+              if (aiMode) {
+                setRequest(event.target.value);
+                return;
+              }
               onQueryChange(event.target.value);
               if (event.target.value.includes("@")) presets.syncCaret();
             }}
           />
         </div>
+        {/* What was dragged into Agent Mode: a card each, sent with the request (aiAttachments.ts).
+            First, the earlier session the next request goes on in (历史 → 继续); × lets it go. */}
+        {aiMode && (attachments.length > 0 || resume) && (
+          <div className="kd-ai-chips" role="list" aria-label="附带给 AI">
+            {resume && (
+              <span className="kd-ai-chip" role="listitem" data-kd-turn="in" data-resume="" title={`下一句话接着这个会话：${resume.title}`}>
+                <span className="kd-ai-chip-cover" aria-hidden="true"><History size={12} /></span>
+                <span className="kd-ai-chip-time">接着</span>
+                <span className="kd-ai-chip-title">{resume.title}</span>
+                <button type="button" className="kd-ai-chip-remove" aria-label="不接着这个会话"
+                  onClick={() => void useAiStore.getState().dropResume()}>
+                  <X size={11} aria-hidden="true" />
+                </button>
+              </span>
+            )}
+            {attachments.map(item => {
+              const time = timeLabel(item);
+              return (
+                <span key={item.key} className="kd-ai-chip" role="listitem" data-kd-turn="in" title={item.path ?? item.url ?? item.title}>
+                  {item.cover
+                    ? <img className="kd-ai-chip-cover" src={item.cover} alt="" draggable={false} />
+                    : <span className="kd-ai-chip-cover" aria-hidden="true">{item.video ? <Video size={12} /> : <Music size={12} />}</span>}
+                  <span className="kd-ai-chip-title">{item.title}</span>
+                  {time && <span className="kd-ai-chip-time">{time}</span>}
+                  <button type="button" className="kd-ai-chip-remove" aria-label={`移除 ${item.title}`}
+                    onClick={() => useAiStore.getState().detach(item.key)}>
+                    <X size={11} aria-hidden="true" />
+                  </button>
+                </span>
+              );
+            })}
+          </div>
+        )}
+        {/* The keys at the end of the row: in Agent Mode first how hard the model thinks (a click
+            steps through 低 中 高 极高), then AI mode's key, which stops the AI while it works.
+            Something dragged onto the row turns it to Agent Mode with that thing attached. */}
+        {offered && <span className="kd-search-ai-keys">
+          {aiMode && <button
+            type="button"
+            className="kd-search-thinking"
+            title={`推理强度：${THINKING_LABEL[thinking]} · 点击切换`}
+            aria-label={`推理强度${THINKING_LABEL[thinking]}，点击切换为${THINKING_LABEL[nextThinking(thinking)]}`}
+            onClick={() => void cycleThinking()}
+          >{THINKING_LABEL[thinking]}</button>}
+          <button
+            type="button"
+            className="kd-search-ai"
+            {...{ [AI_DROP_ATTR]: "" }}
+            aria-pressed={aiMode}
+            data-running={aiRunning || undefined}
+            aria-label={aiRunning ? "停止 AI" : aiMode ? "回到搜索" : "AI 模式"}
+            title={aiRunning ? "停止 AI" : aiMode ? "回到搜索" : "AI 模式"}
+            onClick={() => {
+              if (aiRunning) void useAiStore.getState().abort();
+              else useAiStore.getState().toggleMode();
+            }}
+          >
+            {aiRunning ? <LoaderCircle size={16} className="kd-spin" aria-hidden="true" /> : <Sparkles size={16} aria-hidden="true" />}
+          </button>
+        </span>}
       </div>
-      {presets.menu}
+      {!aiMode && presets.menu}
     </form>
   );
 }
@@ -683,11 +919,11 @@ export const SearchPlatforms = memo(function SearchPlatforms({
                 ? searchMarkState(searchPhase, item.id, searchOutcome)
                 : undefined
             }
-            style={
-              searchPhase && asked.includes(item)
-                ? ({ "--kd-plat-i": asked.indexOf(item) } as CSSProperties)
-                : undefined
-            }
+            style={{
+              // Its place in the row: the marks come back out of Agent Mode one after another.
+              "--kd-plat-n": index,
+              ...(searchPhase && asked.includes(item) ? { "--kd-plat-i": asked.indexOf(item) } : {}),
+            } as CSSProperties}
             draggable={false}
             title={
               item.video

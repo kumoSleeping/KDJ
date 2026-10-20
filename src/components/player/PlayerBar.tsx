@@ -1,4 +1,3 @@
-import { isCompositionPreview } from "../../lib/streamTrack";
 import { MarqueeText } from "../common/MarqueeText";
 import { PlaybackModeButton, MODE_UI } from "./PlaybackModeButton";
 import {
@@ -64,7 +63,7 @@ import {
   announceAudioFocus,
   type AudioFocusDetail,
 } from "../../lib/audioFocus";
-import { formatDuration, isVideoTrack, thumbUrl } from "../../lib/format";
+import { formatDuration, isProjectTrack, isVideoTrack, thumbUrl } from "../../lib/format";
 import {
   MEDIA_SYNC_EVENT,
   broadcastMediaSync,
@@ -148,6 +147,7 @@ import {
   type PlayerSessionStatus,
 } from "../../lib/playerSession";
 import { pointPatch, SEEK_EVENT, Waveform, type SeekDetail } from "../library/Waveform";
+import { clearPlayRange, rangeWrap, seekLeavesRange, usePlayRange } from "../../lib/playRange";
 import {
   finishTrackDrop,
   isTrackDrag,
@@ -483,6 +483,24 @@ const showEqNotice = (text: string) => {
 };
 
 /** A cover that is already loaded when its record appears (fetched during the exit) arrives with it. */
+/**
+ * Shift + drag on the waveform holds playing in a range (playRange.ts): when the position the
+ * player reports has reached its end, playing goes back to its start through the ordinary seek
+ * (so the video follows). One wrap at a time: the next waits until the position is back inside.
+ */
+let rangeWrapPending = false;
+function keepInRange(trackId: number | undefined, position: number, scrubbing: boolean): void {
+  if (trackId === undefined || scrubbing) return;
+  const back = rangeWrap(usePlayRange.getState().range, trackId, position);
+  if (back === null) {
+    rangeWrapPending = false;
+    return;
+  }
+  if (rangeWrapPending) return;
+  rangeWrapPending = true;
+  window.dispatchEvent(new CustomEvent<SeekDetail>(SEEK_EVENT, { detail: { trackId, position: back, forceCommit: true } }));
+}
+
 function revealLoadedCover(image: HTMLImageElement | null): void {
   if (image?.complete && image.naturalWidth > 0) image.style.opacity = "1";
 }
@@ -1802,7 +1820,6 @@ export function PlayerBar() {
         djTransition: wantsDjTransition,
         nextIsStream: isStreamTrack(next),
         nextIsUnresolved: isUnresolvedStreamTrack(next),
-        nextIsCompositionPreview: isCompositionPreview(next),
         purposeIsComposition: parsed.purpose === "composition",
       });
       if (fencesStreamSwitch) {
@@ -2422,7 +2439,7 @@ export function PlayerBar() {
     }
   }, [playing, track?.id, frontEl, nativePlayer]);
 
-  // All playback purposes share this output: decks, workshop mixes and visualizers.
+  // All playback purposes share this output: decks and visualizers.
   // Subscribe synchronously so mute/load in the same turn cannot use yesterday's gain.
   useEffect(() => {
     const apply = () => {
@@ -2503,6 +2520,21 @@ export function PlayerBar() {
 
   // 播放中不能再让正在出声的 element 自己 seek：WebKit 换 Range/解码期间必然断流。
   // 交给 shadow deck 在目标处静音备好，旧声持续到音频时钟完成无缝换手。
+  // The held range (playRange.ts) is the playing song's: another song, or Esc, lets it go.
+  useEffect(() => {
+    const range = usePlayRange.getState().range;
+    if (range && range.trackId !== track?.id) clearPlayRange();
+  }, [track?.id]);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || !usePlayRange.getState().range) return;
+      if ((event.target as HTMLElement | null)?.closest?.("input, textarea, [contenteditable='true']")) return;
+      clearPlayRange();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   useEffect(() => {
     const onSeek = (event: Event) => {
       const detail = (event as CustomEvent<SeekDetail>).detail;
@@ -2532,6 +2564,8 @@ export function PlayerBar() {
       // 第一次 input 会在指针仍按着时立刻正式跳转，并携带 scrubbing=true；
       // 这时继续压住权威时钟。只有松手/键盘跳转才恢复跟随。
       if (detail.scrubbing !== true) scrubbingRef.current = false;
+      // A seek out of the held range lets it go (playRange.ts); one inside keeps it.
+      if (seekLeavesRange(usePlayRange.getState().range, track.id, target)) clearPlayRange();
       setPosition(target);
       if (isStreamTrack(track)) {
         publishStreamTrackState(
@@ -2707,7 +2741,7 @@ export function PlayerBar() {
         commitPlaying(otherStillPlaying);
         return;
       }
-      if (!autoAdvanceRef.current || isCompositionPreview(finished)) {
+      if (!autoAdvanceRef.current) {
         commitPlaying(false);
         return;
       }
@@ -2882,6 +2916,7 @@ export function PlayerBar() {
       if (!scrubbingRef.current) {
         setPosition(shownTime);
       }
+      if (state.playing && !pendingSeek) keepInRange(trackRef.current?.id, shownTime, scrubbingRef.current);
       if (state.duration > 0) setDuration(state.duration);
 
       if (desktopNative) {
@@ -2935,7 +2970,6 @@ export function PlayerBar() {
           state.playing &&
           !state.buffering &&
           djEnabled &&
-          !isCompositionPreview(current) &&
           !state.transitioning &&
           !nativeDjBusyRef.current &&
           !djBusyRef.current &&
@@ -3603,6 +3637,7 @@ export function PlayerBar() {
       if (!scrubbingRef.current) {
         setPosition(seconds);
       }
+      if (playing) keepInRange(track?.id, seconds, scrubbingRef.current);
       broadcastMediaSync({
         owner: "player",
         action: "position",
@@ -3941,17 +3976,21 @@ export function PlayerBar() {
   const setVisualizerPopup = useVisualizerPopup((state) => state.setOpen);
   // 画面小窗：视频走共享视频小窗，歌曲走可视化小窗；没有可视化的来源不提供这个键。
   const popupTrack = !video && canVisualizeTrack(displayTrack ?? null);
-  const popupOn = video ? pipMode === "float" : visualizerPopup;
+  // × closes the window of the video playing without changing the mode: the key is off then, and
+  // pressing it brings that video's window back.
+  const videoWindowClosed = Boolean(video && !pipActive && displayTrack && isVideoTrack(displayTrack.format));
+  const popupOn = video ? pipMode === "float" && !videoWindowClosed : visualizerPopup;
   const togglePopup = () => {
     if (!video) {
       setVisualizerPopup(!visualizerPopup);
       return;
     }
-    cyclePipMode();
-    // 叉掉小窗会清掉会话；再次主动开启时，恢复当前本地视频而不是等下一次换曲。
-    if (!useVideoPip.getState().active && displayTrack && isVideoTrack(displayTrack.format)) {
+    if (videoWindowClosed && displayTrack) {
+      useVideoPip.getState().setMode("float");
       requestLocalVideo(displayTrack, playing);
+      return;
     }
+    cyclePipMode();
   };
   // The playing song's bubble offers the same key (with the bar away it is the only one).
   const togglePopupRef = useRef(togglePopup);
@@ -4173,6 +4212,9 @@ export function PlayerBar() {
       return;
     }
     if (predicted.id === track.id) return;
+    // A `.kdjv` project plays from its render, made when it is played (kdjvPlay.ts); the file
+    // itself is not sound, and prewarming it only fails.
+    if (isProjectTrack(predicted.format)) return;
     const currentRate = nativePlayer.state().rate || 1;
     const effectiveFromBpm = track.bpm ? track.bpm * currentRate : null;
     // Prewarm and final prepare must agree exactly. Otherwise `same_source` rejects the warm Deck

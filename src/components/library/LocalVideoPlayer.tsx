@@ -22,6 +22,8 @@ import {
   VideoTransportEchoGuard,
 } from "../../lib/videoPlaybackEngine";
 import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
+import { useKdjvLive } from "../../lib/kdjvPlay";
+import { KdjvLivePicture } from "../player/KdjvLivePicture";
 import { playTrack } from "./TrackTable";
 import type { Track } from "../../types";
 
@@ -158,9 +160,12 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     [],
   );
 
+  // A project playing from its sound is drawn live (KdjvLivePicture): there is no file to load.
+  const live = useKdjvLive(state => state.live[track.id]);
   useEffect(() => {
+    if (live) { setDuration(live.duration); return; }
     localSwap.load(`local:${track.id}`, api.videoUrl(track.id));
-  }, [localSwap.load, track.id]);
+  }, [localSwap.load, track.id, live]);
 
   useEffect(() => {
     const onFocus = (event: Event) => {
@@ -383,6 +388,12 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
             }}
           />
         ))}
+        {live && !hidden && (
+          <KdjvLivePicture trackId={track.id} project={live} onTransport={transport => {
+            if (scrubPosition.current === null) setPosition(transport.position);
+            setPlaying(transport.playing);
+          }} />
+        )}
         {!hidden && <>
           <FloatingVideoControls title={track.title || track.filename} showTitle={false} playing={playing}
             position={position} duration={duration} fullscreen={fullscreen}

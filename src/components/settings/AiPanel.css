@@ -1,0 +1,63 @@
+/* 设置 → AI (docs/ai-dock.md). Rows in the settings' own groups: a line of state on the
+   left, its keys on the right; the login in use in full ink and weight, the others muted. No
+   lines between rows. */
+.kd-ai-panel .kd-ai-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-height: 2rem;
+}
+.kd-ai-row-copy {
+  display: grid;
+  flex: 1 1 10rem;
+  gap: 1px;
+  min-width: 0;
+}
+.kd-ai-row-copy > strong { font-weight: 600; }
+.kd-ai-row-copy > small {
+  overflow: hidden;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-ai-row-keys { display: flex; flex: none; flex-wrap: wrap; gap: 4px; }
+.kd-ai-row-hint { flex: none; color: var(--kd-muted); font-size: var(--kd-size-sm); }
+.kd-ai-command {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px 4px 3px 10px;
+  border-radius: 8px;
+  background: var(--kd-hover);
+}
+.kd-ai-command > code {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  font: var(--kd-size-xs)/1.6 var(--kd-font-mono, ui-monospace, monospace);
+  white-space: nowrap;
+}
+.kd-ai-logins { display: grid; gap: 2px; }
+.kd-ai-login-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.kd-ai-login-name:hover:not(:disabled) { color: var(--kd-text); }
+.kd-ai-login[data-on] .kd-ai-login-name { color: var(--kd-text); font-weight: 700; cursor: default; }
+.kd-ai-model { flex: 0 1 14rem; min-width: 8rem; }
+.kd-ai-add .kd-input { flex: 1 1 10rem; min-width: 0; }
+.kd-ai-add .kd-select { flex: 0 1 12rem; min-width: 8rem; }
+
+/* 会话历史: the AI drawer's list (AiSessions.tsx). Its rows keep their hover plate, so the group
+   steps out by the plate's padding to line its words up with the rows above. */
+.kd-ai-panel .kd-ai-sessions-group { margin-inline: -0.6rem; }

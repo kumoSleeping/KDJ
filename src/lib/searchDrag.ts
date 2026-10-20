@@ -31,6 +31,20 @@ import { pointerAccepts } from "./dragRefusal";
 import { firstSourceShareLink, formatShareText, writeShareLinkDrag } from "./shareLink";
 import { useSharePrefs } from "./sharePrefs";
 import { pointerDragGhost, setDragGhost, type PointerDragGhost } from "../components/common/dragGhost";
+import { aiDropElementAt, fromSearchDrag } from "./aiAttachments";
+import { useAiStore } from "../stores/aiStore";
+
+/** Agent Mode's field (or its key) under a dragged result lights; dropped there, it becomes a card. */
+function clearAiOver(): void {
+  document
+    .querySelectorAll<HTMLElement>("[data-kd-pointer-ai-over]")
+    .forEach((node) => node.removeAttribute("data-kd-pointer-ai-over"));
+}
+function paintAiOver(x: number, y: number): boolean {
+  const ai = aiDropElementAt(x, y);
+  ai?.setAttribute("data-kd-pointer-ai-over", "");
+  return ai !== null;
+}
 
 export { isSparseDownloadTitle, withDownloadDisplay } from "./downloadDisplay";
 
@@ -261,6 +275,7 @@ export function beginAudioPointerDrag(
         node.removeAttribute("data-kd-pointer-search-over");
         node.removeAttribute("data-kd-native-track-over");
       });
+    clearAiOver();
   };
   const deckElementAt = (x: number, y: number): HTMLElement | null => {
     const selector = `[${TRACK_DECK_DROP_TARGET_ATTR}]`;
@@ -273,6 +288,10 @@ export function beginAudioPointerDrag(
   };
   const paintTarget = (x: number, y: number) => {
     clearTargets();
+    if (paintAiOver(x, y)) {
+      ghost?.hint("交给 AI");
+      return;
+    }
     const deck = deckElementAt(x, y);
     const deckSide = trackDeckDropSideAt(x, y);
     if (deck && deckSide !== null) {
@@ -352,10 +371,15 @@ export function beginAudioPointerDrag(
     const deckSide = trackDeckDropSideAt(up.clientX, up.clientY);
     const queue = searchQueueDropElementAt(up.clientX, up.clientY);
     const dest = searchDropPathAt(up.clientX, up.clientY);
+    const ai = aiDropElementAt(up.clientX, up.clientY);
     cleanup();
     if (!dragging) return;
     up.preventDefault();
     finishSearchDrop();
+    if (ai) {
+      useAiStore.getState().attach(fromSearchDrag(payload));
+      return;
+    }
     if (deckSide !== null) {
       dispatchStreamDeckDrop(sources[0]!, deckSide);
       return;
@@ -407,9 +431,14 @@ export function beginVideoPointerDrag(
     document
       .querySelectorAll<HTMLElement>("[data-kd-pointer-search-over]")
       .forEach((node) => node.removeAttribute("data-kd-pointer-search-over"));
+    clearAiOver();
   };
   const paintTarget = (x: number, y: number) => {
     clearTargets();
+    if (paintAiOver(x, y)) {
+      ghost?.hint("交给 AI");
+      return;
+    }
     const queue = searchQueueDropElementAt(x, y);
     if (queue) {
       queue.setAttribute("data-kd-pointer-search-over", "queue");
@@ -455,10 +484,15 @@ export function beginVideoPointerDrag(
     if (up.pointerId !== pointerId) return;
     const queue = searchQueueDropElementAt(up.clientX, up.clientY);
     const dest = searchDropPathAt(up.clientX, up.clientY);
+    const ai = aiDropElementAt(up.clientX, up.clientY);
     cleanup();
     if (!dragging) return;
     up.preventDefault();
     finishSearchDrop();
+    if (ai) {
+      useAiStore.getState().attach(fromSearchDrag(payload));
+      return;
+    }
     const action = queue
       ? enqueueSearchQueuePayload(payload)
       : dest

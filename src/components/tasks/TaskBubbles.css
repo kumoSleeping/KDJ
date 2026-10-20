@@ -67,6 +67,20 @@
   transform: translateY(calc(var(--kd-task-dir) * var(--kd-task-lift, 0px)));
   transition: transform var(--kd-task-in) var(--kd-task-in-ease);
 }
+/* A resizable bubble's inner edge (TaskBubbleSpec.resizable): a grip as tall as the bubble,
+   drawn as nothing but the cursor. A small bubble that can be widened keeps the regular size's
+   width until it is dragged. */
+.kd-task-resize {
+  position: absolute;
+  z-index: 1;
+  top: 8px;
+  bottom: 8px;
+  left: -5px;
+  width: 10px;
+  cursor: ew-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
 .kd-task-host[data-place="top"] .kd-task-slot {
   top: var(--kd-task-gap);
   bottom: auto;
@@ -338,7 +352,6 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
   overflow: auto;
   overscroll-behavior: contain;
   padding: 0 12px 12px;
-  animation: kd-task-fade-in 160ms linear both;
 }
 
 /* The task's own live controls: a row along the bottom, under the summary or the open body.

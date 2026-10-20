@@ -1,0 +1,68 @@
+/* 使用提示 → AI (docs/ai-dock.md). */
+.kd-ai-key {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+.kd-ai-key:hover { background: var(--kd-hover); color: var(--kd-text); }
+
+/* 使用提示 → AI: steps to follow, numbered, in the tips' own type; links in ink, underlined. */
+.kd-ai-lessons {
+  justify-items: stretch;
+  margin: 0;
+  padding-left: 2.1rem;
+  color: var(--kd-text-body);
+  font-size: var(--kd-size-sm);
+  line-height: 1.6;
+}
+.kd-ai-lessons > li { display: list-item; }
+.kd-ai-lessons > li > * + * { margin-top: 0.5rem; }
+.kd-ai-lessons > li::marker { color: var(--kd-muted); font-weight: 700; }
+.kd-ai-lessons p { margin: 0; }
+.kd-ai-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--kd-text);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.kd-ai-lesson-command {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px 4px 4px 10px;
+  border-radius: 8px;
+  background: var(--kd-hover);
+}
+.kd-ai-lesson-command > code {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  font: var(--kd-size-xs)/1.5 var(--kd-font-mono, ui-monospace, monospace);
+  white-space: nowrap;
+}
+.kd-ai-examples { display: grid; gap: 6px; }
+.kd-ai-example {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--kd-hover);
+  color: var(--kd-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.kd-ai-example:hover { background: color-mix(in srgb, var(--kd-hover), var(--kd-text) 6%); }

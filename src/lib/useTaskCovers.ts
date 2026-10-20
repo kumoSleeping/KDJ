@@ -7,14 +7,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useLibraryStore } from "../stores/libraryStore";
-import type { CompositionProject, WorkshopJob } from "../types/workshop";
 import { api } from "./api";
 import {
   TASK_COVER_PX,
   downloadTaskCovers,
   taskCoverStack,
   visualizerExportCovers,
-  workshopExportCovers,
   type DownloadCoverTask,
   type TaskCoverAddresses,
   type TaskCoverStackView,
@@ -30,7 +28,6 @@ import { knownVisualizerExportPoster, visualizerExportPoster } from "./visualize
 export const appCoverAddresses: TaskCoverAddresses = {
   library: (trackId, size) =>
     api.coverUrl(trackId, useLibraryStore.getState().summaryById.get(trackId)?.modified_at, size),
-  frame: (projectId, sourceId, ms) => api.workshopFrameUrl(projectId, sourceId, ms),
 };
 
 /** The revisions of these library tracks as one value, so that a memo can depend on them. */
@@ -46,21 +43,6 @@ export function useDownloadTaskCovers(task: DownloadCoverTask): string[] {
   // below) is what makes a new one count.
   return useMemo(() => downloadTaskCovers(task, appCoverAddresses),
     [task.cover, task.track_id, task.platform, task.source_key, revision]);
-}
-
-/** The pictures of a mixing-editor export as a stack: its sources, or the finished file alone. */
-export function useWorkshopExportCovers(project: CompositionProject | undefined, job: WorkshopJob | undefined): TaskCoverStackView {
-  const sources = project?.sources;
-  const layers = project?.layers;
-  // The addresses follow from which sources the clips use and where each starts, not from the
-  // rest of an edit; the key keeps a drag on the timeline from handing the cover a new list.
-  const shape = useMemo(() => !sources || !layers ? "" : [
-    sources.map((source) => `${source.id}:${source.track_id}:${source.video}:${source.kind ?? ""}`).join(","),
-    layers.flatMap((layer) => layer.clips).map((clip) => `${clip.source_id}@${clip.source_in_ms}`).join(","),
-  ].join("|"), [sources, layers]);
-  const revision = useTrackRevisions([job?.track_id, ...(sources ?? []).map((source) => source.track_id)]);
-  return useMemo(() => ({ covers: workshopExportCovers(project, job, appCoverAddresses), more: 0 }),
-    [project?.id, shape, job?.track_id, revision]);
 }
 
 /**

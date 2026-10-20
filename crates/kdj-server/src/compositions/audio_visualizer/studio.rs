@@ -208,6 +208,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/visualizer/analyze", post(analyze))
         .route("/api/visualizer/export", post(start))
+        .route("/api/visualizer/render", post(cover_render))
         .route("/api/visualizer/jobs/{id}", get(poll))
         .route("/api/visualizer/jobs/{id}/cancel", post(cancel))
         .route("/api/visualizer/jobs/{id}/frames", post(frame).layer(DefaultBodyLimit::max(MAX_FRAME.max(MAX_CHUNK))))
@@ -222,6 +223,47 @@ fn track_audio(state: &AppState, id: i64) -> Result<PathBuf> {
     let track = state.library.get(id)?.context("曲目不存在")?;
     source(&track.path).context("请先把完整歌曲下载到本地曲库，不能使用流媒体占位或在线试听地址")
 }
+/// A visualizer rendered without the editor (the AI's `kdj visualizer render`): the song's own
+/// cover in the default scene, through the server's exporter. It is the base layout, not the
+/// studio's styled look — the studio's scenes live in the window, not here.
+#[derive(Deserialize)]
+struct CoverRender { track_id: i64, output_path: String, #[serde(default)] width: Option<u32>, #[serde(default)] height: Option<u32> }
+
+async fn cover_render(State(state): State<Arc<AppState>>, Json(p): Json<CoverRender>) -> ApiResult<Json<serde_json::Value>> {
+    let audio = track_audio(&state, p.track_id)?;
+    let output = PathBuf::from(&p.output_path);
+    api_check(output.is_absolute(), "输出路径要是绝对路径")?;
+    let folder = output.parent().context("输出路径没有文件夹")?.to_path_buf();
+    let (bytes, mime) = kdj_providers::tags::read_cover(&audio).context("这首歌没有内嵌封面，可视化需要一张图片")?;
+    let extension = if mime.contains("png") { "png" } else { "jpg" };
+    let cover = folder.join(format!(".kdj-visualizer-cover-{:016x}.{extension}", rand::random::<u64>()));
+    std::fs::write(&cover, &bytes).context("封面写不出来")?;
+    let mut scene = Scene::with_image(cover.to_string_lossy().into_owned());
+    scene.right.mirror_x = true;
+    scene.right.zoom = 1.35;
+    scene.canvas.width = p.width.unwrap_or(scene.canvas.width);
+    scene.canvas.height = p.height.unwrap_or(scene.canvas.height);
+    let request = super::ExportRequest {
+        scene,
+        audio_path: audio.to_string_lossy().into_owned(),
+        output_path: p.output_path.clone(),
+        acceleration: EncodingAcceleration::Auto,
+    };
+    // Dropping the request (the CLI interrupted) cancels the render.
+    let cancel = CancellationToken::new();
+    let _lifetime = cancel.clone().drop_guard();
+    let report = super::export(&request, &cancel, |_| {}, |_| {}).await;
+    let _ = std::fs::remove_file(&cover);
+    let report = report?;
+    Ok(Json(serde_json::json!({
+        "path": report.output_path,
+        "duration": report.duration_ms as f64 / 1000.0,
+        "width": report.width,
+        "height": report.height,
+        "fps": report.fps,
+    })))
+}
+
 #[derive(Deserialize)]
 struct Analyze { track_id: i64, spectrum: Spectrum }
 // Typed body: a json! Value tree of an 18k-frame timeline peaks ~6x higher and widens every f32 to 17 digits.

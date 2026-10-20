@@ -1,6 +1,6 @@
 use tauri::Manager;
 
-const EDITOR_WINDOWS: &[&str] = &["kvj", "visualizer-studio", "live-vj-control", "preferences"];
+const EDITOR_WINDOWS: &[&str] = &["visualizer-studio", "preferences"];
 
 /// Each tool owns a separate window. Hiding preserves edits and running sessions.
 pub fn show_editor_window(app: &tauri::AppHandle, kind: &str) -> Result<(), String> {
@@ -13,9 +13,7 @@ fn ensure_editor_window(
     background: bool,
 ) -> Result<(), String> {
     let (title, width, height, min_width, min_height) = match kind {
-        "kvj" => ("VJ 剪辑", 1280.0, 860.0, 760.0, 540.0),
         "visualizer-studio" => ("歌曲可视化", 960.0, 740.0, 720.0, 520.0),
-        "live-vj-control" => ("VJ 投放", 760.0, 680.0, 560.0, 460.0),
         "preferences" => ("偏好设置", 720.0, 600.0, 620.0, 460.0),
         _ => return Err("不支持的工具窗口".into()),
     };
@@ -78,15 +76,11 @@ fn ensure_editor_window(
 pub async fn open_kvj_window(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
-    kind: Option<String>,
+    kind: String,
     background: Option<bool>,
 ) -> Result<(), String> {
     if window.label() != "main" && !EDITOR_WINDOWS.contains(&window.label()) {
         return Err("仅应用窗口可以打开编辑工具".into());
     }
-    ensure_editor_window(
-        &app,
-        kind.as_deref().unwrap_or("kvj"),
-        background.unwrap_or(false),
-    )
+    ensure_editor_window(&app, &kind, background.unwrap_or(false))
 }

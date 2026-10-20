@@ -134,6 +134,29 @@ pub fn probe_health(info: &RuntimeInfo) -> Option<serde_json::Value> {
         .ok()
 }
 
+/// 只找活着的驻留进程，不拉起。`kdj status` 用它：查看状态不应顺手启动 KDJ。
+pub fn find_running(explicit: Option<&Path>, url_override: Option<&str>) -> Option<RuntimeInfo> {
+    if let Some(url) = url_override {
+        let normalized = url.trim_end_matches('/');
+        let token = read_runtime(explicit)
+            .filter(|(_, info)| info.base_url.trim_end_matches('/') == normalized)
+            .map(|(_, info)| info.auth_token)
+            .or_else(|| std::env::var("KDJ_AUTH_TOKEN").ok())?;
+        let info = RuntimeInfo {
+            pid: 0,
+            version: String::new(),
+            base_url: normalized.to_string(),
+            auth_token: token,
+            started_at: String::new(),
+            gui: false,
+        };
+        return probe_health(&info).map(|_| info);
+    }
+    read_runtime(explicit)
+        .map(|(_, info)| info)
+        .filter(|info| probe_health(info).is_some())
+}
+
 /// 找到活着的驻留进程；没有则拉起 `--no-gui` 再等 health。
 pub fn ensure_running(explicit: Option<&Path>, url_override: Option<&str>) -> Result<RuntimeInfo> {
     if let Some(url) = url_override {

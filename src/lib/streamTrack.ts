@@ -727,35 +727,3 @@ function pruneStreamTracks(): void {
   }
 }
 
-/** An ephemeral local composition uses the same native transport, without a provider or library row. */
-export function makeCompositionPreviewTrack(template: Track | null, title: string, url: string, duration: number): Track {
-  const id = nextId--;
-  const track: Track = { genre: "", year: "", bitrate: null, samplerate: 48000, channels: 2, size: 0,
-    bpm_confidence: null, key_confidence: null, energy: null, rms_db: null, peak_db: null,
-    rating: 0, color: "", analyzed_at: null, file_created_at: null, added_at: "", modified_at: "", analysis_error: "", folder: "",
-    ...template, id, path: `composition:${id}`, filename: title, title,
-    artist: "", album: "", format: "wav", duration, bpm: null, first_beat: null, beat_times: [],
-    downbeats: [], beat_origin: null, downbeat_origin: null, cue_ms: null, end_ms: null,
-    cue_points: [], music_key: "", camelot: "", open_key: "", source_platform: "local",
-    source_key: "", comment: "", tags: [] };
-  metaById.set(id, {url, waveformToken: "", cover: "", kind: "song", sourceKey: track.path,
-    source: null, nextTrack: null, cacheRetryUsed: true, preload: null});
-  trackById.set(id, track);
-  pruneStreamTracks();
-  return track;
-}
-export function registerCompositionPreviewTrack(track: Track, url: string): void {
-  metaById.set(track.id, {url, waveformToken: "", cover: "", kind: "song", sourceKey: track.path,
-    source: null, nextTrack: null, cacheRetryUsed: true, preload: null});
-  trackById.set(track.id, track);
-  pruneStreamTracks();
-}
-export function isCompositionPreview(track: Track | null | undefined): boolean {
-  return Boolean(track?.path.startsWith("composition:"));
-}
-
-/** Keep the transport identity when auditioning another mix of the same composition. */
-export function updateCompositionPreviewAudio(track: Track, url: string): void {
-  const meta = metaById.get(track.id);
-  if (isCompositionPreview(track) && meta) meta.url = url;
-}

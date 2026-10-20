@@ -1,13 +1,25 @@
 import { create } from "zustand";
+import { getBridge } from "./bridge";
 
 /** The settings drawer's pages, in title order. Each groups a few of the settings sections. */
 export const settingsPages = [
   { id: "general", label: "通用" },
   { id: "playback", label: "播放" },
   { id: "sources", label: "登录" },
+  { id: "ai", label: "AI" },
+  { id: "ffmpeg", label: "FFmpeg" },
   { id: "system", label: "系统" },
 ] as const;
 export type SettingsPage = typeof settingsPages[number]["id"];
+
+/** The pages this window offers: AI and FFmpeg run beside the desktop app only. */
+export function shownSettingsPages(): readonly (typeof settingsPages)[number][] {
+  let desktop = false;
+  try {
+    desktop = ["darwin", "win32", "linux"].includes(getBridge().platform);
+  } catch { /* no bridge yet */ }
+  return desktop ? settingsPages : settingsPages.filter(page => page.id !== "ai" && page.id !== "ffmpeg");
+}
 
 /** The page the settings drawer shows. A view state: it starts over with the app. */
 export const useSettingsPage = create<{ page: SettingsPage; setPage(page: SettingsPage): void }>(set => ({

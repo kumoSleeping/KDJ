@@ -6,7 +6,8 @@
  * 不把小窗命运绑在 PlayerBar 是否已挂上 PLAY 监听上。
  */
 
-import { isImageTrack, isVideoTrack } from "./format";
+import { isImageTrack, isProjectTrack, isVideoTrack } from "./format";
+import { needsRender, notePlay, playProject } from "./kdjvPlay";
 import { requestLocalVideo, useVideoPip } from "./videoPip";
 import {
   issuePlayIntentId,
@@ -34,6 +35,12 @@ export interface PlayRequest {
 
 export function playTrack(track: PlayableTrack, autoPlay = true, purpose?: "composition", position?: number): number {
   if (isImageTrack(track.format)) return 0;
+  // A `.kdjv` project plays from its render, which may still have to be made (kdjvPlay.ts).
+  if (isProjectTrack(track.format) && needsRender(track)) {
+    playProject(track, playTrack, autoPlay, purpose, position);
+    return 0;
+  }
+  notePlay();
   const intentId = issuePlayIntentId();
   const receivedAt = typeof performance !== "undefined" ? performance.now() : undefined;
   const playable = materializePlayableTrack(track);

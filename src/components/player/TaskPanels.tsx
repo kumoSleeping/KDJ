@@ -1,15 +1,7 @@
 import { startTransition, useCallback, useEffect, useId, useRef, useState } from "react";
-import { ExternalLink, Radio, Square } from "lucide-react";
-import { useAppStore } from "../../stores/appStore";
 import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelStore";
-import { useLiveVjStore } from "../../stores/liveVjStore";
-import { useWorkshopStore } from "../../stores/workshopStore";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
-import { liveVjRunning, liveVjSupported } from "../../lib/liveVj";
-import { useLiveVjStatus } from "../../lib/useLiveVjStatus";
-import { useTrackCoverStack } from "../../lib/useTaskCovers";
-import { InlineNotice, Panel } from "../common";
-import { TaskCoverStack } from "../common/TaskCover";
+import { Panel } from "../common";
 import { QueuePanel } from "../download/QueuePanel";
 import { ExportQueuePanel } from "../composition/ExportQueuePanel";
 import { SlidePages } from "../drawer/SlidePages";
@@ -55,7 +47,6 @@ export function DownloadTaskPages() {
   const onReady = useCallback(() => {
     if ((view !== "exports" && view !== "export-history") || visitedExports.current) return;
     visitedExports.current = true;
-    void useWorkshopStore.getState().refresh();
     void useVisualizerExportStore.getState().initialize().catch(() => undefined);
   }, [view]);
   return <SlidePages page={view} order={taskViewIds}>
@@ -90,53 +81,6 @@ export function DownloadTaskPanel() {
   </span>} visibleHeader padded={false} dense className="kd-task-window kd-download-window">
     <div className="kd-task-window-body" id={`${id}-page`} role="tabpanel" aria-labelledby={`${id}-${view}`}>
       <DownloadTaskPages />
-    </div>
-  </Panel>;
-}
-
-/** A set stands for its songs: the covers of the first few, overlapped. Its row states the count. */
-function LiveVjSetCovers({ id, trackIds }: { id: string; trackIds: readonly number[] }) {
-  const { covers } = useTrackCoverStack(trackIds);
-  return <TaskCoverStack covers={covers} owner={id} kind="set" layout="row" />;
-}
-
-const livePhases: Record<string, string> = {
-  indexing: "分析素材", permission: "等待声音输入授权", listening: "监听中", matched: "已匹配",
-  searching: "重新搜索", prepared: "特征索引已就绪", stopped: "已停止", failed: "运行失败",
-  connecting: "连接中", sending: "音频发送中",
-};
-export function LiveVjTaskPanel() {
-  const document = useLiveVjStore(state => state.document);
-  const view = useLiveVjStore(state => state.view);
-  const busy = useLiveVjStore(state => state.busy);
-  const error = useLiveVjStore(state => state.error);
-  useLiveVjStatus();
-  useEffect(() => {
-    if (window.__TAURI_INTERNALS__ && liveVjSupported()) void useLiveVjStore.getState().initialize();
-  }, []);
-  const open = (id?: string) => {
-    if (id) useLiveVjStore.getState().select(id);
-    useAppStore.getState().openLiveVjPanel();
-  };
-  return <Panel heading="实时 VJ 任务" padded={false} dense className="kd-task-window" actions={
-    <button type="button" className="kd-manager-panel-action" title="打开实时 VJ" aria-label="打开实时 VJ"
-      onClick={() => open()}><ExternalLink size={13} /></button>
-  }>
-    <div className="kd-task-window-body">
-      <InlineNotice text={error || view?.error || ""} onDismiss={() => useLiveVjStore.setState({ error: "" })} />
-      {view?.phase && view.phase !== "idle" && <div className="kd-task-window-entry" role="status">
-        <div className="kd-task-window-line"><Radio size={13} /><span>{livePhases[view.phase] ?? view.phase}</span>
-          {liveVjRunning(view) && <button type="button" title="停止实时 VJ" aria-label="停止实时 VJ" disabled={busy}
-            onClick={() => void useLiveVjStore.getState().stop()}><Square size={13} /></button>}
-        </div>
-        {view.phase === "indexing" && <progress max={Math.max(1, view.total)} value={view.indexed} aria-label="实时 VJ 素材分析进度" />}
-        {view.matched && <div>{view.matched.entry.title}</div>}
-      </div>}
-      {document?.sets.map(set => <div className="kd-task-window-entry kd-task-window-line" key={set.id} data-task-id={set.id}>
-        <LiveVjSetCovers id={set.id} trackIds={set.entries.map(entry => entry.track_id)} />
-        <button type="button" className="kd-task-window-name" onClick={() => open(set.id)}>{set.name}</button>
-        <span>{set.entries.length} 首</span>
-      </div>)}
     </div>
   </Panel>;
 }

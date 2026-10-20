@@ -1,388 +1,221 @@
+//! `/api/kdjv/*`: checking and rendering `.kdjv` projects for playing, and exporting them as MP4.
 use super::*;
-use crate::{
-    error::{ApiError, ApiResult},
-    state::AppState,
-};
+use crate::{error::ApiResult, state::AppState};
 use axum::{
-    Extension, Json, Router,
-    extract::{Path, Query},
-    http::{HeaderMap, Method, StatusCode, header},
+    body::{Body, Bytes},
+    extract::Path as AxumPath,
+    http::{header, HeaderMap},
     response::{IntoResponse, Response},
     routing::{get, post},
+    Extension, Json, Router,
 };
 use serde::Deserialize;
 pub fn router(manager: Arc<Workshop>) -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/workshop", get(list).post(create))
-        .route("/api/workshop/recovery/ack", post(acknowledge_recovery))
-        .route("/api/workshop/exports/clear", post(clear_exports))
-        .route("/api/workshop/align/{request}/cancel", post(cancel_alignment))
-        .route("/api/workshop/intake", post(intake))
-        .route(
-            "/api/workshop/{id}",
-            axum::routing::patch(patch).delete(delete),
-        )
-        .route("/api/workshop/{id}/sources", post(add))
-        .route("/api/workshop/{id}/subtitle-source", post(subtitle_source))
-        .route("/api/workshop/{id}/positions", post(positions))
-        .route(
-            "/api/workshop/{id}/positions/analyze",
-            post(analyze_positions),
-        )
-        .route("/api/workshop/{id}/positions/apply", post(apply_positions))
-        .route("/api/workshop/{id}/positions/control", post(control_positions))
-        .route("/api/workshop/{id}/align", post(align))
-        .route(
-            "/api/workshop/{id}/sources/{source}/frame",
-            get(source_frame),
-        )
-        .route("/api/workshop/{id}/preview", post(preview))
-        .route("/api/workshop/{id}/export", post(export))
-        .route("/api/workshop/jobs/{id}/cancel", post(cancel))
-        .route("/api/workshop/jobs/{id}/import", post(retry_import))
-        .route("/api/workshop/jobs/{id}/discard", post(discard_receipt))
-        .route("/api/workshop/media/{ticket}/audio.wav", get(audio))
-        .route(
-            "/api/workshop/media/{ticket}/video/{clip}/{part}",
-            get(video),
-        )
-        .route(
-            "/api/workshop/preview/{ticket}",
-            axum::routing::delete(release),
-        )
+        .route("/api/kdjv/check", post(kdjv_check))
+        .route("/api/kdjv/preview", post(kdjv_preview))
+        .route("/api/kdjv/source/{track_id}/{n}", get(kdjv_source))
+        .route("/api/kdjv/render", post(kdjv_render))
+        .route("/api/kdjv/export", post(kdjv_export))
         .layer(Extension(manager))
 }
-async fn list(Extension(m): Extension<Arc<Workshop>>) -> ApiResult<Json<Snapshot>> {
-    m.refresh_video_geometry().await?;
-    Ok(Json(m.snapshot()))
-}
+/// A `.kdjv` project (kdjv.rs), by its library row or its path.
 #[derive(Deserialize)]
-struct ClearExports {
-    projects: HashMap<String, u64>,
-    job_ids: Vec<String>,
+struct KdjvTarget {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    track_id: Option<i64>,
+    /// Answer as NDJSON: a `{"event":"progress","done","total":100,"detail"}` line each second
+    /// while the render runs, then `{"event":"result",…}` or `{"event":"error","message"}`.
+    #[serde(default)]
+    stream: bool,
 }
-async fn clear_exports(Extension(m): Extension<Arc<Workshop>>, Json(body): Json<ClearExports>) -> ApiResult<Json<Snapshot>> {
-    Ok(Json(m.clear_exports(&body.projects, &body.job_ids).await?))
-}
-async fn create(Extension(m): Extension<Arc<Workshop>>) -> ApiResult<Json<Snapshot>> {
-    Ok(Json(m.create()?))
-}
-#[derive(Deserialize)]
-struct Revision {
-    revision: u64,
-}
-/// 请求体先收成 `Value`：缺键或未知键会让整体替换静默丢数据，检查通过后才类型化（见 `patch_guard`）。
-/// 被拒绝时返回 422，`paths` 列出出问题的键路径。
-async fn patch(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(id): Path<String>,
-    Json(body): Json<serde_json::Value>,
-) -> Result<Json<Snapshot>, Response> {
-    m.patch_json(&id, &body).map(Json).map_err(|error| match error.downcast_ref::<super::patch_guard::FieldLoss>() {
-        Some(loss) => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({"detail": loss.to_string(), "code": "WORKSHOP_PATCH_FIELDS", "paths": loss.0})),
-        ).into_response(),
-        None => ApiError::from(error).into_response(),
-    })
-}
-async fn delete(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(id): Path<String>,
-    Json(p): Json<Revision>,
-) -> ApiResult<Json<Snapshot>> {
-    let jobs = m.snapshot().jobs;
-    for job in jobs.iter().filter(|job| job.project_id == id) { m.cancel(&job.id).await?; }
-    Ok(Json(m.delete(&id, p.revision)?))
-}
-#[derive(Deserialize)]
-struct Add {
-    revision: u64,
-    track_ids: Vec<i64>,
-    at_ms: f64,
-}
-async fn add(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(id): Path<String>,
-    Json(p): Json<Add>,
-) -> ApiResult<Json<Snapshot>> {
-    Ok(Json(m.add(&id, p.revision, &p.track_ids, p.at_ms).await?))
-}
-#[derive(Deserialize)]
-struct SubtitleUpload {
-    revision: u64,
-    title: String,
-}
-async fn subtitle_source(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(id): Path<String>,
-    Query(p): Query<SubtitleUpload>,
-    bytes: axum::body::Bytes,
-) -> ApiResult<Json<super::subtitles::SubtitleSource>> {
-    Ok(Json(m.subtitle_source(&id, p.revision, &p.title, bytes.to_vec()).await?))
-}
-#[derive(Deserialize)]
-struct Align {
-    revision: u64,
-    clip_id: String,
-    reference_id: String,
-    #[serde(default = "alignment_request_id")]
-    request_id: String,
-}
-fn alignment_request_id() -> String { format!("workshop-align-{}", id()) }
-async fn align(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(id): Path<String>,
-    Json(p): Json<Align>,
-) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(
-        serde_json::json!({"start_ms":m.align(&id,p.revision,&p.clip_id,&p.reference_id,&p.request_id).await?,"revision":p.revision}),
-    ))
-}
-#[derive(Deserialize)]
-struct PreviewRequest {
-    revision: u64,
-    audition_after_layer: Option<String>,
-}
-async fn preview(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(id): Path<String>,
-    Json(p): Json<PreviewRequest>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let ticket = m.preview(&id, p.revision, p.audition_after_layer.as_deref())?;
-    Ok(Json(
-        serde_json::json!({"ticket":ticket,"revision":p.revision}),
-    ))
-}
-async fn export(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(id): Path<String>,
-    Json(p): Json<Revision>,
-) -> ApiResult<Json<Snapshot>> {
-    Ok(Json(m.export(&id, p.revision)?))
-}
-async fn cancel(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Snapshot>> {
-    Ok(Json(m.cancel(&id).await?))
-}
-async fn retry_import(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Snapshot>> {
-    Ok(Json(m.retry_import(&id).await?))
-}
-async fn discard_receipt(Extension(m): Extension<Arc<Workshop>>, Path(id): Path<String>) -> ApiResult<Json<Snapshot>> {
-    Ok(Json(m.discard_receipt(&id)?))
-}
-async fn acknowledge_recovery(Extension(m): Extension<Arc<Workshop>>) -> ApiResult<Json<Snapshot>> {
-    Ok(Json(m.acknowledge_recovery()?))
-}
-async fn cancel_alignment(Extension(m): Extension<Arc<Workshop>>, Path(request): Path<String>) -> ApiResult<Json<serde_json::Value>> {
-    m.cancel_alignment(&request)?;
-    Ok(Json(serde_json::json!({})))
-}
-async fn release(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(ticket): Path<String>,
-) -> Json<serde_json::Value> {
-    m.release(&ticket);
-    Json(serde_json::json!({}))
-}
-async fn video(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path((ticket, clip, part)): Path<(String, String, u64)>,
-    headers: HeaderMap,
-) -> ApiResult<Response> {
-    let mut preview = m.ticket(&ticket)?;
-    // Dropping a disconnected request must also cancel its queued/transcoding
-    // work, without revoking the editor's other media requests.
-    preview.cancel = preview.cancel.child_token();
-    let _request = preview.cancel.clone().drop_guard();
-    let path = m.proxy(&preview, &clip, part).await?;
-    let total = std::fs::metadata(&path).map_err(anyhow::Error::from)?.len();
-    crate::routes::audio_response(
-        &path,
-        total,
-        "video/mp4".into(),
-        headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
-    )
-    .await
-}
-async fn audio(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(ticket): Path<String>,
-    method: Method,
-    headers: HeaderMap,
-) -> ApiResult<Response> {
-    let preview = m.ticket(&ticket)?;
-    let total = render::wav_length(&preview.project);
-    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
-    let (status, start, end) = if let Some(range) = range {
-        let Some((start, end)) = crate::routes::parse_range(range, total) else {
-            return Ok((
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                [(header::CONTENT_RANGE, format!("bytes */{total}"))],
-            )
-                .into_response());
-        };
-        (StatusCode::PARTIAL_CONTENT, start, end)
-    } else {
-        (StatusCode::OK, 0, total - 1)
+fn kdjv_file(m: &Workshop, target: &KdjvTarget) -> Result<(std::path::PathBuf, Option<i64>)> {
+    let (path, track_id) = match (target.track_id, target.path.as_deref()) {
+        (Some(id), _) => (std::path::PathBuf::from(m.state.library.get(id)?.context("曲目不存在")?.path), Some(id)),
+        (None, Some(path)) => (std::path::PathBuf::from(path), None),
+        (None, None) => bail!("需要 path 或 track_id"),
     };
-    let mut builder = Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "audio/wav")
-        .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CACHE_CONTROL, "no-store")
-        .header(header::CONTENT_LENGTH, (end - start + 1).to_string());
-    if status == StatusCode::PARTIAL_CONTENT {
-        builder = builder.header(
-            header::CONTENT_RANGE,
-            format!("bytes {start}-{end}/{total}"),
+    if !kdjv::is_project_path(&path) {
+        bail!("不是 .kdjv 工程：{}", path.display())
+    }
+    Ok((path, track_id))
+}
+async fn kdjv_check(
+    Extension(m): Extension<Arc<Workshop>>,
+    Json(target): Json<KdjvTarget>,
+) -> ApiResult<Json<kdjv::Checked>> {
+    let (file, _) = kdjv_file(&m, &target)?;
+    Ok(Json(m.kdjv_check(&file).await?))
+}
+/// What playing a project starts from (kdjv.rs `kdjv_preview`): its sound, mixed now if need be,
+/// with `kdjv.progress` meanwhile; its render when there is one; and the clips drawn live.
+async fn kdjv_preview(
+    Extension(m): Extension<Arc<Workshop>>,
+    Json(target): Json<KdjvTarget>,
+) -> ApiResult<Json<kdjv::Preview>> {
+    let (file, track_id) = kdjv_file(&m, &target)?;
+    let shown = file.to_string_lossy().into_owned();
+    let state = m.state.clone();
+    let cancel = CancellationToken::new();
+    let last = Mutex::new(u32::MAX);
+    let preview = m
+        .kdjv_preview(&file, &cancel, &|progress, detail| {
+            let step = (progress * 100.) as u32;
+            if std::mem::replace(&mut *last.lock().unwrap(), step) == step {
+                return;
+            }
+            state.hub.publish(
+                "kdjv.progress",
+                &serde_json::json!({"path": shown, "track_id": track_id, "progress": progress, "detail": detail, "error": null}),
+            );
+        })
+        .await;
+    if let Err(error) = &preview {
+        state.hub.publish(
+            "kdjv.progress",
+            &serde_json::json!({"path": shown, "track_id": track_id, "progress": 0, "detail": "", "error": format!("{error:#}")}),
         );
     }
-    if method == Method::HEAD {
-        return builder
-            .body(axum::body::Body::empty())
-            .map_err(|e| ApiError::bad_request(e.to_string()));
-    }
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(2);
-    tokio::spawn(async move {
-        let cancel = preview.cancel.child_token();
-        let work = async {
-            let mut cursor = start;
-            if cursor < 44 {
-                let header = render::header(&preview.project);
-                let hi = (end + 1).min(44);
-                tx.send(Ok(header[cursor as usize..hi as usize].to_vec()))
-                    .await
-                    .map_err(|_| anyhow::anyhow!("预览已关闭"))?;
-                cursor = hi;
-            }
-            while cursor <= end {
-                let byte = cursor - 44;
-                let chunk_bytes = render::frames(render::CHUNK_MS) * 4;
-                let n = byte / chunk_bytes;
-                let bytes = m.audio_chunk(&preview.project, n, &cancel).await?;
-                let begin = (byte % chunk_bytes) as usize;
-                let length = (end - cursor + 1).min(bytes.len() as u64 - begin as u64) as usize;
-                if length == 0 {
-                    bail!("预览区间为空")
-                };
-                tx.send(Ok(bytes[begin..begin + length].to_vec()))
-                    .await
-                    .map_err(|_| anyhow::anyhow!("预览已关闭"))?;
-                cursor += length as u64;
-            }
-            Ok::<_, anyhow::Error>(())
+    Ok(Json(preview?))
+}
+/// One source file of a project's live preview, by the project's library row and the source's
+/// number: only the files that project names are served, with Range for seeking.
+async fn kdjv_source(
+    Extension(m): Extension<Arc<Workshop>>,
+    AxumPath((track_id, n)): AxumPath<(i64, usize)>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let (file, _) = kdjv_file(&m, &KdjvTarget { path: None, track_id: Some(track_id), stream: false })?;
+    let path = kdjv::source(&file, n).ok_or_else(|| crate::error::ApiError::not_found("工程里没有这个素材"))?;
+    let total = tokio::fs::metadata(&path)
+        .await
+        .map_err(|err| crate::error::ApiError::not_found(format!("读不到素材：{err}")))?
+        .len();
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "application/octet-stream",
+    };
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok()).filter(|v| !v.trim().is_empty());
+    crate::routes::audio_response(&path, total, mime.into(), range).await
+}
+/// Starts a project's render, or the wait for one under way (kdjv.rs keeps one per project).
+/// It runs on its own: a caller that goes away leaves it to finish. `kdjv.progress` tells the
+/// window how far it is, and so does the returned watch: percent and what is being done.
+fn spawn_render(
+    m: &Arc<Workshop>,
+    file: std::path::PathBuf,
+    track_id: Option<i64>,
+) -> (tokio::task::JoinHandle<Result<std::path::PathBuf>>, tokio::sync::watch::Receiver<(u32, String)>) {
+    let worker = m.clone();
+    let shown = file.to_string_lossy().into_owned();
+    let (tell, watch) = tokio::sync::watch::channel((0_u32, String::new()));
+    let job = tokio::spawn(async move {
+        let state = worker.state.clone();
+        let publish = |progress: f64, detail: &str, error: Option<&str>| {
+            state.hub.publish(
+                "kdjv.progress",
+                &serde_json::json!({"path": shown, "track_id": track_id, "progress": progress, "detail": detail, "error": error}),
+            );
         };
-        let result = tokio::select! {_=tx.closed()=>Ok(()),result=work=>result};
-        cancel.cancel();
-        if let Err(e) = result {
-            let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+        let last = Mutex::new((u32::MAX, String::new()));
+        let cancel = CancellationToken::new();
+        let rendered = worker
+            .kdjv_render(&file, &cancel, &|progress, detail| {
+                let step = (progress * 100.) as u32;
+                let mut seen = last.lock().unwrap();
+                if step == seen.0 && (detail.is_empty() || detail == seen.1) {
+                    return;
+                }
+                seen.0 = step;
+                if !detail.is_empty() {
+                    seen.1 = detail.to_string();
+                }
+                publish(progress, &seen.1, None);
+                let _ = tell.send((step, seen.1.clone()));
+            })
+            .await;
+        match &rendered {
+            Ok(_) => publish(1., "", None),
+            Err(error) => publish(0., "", Some(&format!("{error:#}"))),
+        }
+        rendered
+    });
+    (job, watch)
+}
+/// Renders a project for playing, or finds its render. A caller that asks for `stream` gets
+/// the progress as NDJSON lines.
+async fn kdjv_render(
+    Extension(m): Extension<Arc<Workshop>>,
+    Json(target): Json<KdjvTarget>,
+) -> ApiResult<Response> {
+    let (file, track_id) = kdjv_file(&m, &target)?;
+    let (job, watch) = spawn_render(&m, file, track_id);
+    if !target.stream {
+        let result = job.await.map_err(|error| anyhow::anyhow!("渲染中断：{error}"))??;
+        return Ok(Json(serde_json::json!({"path": result, "track_id": track_id})).into_response());
+    }
+    let line = |value: serde_json::Value| Ok::<_, std::convert::Infallible>(Bytes::from(format!("{value}\n")));
+    let stream = futures_util::stream::unfold(Some((job, watch)), move |held| async move {
+        let (mut job, mut watch) = held?;
+        tokio::select! {
+            finished = &mut job => {
+                let end = match finished {
+                    Ok(Ok(path)) => serde_json::json!({"event": "result", "path": path, "track_id": track_id}),
+                    Ok(Err(error)) => serde_json::json!({"event": "error", "message": format!("{error:#}")}),
+                    Err(error) => serde_json::json!({"event": "error", "message": format!("渲染中断：{error}")}),
+                };
+                Some((line(end), None))
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                let (done, detail) = watch.borrow_and_update().clone();
+                Some((line(serde_json::json!({"event": "progress", "done": done, "total": 100, "detail": detail})), Some((job, watch))))
+            }
         }
     });
-    let stream = futures_util::stream::unfold(rx, |mut rx| async {
-        rx.recv().await.map(|item| (item, rx))
-    });
-    builder
-        .body(axum::body::Body::from_stream(stream))
-        .map_err(|e| ApiError::bad_request(e.to_string()))
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "application/x-ndjson")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from_stream(stream))
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?)
 }
-
-#[derive(Deserialize)]
-struct FrameQuery {
-    ms: f64,
-    width: u32,
-}
-async fn source_frame(
+/// The project written out as one MP4 beside it (the library's 导出): rendered as for playing,
+/// then copied to `<project>.mp4`, or `<project> 2.mp4`… — an existing file is never replaced.
+async fn kdjv_export(
     Extension(m): Extension<Arc<Workshop>>,
-    Path((pid, sid)): Path<(String, String)>,
-    Query(q): Query<FrameQuery>,
-) -> ApiResult<Response> {
-    let bytes = m.source_frame(&pid, &sid, q.ms, q.width).await?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, if bytes.starts_with(b"\x89PNG") { "image/png" } else { "image/jpeg" }),
-            (header::CACHE_CONTROL, "private, max-age=0, must-revalidate"),
-        ],
-        bytes,
-    )
-        .into_response())
-}
-
-async fn positions(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(pid): Path<String>,
+    Json(target): Json<KdjvTarget>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // Matching is manual: reading the views never starts work.
-    position_results(&m, &pid)
-}
-#[derive(Deserialize)]
-struct PositionAnalyze {
-    layer_id: Option<String>,
-    #[serde(default)]
-    restart: bool,
-}
-async fn analyze_positions(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(pid): Path<String>,
-    Json(q): Json<PositionAnalyze>,
-) -> ApiResult<Json<serde_json::Value>> {
-    m.analyze_positions(&pid, q.layer_id.as_deref(), q.restart)?;
-    position_results(&m, &pid)
-}
-fn position_results(m: &Workshop, pid: &str) -> ApiResult<Json<serde_json::Value>> {
-    let items = m.position_views(pid);
-    let revision = m
-        .journal
-        .lock()
-        .unwrap()
-        .projects
-        .iter()
-        .find(|p| p.id == pid)
-        .context("作品不存在")?
-        .revision;
-    Ok(Json(
-        serde_json::json!({"session":m.session,"project_id":pid,"revision":revision,"items":items}),
-    ))
-}
-#[derive(Deserialize)]
-struct PositionControl {
-    layer_id: Option<String>,
-    stopped: bool,
-}
-async fn control_positions(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(pid): Path<String>,
-    Json(q): Json<PositionControl>,
-) -> ApiResult<Json<serde_json::Value>> {
-    m.control_positions(&pid, q.layer_id.as_deref(), q.stopped)?;
-    position_results(&m, &pid)
-}
-#[derive(Deserialize)]
-struct ApplyPosition {
-    revision: u64,
-    layer_id: String,
-    analysis_id: String,
-    preset_id: String,
-}
-async fn apply_positions(
-    Extension(m): Extension<Arc<Workshop>>,
-    Path(pid): Path<String>,
-    Json(q): Json<ApplyPosition>,
-) -> ApiResult<Json<Snapshot>> {
-    Ok(Json(m.apply_positions(
-        &pid,
-        q.revision,
-        &q.layer_id,
-        &q.analysis_id,
-        &q.preset_id,
-    )?))
-}
-
-async fn intake(Extension(m): Extension<Arc<Workshop>>, Json(input): Json<super::intake::Intake>) -> ApiResult<Json<super::intake::IntakeResult>> {
-    Ok(Json(m.intake(input).await?))
+    let (file, track_id) = kdjv_file(&m, &target)?;
+    let (job, _) = spawn_render(&m, file.clone(), track_id);
+    let render = job.await.map_err(|error| anyhow::anyhow!("渲染中断：{error}"))??;
+    let exported = tokio::task::spawn_blocking(move || -> Result<std::path::PathBuf> {
+        let folder = file.parent().context("工程没有所在的文件夹")?;
+        let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "工程".into());
+        for n in 1..1000 {
+            let name = if n == 1 { format!("{stem}.mp4") } else { format!("{stem} {n}.mp4") };
+            let path = folder.join(name);
+            // create_new: two exports at once never take the same name.
+            let Ok(mut out) = std::fs::OpenOptions::new().write(true).create_new(true).open(&path) else { continue };
+            let copied = std::fs::File::open(&render).and_then(|mut from| std::io::copy(&mut from, &mut out));
+            if let Err(error) = copied {
+                drop(out);
+                let _ = std::fs::remove_file(&path);
+                bail!("写入 {} 失败：{error}", path.display());
+            }
+            return Ok(path);
+        }
+        bail!("{} 旁边已经有太多同名的 MP4", file.display())
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("导出中断：{error}"))??;
+    Ok(Json(serde_json::json!({"path": exported, "track_id": track_id})))
 }

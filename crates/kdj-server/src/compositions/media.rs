@@ -1,15 +1,12 @@
-//! Bounded, cancellable local media operations. No shell command construction and no writes
-//! to a user's destination until a separately validated staging file is committed.
+//! Bounded, cancellable local media operations over FFmpeg/FFprobe: probing, capturing output,
+//! rendering with progress and checking a render. No shell command construction.
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use kdj_core::composition::{
-    AudioMixMode, CompositionAudio, CompositionOptions, CompositionTimeline, OverlayAudio,
-};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
@@ -87,9 +84,6 @@ fn ms(text: &str) -> i64 {
         .map(|v| (v * 1000.).round() as i64)
         .unwrap_or(0)
 }
-fn seconds(value: i64) -> String {
-    format!("{:.3}", value as f64 / 1000.)
-}
 
 impl Probe {
     pub fn video(&self) -> Option<&Stream> {
@@ -134,9 +128,6 @@ impl Probe {
     pub fn audio_shift(&self) -> i64 {
         self.audio().map(|s| ms(&s.start_time)).unwrap_or(0)
             - self.video().map(|s| ms(&s.start_time)).unwrap_or(0)
-    }
-    pub fn chapter_shift(&self, black_head: i64) -> i64 {
-        black_head - self.video().map(|s| ms(&s.start_time)).unwrap_or(0)
     }
     pub fn check(&self, video: bool) -> Result<i64> {
         let stream = if video {
@@ -223,7 +214,7 @@ pub(super) async fn stderr_tail(mut reader: impl tokio::io::AsyncRead + Unpin) -
     tail
 }
 
-pub(super) async fn capture(
+pub(crate) async fn capture(
     binary: &Path,
     args: &[String],
     limit: u64,
@@ -291,431 +282,6 @@ pub async fn probe(path: &Path, cancel: &CancellationToken) -> Result<Probe> {
     tracing::debug!(target: "kdj_alignment_timing", capture_ms,
         parse_ms = parse_started.elapsed().as_secs_f64() * 1000., "media probe finished");
     result
-}
-
-pub async fn pcm(path: &Path, stream: usize, cancel: &CancellationToken) -> Result<Vec<f32>> {
-    let args = ["-v", "error", "-nostdin", "-threads", "1", "-i"]
-        .map(str::to_owned)
-        .into_iter()
-        .chain([
-            path.to_string_lossy().into_owned(),
-            "-map".into(),
-            format!("0:{stream}"),
-        ])
-        .chain(
-            [
-                "-t", "1800", "-vn", "-ac", "1", "-ar", "8000", "-f", "f32le", "pipe:1",
-            ]
-            .map(str::to_owned),
-        )
-        .collect::<Vec<_>>();
-    let data = capture(
-        &kdj_providers::ffmpeg::binary()?,
-        &args,
-        8000 * 4 * 1800 + 4096,
-        Duration::from_secs(300),
-        cancel,
-    )
-    .await?;
-    Ok(data
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-        .collect())
-}
-
-/// Positive shift delays audio, negative shift trims it. Always end at the desired video span.
-fn audio_chain(input: &str, shift: i64, duration: i64, output: &str) -> String {
-    let mut filters = vec!["asetpts=PTS-STARTPTS".to_string()];
-    if shift < 0 {
-        filters.push(format!(
-            "atrim=start={},asetpts=PTS-STARTPTS",
-            seconds(-shift)
-        ));
-    }
-    if shift > 0 {
-        // FFmpeg 7.1 can emit untimestamped leading silence after an upstream trim.
-        // Rebuild sample timestamps before atrim can discard the delayed silence.
-        filters.push(format!("adelay={shift}:all=1,asetpts=N/SR/TB"));
-    }
-    filters.push(format!(
-        "apad=whole_dur={},atrim=duration={}",
-        seconds(duration),
-        seconds(duration)
-    ));
-    format!("[{input}]{}[{output}]", filters.join(","))
-}
-
-/// Apply gain and fades to the audible part, after trimming/delay and before mixing.
-fn shape_audio(input: &str, output: &str, start: i64, end: i64, opt: &CompositionAudio) -> String {
-    let span = (end - start).max(0);
-    let fade_in = opt.fade_in_ms.min(span / 2);
-    let fade_out = opt.fade_out_ms.min(span / 2);
-    let mut chain = format!("[{input}]volume={:.6}", opt.gain);
-    if fade_in > 0 {
-        chain.push_str(&format!(
-            ",afade=t=in:st={}:d={}",
-            seconds(start),
-            seconds(fade_in)
-        ));
-    }
-    if fade_out > 0 {
-        chain.push_str(&format!(
-            ",afade=t=out:st={}:d={}",
-            seconds(end - fade_out),
-            seconds(fade_out)
-        ));
-    }
-    chain.push_str(&format!("[{output}]"));
-    chain
-}
-
-pub fn chapter_metadata(probe: &Probe, shift: i64) -> String {
-    fn escape(text: &str) -> String {
-        text.replace('\\', "\\\\")
-            .replace('=', "\\=")
-            .replace(';', "\\;")
-            .replace('#', "\\#")
-            .replace('\n', "\\\n")
-            .replace('\r', "")
-    }
-    let mut text = ";FFMETADATA1\n".to_string();
-    for chapter in &probe.chapters {
-        text.push_str(&format!(
-            "[CHAPTER]\nTIMEBASE=1/1000\nSTART={}\nEND={}\n",
-            ms(&chapter.start_time) + shift,
-            ms(&chapter.end_time) + shift
-        ));
-        for (key, value) in &chapter.tags {
-            text.push_str(&format!("{}={}\n", escape(key), escape(value)));
-        }
-    }
-    text
-}
-
-pub struct Render<'a> {
-    pub video_path: &'a Path,
-    pub secondary_path: &'a Path,
-    pub video: &'a Probe,
-    pub secondary: &'a Probe,
-    pub timeline: CompositionTimeline,
-    pub offset: i64,
-    pub options: &'a CompositionOptions,
-    pub overlay: bool,
-    pub output: &'a Path,
-    pub chapters: Option<&'a Path>,
-}
-
-fn main_audio_chain(render: &Render<'_>, output: &str) -> String {
-    if let Some(audio) = render.video.audio() {
-        audio_chain(
-            &format!("0:{}", audio.index),
-            render.video.audio_shift() + render.timeline.video_start_ms,
-            render.timeline.duration_ms,
-            output,
-        )
-    } else {
-        format!(
-            "anullsrc=r=48000:cl=stereo,atrim=duration={}[{output}]",
-            seconds(render.timeline.duration_ms)
-        )
-    }
-}
-
-pub fn render_args(render: &Render<'_>) -> Result<Vec<String>> {
-    let v = render.video.video().context("缺少主视频")?;
-    let a = render.secondary.audio();
-    let t = render.timeline;
-    if !render.options.audio.valid() || !render.options.overlay.valid() {
-        bail!("合成音频或画面参数超出范围");
-    }
-    let secondary_duration = render.secondary.check(render.overlay)?;
-    let (source_start, source_end) = render
-        .options
-        .segment
-        .bounds(secondary_duration)
-        .context("素材区间超出文件范围")?;
-    let selected_start = render
-        .offset
-        .checked_add(source_start)
-        .context("素材起点超出范围")?;
-    let selected_end = render
-        .offset
-        .checked_add(source_end)
-        .context("素材终点超出范围")?;
-    let audio_options = &render.options.audio;
-    let mut args = [
-        "-nostdin",
-        "-v",
-        "warning",
-        "-n",
-        "-copyts",
-        "-filter_complex_threads",
-        "1",
-        "-threads",
-        "2",
-        "-itsoffset",
-    ]
-    .map(str::to_owned)
-    .to_vec();
-    args.extend([
-        seconds(t.black_head_ms - ms(&v.start_time)),
-        "-i".into(),
-        render.video_path.to_string_lossy().into_owned(),
-        "-i".into(),
-        render.secondary_path.to_string_lossy().into_owned(),
-    ]);
-    if let Some(chapters) = render.chapters {
-        args.extend([
-            "-f".into(),
-            "ffmetadata".into(),
-            "-i".into(),
-            chapters.to_string_lossy().into_owned(),
-        ]);
-    }
-    let auxiliary: Vec<_> = render
-        .video
-        .streams
-        .iter()
-        .filter(|s| s.index != v.index && s.codec_type != "audio")
-        .collect();
-    let auxiliary_input = if render.chapters.is_some() { 3 } else { 2 };
-    if !auxiliary.is_empty() {
-        // Isolate sparse copied subtitle/data packets from the decoded video's demux
-        // queue. FFmpeg 7 can otherwise deadlock when encoder lookahead needs more video
-        // but the same demuxer is blocked waiting for a sparse copied packet to be muxed.
-        args.extend([
-            "-itsoffset".into(),
-            seconds(t.black_head_ms - ms(&v.start_time)),
-            "-i".into(),
-            render.video_path.to_string_lossy().into_owned(),
-        ]);
-    }
-    let mut graph = Vec::new();
-    let transcode = render.overlay || t.black_head_ms > 0 || t.black_tail_ms > 0;
-    if transcode {
-        ensure_safe_transcode(v)?;
-        if render.overlay {
-            ensure_safe_transcode(render.secondary.video().context("缺少叠加视频")?)?;
-        }
-    }
-    let video_map = if render.overlay {
-        let ov = render.secondary.video().context("缺少叠加视频")?;
-        let start = selected_start.max(0);
-        let trim = source_start + (-selected_start).max(0);
-        let end = selected_end.min(t.duration_ms);
-        let length = end - start;
-        if length <= 0 || v.width == 0 || v.height == 0 || ov.width == 0 || ov.height == 0 {
-            bail!("叠加视频没有有效画面范围");
-        }
-        let opt = &render.options.overlay;
-        let width = ((v.width as f64 * opt.scale)
-            .min(v.height as f64 * ov.width as f64 / ov.height as f64) as u32
-            / 2
-            * 2)
-        .max(2);
-        graph.push(format!("[0:{}]setpts=PTS-STARTPTS[base]", v.index));
-        let mut overlay = format!(
-            "[1:{}]setpts=PTS-STARTPTS,trim=start={}:duration={},setpts=PTS-STARTPTS,scale={width}:-2,format=rgba,colorchannelmixer=aa={:.4}",
-            ov.index,
-            seconds(trim),
-            seconds(length),
-            opt.opacity
-        );
-        let fade = opt.fade_ms.min(length / 2);
-        if fade > 0 {
-            overlay.push_str(&format!(
-                ",fade=t=in:st=0:d={}:alpha=1,fade=t=out:st={}:d={}:alpha=1",
-                seconds(fade),
-                seconds(length - fade),
-                seconds(fade)
-            ));
-        }
-        overlay.push_str(&format!(",setpts=PTS+{}/TB[overlay]", seconds(start)));
-        graph.push(overlay);
-        graph.push(format!("[base][overlay]overlay=x='max(0,min(W-w,W*{:.5}-w/2))':y='max(0,min(H-h,H*{:.5}-h/2))':eof_action=pass:repeatlast=0:enable='between(t,{},{})'[vout]",opt.x,opt.y,seconds(start),seconds(end)));
-        if opt.audio == OverlayAudio::Main {
-            graph.push(main_audio_chain(render, "main_unscaled"));
-            graph.push(format!(
-                "[main_unscaled]volume={:.6},alimiter=limit=1:level=0:latency=1[aout]",
-                audio_options.main_gain
-            ));
-        } else {
-            let a = a.context("叠加视频没有声音，请选择主视频原声")?;
-            graph.push(main_audio_chain(render, "main_audio"));
-            graph.push(format!(
-                "[main_audio]volume={:.6}[main_scaled]",
-                audio_options.main_gain
-            ));
-            graph.push(if opt.audio == OverlayAudio::ReplaceSegment {
-                format!(
-                    "[main_scaled]volume=0:enable='gte(t,{})*lt(t,{})'[main_muted]",
-                    seconds(start),
-                    seconds(end)
-                )
-            } else {
-                "[main_scaled]anull[main_muted]".into()
-            });
-            graph.push(audio_chain(
-                &format!("1:{}", a.index),
-                render.offset + render.secondary.audio_shift(),
-                t.duration_ms,
-                "insert_audio",
-            ));
-            graph.push(format!(
-                "[insert_audio]volume=0:enable='not(gte(t,{})*lt(t,{}))'[insert_clipped]",
-                seconds(start),
-                seconds(end)
-            ));
-            graph.push(shape_audio(
-                "insert_clipped",
-                "insert_shaped",
-                start,
-                end,
-                audio_options,
-            ));
-            graph.push("[main_muted][insert_shaped]amix=inputs=2:normalize=0,alimiter=limit=1:level=0:latency=1[aout]".into());
-        }
-        "[vout]".into()
-    } else {
-        let a = a.context("缺少替换音频")?;
-        graph.push(format!(
-            "[1:{}]asetpts=PTS-STARTPTS,atrim=start={}:end={},asetpts=PTS-STARTPTS[selected_audio]",
-            a.index,
-            seconds(source_start),
-            seconds(source_end)
-        ));
-        graph.push(audio_chain(
-            "selected_audio",
-            t.audio_start_ms,
-            t.duration_ms,
-            "replacement_padded",
-        ));
-        graph.push(shape_audio(
-            "replacement_padded",
-            "replacement_shaped",
-            t.audio_start_ms.max(0),
-            t.duration_ms - t.silence_tail_ms,
-            audio_options,
-        ));
-        if audio_options.mode == AudioMixMode::Mix {
-            graph.push(main_audio_chain(render, "main_padded"));
-            graph.push(format!(
-                "[main_padded]volume={:.6}[main_scaled]",
-                audio_options.main_gain
-            ));
-            graph.push("[main_scaled][replacement_shaped]amix=inputs=2:normalize=0,alimiter=limit=1:level=0:latency=1[aout]".into());
-        } else {
-            graph.push("[replacement_shaped]alimiter=limit=1:level=0:latency=1[aout]".into());
-        }
-        if transcode {
-            // FFmpeg 7 setpts clears the link frame rate; tpad's duration options would
-            // silently produce zero black frames. Restore the source rate explicitly.
-            let fps = frame_rate(v);
-            graph.push(format!("[0:{}]setpts=PTS-STARTPTS,fps={fps:.8},tpad=start_mode=add:stop_mode=add:color=black:start_duration={}:stop_duration={}[vout]",v.index,seconds(t.black_head_ms),seconds(t.black_tail_ms)));
-            "[vout]".into()
-        } else {
-            format!("0:{}", v.index)
-        }
-    };
-    args.extend([
-        "-filter_complex".into(),
-        graph.join(";"),
-        "-map".into(),
-        video_map,
-        "-map".into(),
-        "[aout]".into(),
-    ]);
-    for (index, stream) in auxiliary.into_iter().enumerate() {
-        args.extend(["-map".into(), format!("{auxiliary_input}:{}", stream.index)]);
-        args.extend([
-            format!("-map_metadata:s:{}", index + 2),
-            format!("{auxiliary_input}:s:{}", stream.index),
-            format!("-disposition:{}", index + 2),
-            dispositions(stream),
-        ]);
-    }
-    args.extend([
-        "-map_metadata".into(),
-        "0".into(),
-        "-map_metadata:s:v:0".into(),
-        format!("0:s:{}", v.index),
-        "-disposition:v:0".into(),
-        dispositions(v),
-        "-map_chapters".into(),
-        if render.chapters.is_some() {
-            "2".into()
-        } else {
-            "0".into()
-        },
-        "-c".into(),
-        "copy".into(),
-    ]);
-    let webm = render
-        .output
-        .extension()
-        .is_some_and(|s| s.eq_ignore_ascii_case("webm"));
-    if transcode {
-        if webm {
-            args.extend(
-                [
-                    "-c:v:0",
-                    "libvpx-vp9",
-                    "-crf",
-                    "24",
-                    "-b:v:0",
-                    "0",
-                    "-cpu-used",
-                    "4",
-                ]
-                .map(str::to_owned),
-            );
-        } else {
-            args.extend(
-                ["-c:v:0", "libx264", "-preset", "veryfast", "-crf", "20"].map(str::to_owned),
-            );
-        }
-        args.extend(["-threads:v:0", "2", "-pix_fmt:v:0", "yuv420p"].map(str::to_owned));
-    }
-    args.extend([
-        "-c:a".into(),
-        if webm { "libopus".into() } else { "aac".into() },
-        "-b:a".into(),
-        "256k".into(),
-        "-t".into(),
-        seconds(t.duration_ms),
-        "-max_interleave_delta".into(),
-        "1000000".into(),
-        "-progress".into(),
-        "pipe:1".into(),
-        "-stats_period".into(),
-        "0.25".into(),
-    ]);
-    if render.output.extension().is_some_and(|s| {
-        ["mp4", "mov", "m4v"]
-            .iter()
-            .any(|ext| s.eq_ignore_ascii_case(ext))
-    }) {
-        args.extend(["-movflags".into(), "+faststart".into()]);
-    }
-    args.push(render.output.to_string_lossy().into_owned());
-    Ok(args)
-}
-
-pub(super) fn ensure_safe_transcode(stream: &Stream) -> Result<()> {
-    if ["smpte2084", "arib-std-b67"].contains(&stream.color_transfer.as_str())
-        || ["10", "12", "16"]
-            .iter()
-            .any(|depth| stream.pix_fmt.contains(depth))
-    {
-        bail!("此视频包含 HDR 或高位深画面，当前无法安全保留其色彩信息；未修改原文件");
-    }
-    if !stream.side_data_list.is_empty()
-        || !["", "N/A", "1:1"].contains(&stream.sample_aspect_ratio.as_str())
-        || stream.tags.get("rotate").is_some_and(|v| v != "0")
-    {
-        bail!("此视频包含旋转、特殊像素比例或附加画面信息，当前无法安全重编码；未修改原文件");
-    }
-    Ok(())
 }
 
 /// Side data that only describes how to interpret the picture we already
@@ -834,17 +400,6 @@ pub(super) fn workshop_video_size(stream: &Stream) -> Result<(u32, u32)> {
     }
     let swap = workshop_rotation_swaps_axes(&stream.side_data_list)?;
     Ok(if swap { (height as u32, width as u32) } else { (width as u32, height as u32) })
-}
-
-fn dispositions(stream: &Stream) -> String {
-    let flags = stream
-        .disposition
-        .iter()
-        .filter(|(_, value)| **value == 1)
-        .map(|(name, _)| name.as_str())
-        .collect::<Vec<_>>()
-        .join("+");
-    if flags.is_empty() { "0".into() } else { flags }
 }
 
 pub async fn render(
@@ -976,21 +531,6 @@ pub fn validate(source: &Probe, output: &Probe, duration: i64) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_chapters(source: &Probe, output: &Probe, shift: i64) -> Result<()> {
-    if source.chapters.len() != output.chapters.len() {
-        bail!("成品章节数量已变化");
-    }
-    for (before, after) in source.chapters.iter().zip(&output.chapters) {
-        if (ms(&after.start_time) - ms(&before.start_time) - shift).abs() > 2
-            || (ms(&after.end_time) - ms(&before.end_time) - shift).abs() > 2
-            || before.tags != after.tags
-        {
-            bail!("成品章节时间或标签未完整保留");
-        }
-    }
-    Ok(())
-}
-
 fn frame_rate(stream: &Stream) -> f64 {
     stream
         .avg_frame_rate
@@ -998,71 +538,4 @@ fn frame_rate(stream: &Stream) -> f64 {
         .and_then(|(n, d)| Some(n.parse::<f64>().ok()? / d.parse::<f64>().ok()?))
         .filter(|v| v.is_finite() && *v > 0.)
         .unwrap_or(25.)
-}
-
-/// Atomic replacement never unlinks the old destination first. On Windows an open player
-/// handle without FILE_SHARE_DELETE makes ReplaceFileW fail, leaving the source untouched.
-pub fn replace_file(from: &Path, to: &Path) -> Result<()> {
-    #[cfg(not(windows))]
-    {
-        std::fs::rename(from, to).context("无法安全替换原文件")
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        if !to.exists() {
-            return std::fs::rename(from, to).context("无法提交文件");
-        }
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn ReplaceFileW(
-                replaced: *const u16,
-                replacement: *const u16,
-                backup: *const u16,
-                flags: u32,
-                exclude: *mut std::ffi::c_void,
-                reserved: *mut std::ffi::c_void,
-            ) -> i32;
-        }
-        let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
-        let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
-        let ok = unsafe {
-            ReplaceFileW(
-                to.as_ptr(),
-                from.as_ptr(),
-                std::ptr::null(),
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            Err(std::io::Error::last_os_error()).context("文件被占用或无法安全替换")
-        } else {
-            Ok(())
-        }
-    }
-}
-
-pub fn unique_output(video: &Path, directory: &Path) -> Result<PathBuf> {
-    let stem = video
-        .file_stem()
-        .context("视频文件名无效")?
-        .to_string_lossy();
-    let ext = video
-        .extension()
-        .context("视频扩展名无效")?
-        .to_string_lossy();
-    for index in 0..10000 {
-        let suffix = if index == 0 {
-            String::new()
-        } else {
-            format!(" ({index})")
-        };
-        let path = directory.join(format!("{stem} [合成]{suffix}.{ext}"));
-        if !path.try_exists()? {
-            return Ok(path);
-        }
-    }
-    bail!("目标目录同名文件过多")
 }

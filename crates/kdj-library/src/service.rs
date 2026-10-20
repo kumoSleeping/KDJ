@@ -904,7 +904,12 @@ impl LibraryService {
         }
         if matches!(query.media.as_str(), "audio" | "video") {
             // 与导入时的视频后缀表同源；音频是已入库媒体中非视频的补集。
-            let video_exts = kdj_providers::tags::VIDEO_EXTENSIONS;
+            // KDJ 视频工程（.kdjv）播放的是画面，算视频。
+            let video_exts: Vec<&str> = kdj_providers::tags::VIDEO_EXTENSIONS
+                .iter()
+                .copied()
+                .chain([kdj_providers::tags::PROJECT_EXTENSION])
+                .collect();
             let video_clause = video_exts
                 .iter()
                 .map(|_| "LOWER(tracks.filename) GLOB ?")
@@ -1985,7 +1990,7 @@ impl LibraryService {
             return Ok(());
         }
         let track = self.get(track_id)?.context("曲目不存在")?;
-        if kdj_providers::workshop_images::is_image_path(Path::new(&track.path)) { return Ok(()); }
+        if kdj_providers::workshop_images::is_image_path(Path::new(&track.path)) || kdj_providers::tags::is_project_path(Path::new(&track.path)) { return Ok(()); }
         self.after_file_write(track_id, write_metadata(Path::new(&track.path), &edit))
     }
 
@@ -1993,6 +1998,7 @@ impl LibraryService {
     pub fn write_cover_to_file(&self, track_id: i64, data: &[u8]) -> Result<()> {
         let track = self.get(track_id)?.context("曲目不存在")?;
         if kdj_providers::workshop_images::is_image_path(Path::new(&track.path)) { anyhow::bail!("图片素材不能写入音乐封面"); }
+        if kdj_providers::tags::is_project_path(Path::new(&track.path)) { anyhow::bail!("视频工程不能写入封面"); }
         self.after_file_write(track_id, write_cover(Path::new(&track.path), data))
     }
 
@@ -2821,7 +2827,7 @@ impl LibraryService {
 
         let Some(wanted) = track_ids else {
             let mut stmt =
-                conn.prepare(&format!("SELECT id FROM tracks WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif'){condition} ORDER BY id"))?;
+                conn.prepare(&format!("SELECT id FROM tracks WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif','kdjv'){condition} ORDER BY id"))?;
             let ids = stmt
                 .query_map([], |row| row.get::<_, i64>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -2840,7 +2846,7 @@ impl LibraryService {
                 " AND analyzed_at IS NULL"
             };
             let mut stmt = conn.prepare(&format!(
-                "SELECT id FROM tracks WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif') AND id IN ({placeholders}){extra}"
+                "SELECT id FROM tracks WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif','kdjv') AND id IN ({placeholders}){extra}"
             ))?;
             let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
                 row.get::<_, i64>(0)
@@ -2886,7 +2892,7 @@ impl LibraryService {
             let sql = format!(
                 "SELECT tracks.id FROM tracks
                  LEFT JOIN track_bpm_key_analysis_v2 v2 ON v2.track_id = tracks.id
-                 WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif'){needs_v2}{folder_clause}
+                 WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif','kdjv'){needs_v2}{folder_clause}
                  ORDER BY tracks.added_at DESC, tracks.id DESC{}",
                 if limit.is_some() { " LIMIT ?" } else { "" }
             );
@@ -2918,7 +2924,7 @@ impl LibraryService {
             let sql = format!(
                 "SELECT tracks.id FROM tracks
                  LEFT JOIN track_bpm_key_analysis_v2 v2 ON v2.track_id = tracks.id
-                 WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif') AND tracks.id IN ({placeholders}){needs_v2}"
+                 WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif','kdjv') AND tracks.id IN ({placeholders}){needs_v2}"
             );
             let mut params: Vec<SqlValue> = chunk.iter().copied().map(SqlValue::Integer).collect();
             if !force {
@@ -2968,7 +2974,7 @@ impl LibraryService {
             let sql = format!(
                 "SELECT tracks.id FROM tracks
                  LEFT JOIN track_bpm_key_analysis_v3 v3 ON v3.track_id = tracks.id
-                 WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif'){needs_v3}{folder_clause}
+                 WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif','kdjv'){needs_v3}{folder_clause}
                  ORDER BY tracks.added_at DESC, tracks.id DESC{}",
                 if limit.is_some() { " LIMIT ?" } else { "" }
             );
@@ -3000,7 +3006,7 @@ impl LibraryService {
             let sql = format!(
                 "SELECT tracks.id FROM tracks
                  LEFT JOIN track_bpm_key_analysis_v3 v3 ON v3.track_id = tracks.id
-                 WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif') AND tracks.id IN ({placeholders}){needs_v3}"
+                 WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif','kdjv') AND tracks.id IN ({placeholders}){needs_v3}"
             );
             let mut params: Vec<SqlValue> = chunk.iter().copied().map(SqlValue::Integer).collect();
             if !force {
@@ -3522,7 +3528,7 @@ impl LibraryService {
         let mut stmt = conn.prepare(
             "SELECT tracks.id, tracks.path FROM tracks \
              LEFT JOIN waveform_assets ON waveform_assets.track_id = tracks.id \
-             WHERE lower(COALESCE(tracks.format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif') AND tracks.analyzed_at IS NOT NULL AND (\
+             WHERE lower(COALESCE(tracks.format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif','kdjv') AND tracks.analyzed_at IS NOT NULL AND (\
                waveform_assets.track_id IS NULL OR waveform_assets.profile != ? OR \
                waveform_assets.revision != ? OR waveform_assets.error IS NOT NULL OR \
                (tracks.file_mtime IS NOT NULL AND \

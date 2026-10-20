@@ -3,19 +3,19 @@ import { emitTo } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { editorWindowLabels, isEditorWindow, type EditorWindowLabel } from "./windowRole";
 import type { KvjOpenRequest } from "../stores/kvjStore";
-import type { UnifiedPlayerSource, UnifiedPlayerState } from "./unifiedPlayer";
+import type { UnifiedPlayerState } from "./unifiedPlayer";
 import type { VisualizerExportTask } from "./visualizerExportQueue";
 import { useToastStore } from "../stores/toastStore";
 
 const REQUEST = "kdj:window-request", REPLY = "kdj:window-reply", SNAPSHOT = "kdj:player-snapshot";
-type Request = { id: string; sender: string; action: "ping" | "open" | "transport" | "settings" | "preview-pause" | "visualizer-exports"; payload?: unknown };
+type Request = { id: string; sender: string; action: "ping" | "open" | "transport" | "settings" | "visualizer-exports"; payload?: unknown };
 const EXPORTS = "kdj:visualizer-exports";
 export type VisualizerExportCommand = { action: "initialize" | "start" | "cancel" | "remove"; id?: string }
   /** Queue the draft another window has just saved for this song. */
   | { action: "enqueue"; trackId: number };
 export type VisualizerExportSnapshot = { tasks: VisualizerExportTask[]; error: string };
 type Reply = { id: string; value?: unknown; error?: string };
-type Transport = { method: "play" | "pause" | "seek" | "replaceAudio"; argument?: number | UnifiedPlayerSource; trackId: number | null };
+type Transport = { method: "play" | "pause" | "seek"; argument?: number; trackId: number | null };
 const pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void }>();
 let started: Promise<void> | undefined;
 const activeEditors = new Set<string>();
@@ -72,7 +72,7 @@ export async function openKvj(requested: KvjOpenRequest = {}): Promise<void> {
     else (await import("../stores/visualizerStudioStore")).useVisualizerStudioStore.getState().open(requested.track);
     return;
   }
-  const target: EditorWindowLabel = requested.tab === "live-vj" ? "live-vj-control" : requested.tab === "preferences" ? "preferences" : "kvj";
+  const target: EditorWindowLabel = "preferences";
   if (getCurrentWebviewWindow().label === target) {
     await (await import("../stores/kvjStore")).acceptKvjRequest(requested);
     return;
@@ -81,7 +81,7 @@ export async function openKvj(requested: KvjOpenRequest = {}): Promise<void> {
   await request(target, "open", requested);
 }
 export function showKvj(requested: KvjOpenRequest = {}): void {
-  void openKvj(requested).catch(error => useToastStore.getState().show(`无法打开${requested.tab === "visualizer" ? "可视化" : requested.tab === "live-vj" ? "VJ 投放" : requested.tab === "preferences" ? "偏好设置" : "VJ 剪辑"}：${String(error)}`));
+  void openKvj(requested).catch(error => useToastStore.getState().show(`无法打开${requested.tab === "visualizer" ? "可视化" : "偏好设置"}：${String(error)}`));
 }
 export function requestSettingsSave(patch: Partial<import("../types").Settings>): Promise<void> {
   return request("main", "settings", patch);
@@ -90,19 +90,14 @@ export function requestKvjTransport(method: Transport["method"], trackId: number
   return request("main", "transport", { method, trackId, argument });
 }
 
-/** Pause through the main window so it remains the sole native command owner. */
-export function pauseMainForKvjPreview(): Promise<void> {
-  return request("main", "preview-pause");
-}
-
 /** KDJ owns playback intents/command IDs; KVJ observes the same native device clock. */
 export function startWindowLink(): Promise<void> {
   if (started) return started;
   started = (async () => {
     const win = getCurrentWebviewWindow();
     const [{ getPlayerSession, publishPlayerSession, PLAYER_COMMAND_EVENT, requestPlayerCommand },
-      { getPlayingTrack, setPlayingTrack }, { PLAY_EVENT, playTrack }, stream, { runtimePlayer }] = await Promise.all([
-      import("./playerSession"), import("./playingTrack"), import("./playTrack"), import("./streamTrack"), import("./unifiedPlayer"),
+      { getPlayingTrack, setPlayingTrack }, { PLAY_EVENT, playTrack }, { runtimePlayer }] = await Promise.all([
+      import("./playerSession"), import("./playingTrack"), import("./playTrack"), import("./unifiedPlayer"),
     ]);
     const broadcast = (event: string, payload: unknown) => Promise.all(
       (isEditorWindow ? ["main"] : [...activeEditors]).map(target => emitTo(target, event, payload)),
@@ -167,10 +162,6 @@ export function startWindowLink(): Promise<void> {
           void import("./api").then(({ api }) => api.showMainWindow()).catch(() => undefined);
         } else if (message.action === "settings" && !isEditorWindow) {
           await useAppStore.getState().saveSettings(message.payload as Partial<import("../types").Settings>);
-        } else if (message.action === "preview-pause" && !isEditorWindow && message.sender === "kvj") {
-          // Preview acquisition intentionally pauses the current track, unlike a stale
-          // editor seek/pause, which must retain the track-ID guard below.
-          await runtimePlayer().interruptPause();
         } else if (message.action === "transport" && !isEditorWindow) {
           const command = message.payload as Transport, player = runtimePlayer();
           // A delayed scrub/pause from the old preview must never affect a newly loaded DJ track.
@@ -179,13 +170,6 @@ export function startWindowLink(): Promise<void> {
             case "play": value = await player.play(); break;
             case "pause": value = await player.pause(); break;
             case "seek": value = await player.seek(command.argument as number); break;
-            case "replaceAudio": {
-              const source = command.argument as UnifiedPlayerSource;
-              if (!player.replaceAudio) throw new Error("当前播放器不支持替换音频");
-              value = await player.replaceAudio(source);
-              stream.updateCompositionPreviewAudio(source.track, source.src);
-              break;
-            }
             default: throw new Error("不支持的播放命令");
           }
         } else throw new Error("不支持的窗口请求");
@@ -224,13 +208,12 @@ export function startWindowLink(): Promise<void> {
           void broadcast("kdj:window-settings", state.settings).catch(report);
       });
     }
-    await win.listen<{ request: import("./playTrack").PlayRequest; url?: string }>("kdj:window-play", ({ payload }) => {
+    await win.listen<{ request: import("./playTrack").PlayRequest }>("kdj:window-play", ({ payload }) => {
       relaying = true;
       try {
         if (isEditorWindow) window.dispatchEvent(new CustomEvent(PLAY_EVENT, { detail: payload.request }));
         else {
           const { track, autoPlay, purpose, position } = payload.request;
-          if (payload.url && "path" in track && track.path.startsWith("composition:")) stream.registerCompositionPreviewTrack(track as import("../types").Track, payload.url);
           playTrack(track, autoPlay, purpose, position);
         }
       } finally { relaying = false; }
@@ -238,9 +221,7 @@ export function startWindowLink(): Promise<void> {
     window.addEventListener(PLAY_EVENT, event => {
       if (relaying) return;
       const detail = (event as CustomEvent<import("./playTrack").PlayRequest>).detail;
-      const url = stream.isCompositionPreview(detail.track as import("../types").Track)
-        ? stream.streamMeta(detail.track as import("../types").Track)?.url : undefined;
-      void broadcast("kdj:window-play", { request: detail, url }).catch(report);
+      void broadcast("kdj:window-play", { request: detail }).catch(report);
     });
     if (isEditorWindow) {
       window.addEventListener(PLAYER_COMMAND_EVENT, event => {

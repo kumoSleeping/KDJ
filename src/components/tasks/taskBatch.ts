@@ -24,6 +24,10 @@ interface BatchWords {
   finished: string;
   failed: string;
   icon?: TaskBubbleSpec["icon"];
+  /** Where its bubble comes up; the bottom when left out. */
+  placement?: TaskBubbleSpec["placement"];
+  /** How long its bubble stays, when not the usual length (read when it comes up). */
+  stay?(): number;
   /** The list this batch belongs to is open and showing it: a start need not be announced. */
   listed(): boolean;
   open(finished: boolean): void;
@@ -67,6 +71,8 @@ export function createBatchReporter(words: BatchWords) {
       covers,
       count: about.length > covers.length ? about.length : undefined,
       icon: words.icon,
+      placement: words.placement,
+      stay: words.stay?.(),
       tone: error ? "error" : closing ? "success" : "info",
       progress: closing || members.length === 0 ? null
         : members.reduce((sum, member) => sum + (member.state === "active" ? member.progress : 1), 0) / members.length,

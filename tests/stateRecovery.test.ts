@@ -136,8 +136,6 @@ function appStore(api: Record<string, unknown>) {
     "../lib/enabledPlatforms": { normalizeEnabledPlatforms: () => [], isPlatformEnabled: () => true },
     "../lib/workspaceSession": { readWorkspaceSession: () => ({}) },
     "./downloadStore": { useDownloadStore: noStore },
-    "./workshopStore": { useWorkshopStore: noStore },
-    "./compositionStore": { useCompositionStore: noStore },
     "./libraryStore": { useLibraryStore: noStore },
     "./streamBrowseStore": { useStreamBrowseStore: noStore },
     "./sidebarVisibilityStore": { useSidebarVisibilityStore: noStore },

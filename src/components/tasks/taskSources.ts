@@ -1,15 +1,14 @@
 import { createElement } from "react";
 import { Clapperboard, FolderInput } from "lucide-react";
-import { folderName } from "../../lib/format";
 import { useSidePanels } from "../../lib/sidePanels";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
 import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelStore";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
-import { useWorkshopStore } from "../../stores/workshopStore";
 import { createBatchReporter, type BatchMember } from "./taskBatch";
+import { taskDefaultStay } from "./taskBubbleSchema";
 import { dismissTask, showTask } from "./taskBubbleStore";
-import { downloadTaskCover, projectTaskCovers, visualizerTaskCover } from "./taskCovers";
+import { downloadTaskCover, visualizerTaskCover } from "./taskCovers";
 
 /**
  * The app's own activities that report as task bubbles without a call from the code that
@@ -31,7 +30,10 @@ function watchDownloads(): () => void {
   const since = Date.now() / 1000 - 3;
   const states = new Map<string, string>();
   const reporter = createBatchReporter({
-    id: "downloads", kind: "download", unit: "首",
+    // Downloads report at the top, with every other notice the search row's work brings.
+    id: "downloads", kind: "download", unit: "首", placement: "top",
+    // A download is worth a longer look: twice the usual length.
+    stay: () => taskDefaultStay("info") * 2,
     started: "开始下载", running: "下载中", finished: "下载完成", failed: "下载失败",
     listed: () => tasksShow("downloads"),
     open: finished => openTasks(finished ? "history" : "downloads"),
@@ -66,14 +68,11 @@ function watchDownloads(): () => void {
   return () => { stop(); reporter.stop(); };
 }
 
-const WORKSHOP_ACTIVE = new Set(["queued", "rendering", "validating", "committing", "importing"]);
 const VISUALIZER_ACTIVE = new Set(["queued", "preparing", "encoding", "validating"]);
 
 function watchExports(): () => void {
   const since = Date.now() - 3_000;
   const phases = new Map<string, string>();
-  // The mixing jobs that come with the first snapshot were started before this window looked.
-  let loaded = false;
   const reporter = createBatchReporter({
     id: "exports", kind: "export", unit: "项",
     started: "开始导出", running: "导出中", finished: "导出完成", failed: "导出失败",
@@ -82,28 +81,8 @@ function watchExports(): () => void {
     open: finished => openTasks(finished ? "export-history" : "exports"),
   });
   const read = () => {
-    const { jobs, projects, session } = useWorkshopStore.getState();
     const visualizer = useVisualizerExportStore.getState().tasks;
     const members: BatchMember[] = [];
-    const found = !loaded;
-    if (session) loaded = true;
-    for (const job of jobs) {
-      const key = `mix:${job.id}`;
-      const before = phases.get(key);
-      const active = WORKSHOP_ACTIVE.has(job.phase);
-      phases.set(key, job.phase);
-      const project = projects.find(candidate => candidate.id === job.project_id);
-      members.push({
-        key,
-        title: project?.name || folderName(job.path) || "VJ 剪辑",
-        covers: projectTaskCovers(project),
-        state: active ? "active" : job.phase === "complete" ? "done"
-          : job.phase === "failed" || job.phase === "import_failed" ? "failed" : "gone",
-        progress: job.phase === "queued" ? 0 : job.progress,
-        error: job.error,
-        fresh: before === undefined ? !found : !WORKSHOP_ACTIVE.has(before),
-      });
-    }
     for (const task of visualizer) {
       const key = `picture:${task.id}`;
       const before = phases.get(key);
@@ -130,11 +109,8 @@ function watchExports(): () => void {
     reporter.report(members);
   };
   read();
-  const stops = [
-    useWorkshopStore.subscribe((state, before) => { if (state.jobs !== before.jobs) read(); }),
-    useVisualizerExportStore.subscribe((state, before) => { if (state.tasks !== before.tasks) read(); }),
-  ];
-  return () => { stops.forEach(stop => stop()); reporter.stop(); };
+  const stop = useVisualizerExportStore.subscribe((state, before) => { if (state.tasks !== before.tasks) read(); });
+  return () => { stop(); reporter.stop(); };
 }
 
 function watchImports(): () => void {
