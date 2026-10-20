@@ -41,8 +41,16 @@ export const STREAM_PLAYLIST_SECTION_IDS = [
 export type StreamPlaylistSectionId =
   (typeof STREAM_PLAYLIST_SECTION_IDS)[number];
 
-/** 成功缓存十分钟；只有用户展开目录时才会按需刷新。 */
+/**
+ * 成功缓存十分钟。展开目录、启动时已展开的目录、窗口回到前台（见 FolderTree 的
+ * useStreamBrowseLifecycle）都会按需刷新。
+ */
 export const STREAM_PLAYLIST_CACHE_TTL_MS = 10 * 60 * 1000;
+/**
+ * The window comes back to the front: a list older than this is read again, so a playlist just
+ * made on the platform (on the phone, in its web page) is there when the user returns.
+ */
+export const STREAM_PLAYLIST_FOCUS_MAX_AGE_MS = 60 * 1000;
 /** 持久时间戳最多容忍五分钟系统时钟偏差；与网络请求频率无关。 */
 const MAX_FUTURE_TIMESTAMP_SKEW_MS = 5 * 60 * 1000;
 
@@ -85,6 +93,8 @@ export interface StreamAccountBinding {
 export interface StreamPlaylistRefreshOptions {
   /** 仅供用户明确点击刷新使用：绕过十分钟目录缓存。 */
   force?: boolean;
+  /** A list older than this is read again (default: the ten-minute TTL). */
+  maxAgeMs?: number;
 }
 
 interface PersistedPlatformCache {
@@ -737,7 +747,7 @@ export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
       }));
     }
 
-    // 账号绑定到此为止：目录只在用户展开或按刷新按钮时读取。
+    // 账号绑定到此为止：目录由侧栏在展开、刷新或回到前台时读取。
   },
 
   async refreshIfStale(platform, options = {}) {
@@ -750,7 +760,7 @@ export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
     const stale =
       cached === null ||
       snapshot.updatedAt[platform] <= 0 ||
-      now - snapshot.updatedAt[platform] >= STREAM_PLAYLIST_CACHE_TTL_MS;
+      now - snapshot.updatedAt[platform] >= (options.maxAgeMs ?? STREAM_PLAYLIST_CACHE_TTL_MS);
     if (!options.force && !stale) return cached;
     // 用户主动刷新立即执行；同一时刻的重复调用只由 loading 单飞合并。
     if (snapshot.loading[platform]) return cached ?? [];
