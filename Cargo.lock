@@ -3099,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-analysis"
-version = "1.1.0-rc10"
+version = "1.1.0-rc11"
 dependencies = [
  "anyhow",
  "kdj-core",
@@ -3115,7 +3115,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-app"
-version = "1.1.0-rc10"
+version = "1.1.0-rc11"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3157,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-core"
-version = "1.1.0-rc10"
+version = "1.1.0-rc11"
 dependencies = [
  "anyhow",
  "directories",
@@ -3172,7 +3172,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-library"
-version = "1.1.0-rc10"
+version = "1.1.0-rc11"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3194,7 +3194,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-playback"
-version = "1.1.0-rc10"
+version = "1.1.0-rc11"
 dependencies = [
  "anyhow",
  "kdj-analysis",
@@ -3209,7 +3209,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-player"
-version = "1.1.0-rc10"
+version = "1.1.0-rc11"
 dependencies = [
  "anyhow",
  "cc",
@@ -3225,7 +3225,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-providers"
-version = "1.1.0-rc10"
+version = "1.1.0-rc11"
 dependencies = [
  "aes",
  "anyhow",
@@ -3277,7 +3277,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-server"
-version = "1.1.0-rc10"
+version = "1.1.0-rc11"
 dependencies = [
  "anyhow",
  "axum",
@@ -3309,7 +3309,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-stems"
-version = "1.1.0-rc10"
+version = "1.1.0-rc11"
 dependencies = [
  "anyhow",
  "kdj-core",
