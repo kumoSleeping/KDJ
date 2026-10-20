@@ -414,10 +414,15 @@ fn extract_zip(source: &Path, target: &Path) -> Result<()> {
     let mut total = 0;
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i)?;
-        let name = entry.name();
+        let name = entry.name()?;
         // Reject Windows drive paths, alternate data streams, and backslash traversal
         // even when validation is running on macOS/Linux.
-        ensure!(!name.contains([':', '\\']), "ZIP 包含不安全的路径");
+        // zip 9's enclosed_name drops a leading `/` instead of refusing it; an absolute name is
+        // still a sign of a hostile archive.
+        ensure!(
+            !name.contains([':', '\\']) && !name.starts_with('/'),
+            "ZIP 包含不安全的路径"
+        );
         let relative = entry.enclosed_name().context("ZIP 包含不安全的路径")?;
         ensure!(safe_relative(&relative), "ZIP 包含不安全的路径");
         ensure!(
