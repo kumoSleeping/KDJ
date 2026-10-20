@@ -164,15 +164,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
-dependencies = [
- "derive_arbitrary",
-]
-
-[[package]]
 name = "arboard"
 version = "3.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -854,6 +845,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "cfg_aliases"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
+
+[[package]]
 name = "chacha20"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1402,17 +1399,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "derive_arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -3099,7 +3085,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-analysis"
-version = "1.1.0-rc11"
+version = "1.1.0-rc12"
 dependencies = [
  "anyhow",
  "kdj-core",
@@ -3115,7 +3101,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-app"
-version = "1.1.0-rc11"
+version = "1.1.0-rc12"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3157,7 +3143,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-core"
-version = "1.1.0-rc11"
+version = "1.1.0-rc12"
 dependencies = [
  "anyhow",
  "directories",
@@ -3172,7 +3158,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-library"
-version = "1.1.0-rc11"
+version = "1.1.0-rc12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3194,7 +3180,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-playback"
-version = "1.1.0-rc11"
+version = "1.1.0-rc12"
 dependencies = [
  "anyhow",
  "kdj-analysis",
@@ -3209,7 +3195,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-player"
-version = "1.1.0-rc11"
+version = "1.1.0-rc12"
 dependencies = [
  "anyhow",
  "cc",
@@ -3225,7 +3211,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-providers"
-version = "1.1.0-rc11"
+version = "1.1.0-rc12"
 dependencies = [
  "aes",
  "anyhow",
@@ -3277,7 +3263,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-server"
-version = "1.1.0-rc11"
+version = "1.1.0-rc12"
 dependencies = [
  "anyhow",
  "axum",
@@ -3309,7 +3295,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-stems"
-version = "1.1.0-rc11"
+version = "1.1.0-rc12"
 dependencies = [
  "anyhow",
  "kdj-core",
@@ -3737,6 +3723,18 @@ dependencies = [
  "cfg-if",
  "libc",
  "memoffset 0.7.1",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
@@ -6381,8 +6379,6 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-updater"
 version = "2.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "806d9dac662c2e4594ff03c647a552f2c9bd544e7d0f683ec58f872f952ce4af"
 dependencies = [
  "base64 0.22.1",
  "dirs",
@@ -7050,6 +7046,12 @@ name = "twox-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8464ec13c3691491391d9fce00f6416c9a48e46972f72d7865688be2080192c9"
+
+[[package]]
+name = "typed-path"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54ec2755506471f54baf5e4bb5499d8e510cc1caf271270e778a736bd2d7336c"
 
 [[package]]
 name = "typeid"
@@ -8383,7 +8385,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "hex",
- "nix",
+ "nix 0.26.4",
  "once_cell",
  "ordered-stream",
  "rand 0.8.7",
@@ -8568,15 +8570,16 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "4.6.1"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caa8cd6af31c3b31c6631b8f483848b91589021b28fffe50adada48d4f4d2ed1"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
- "arbitrary",
  "crc32fast",
  "flate2",
  "indexmap 2.14.0",
  "memchr",
+ "nix 0.31.3",
+ "typed-path",
 ]
 
 [[package]]
