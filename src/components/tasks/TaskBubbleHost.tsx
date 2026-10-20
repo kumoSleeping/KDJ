@@ -330,7 +330,7 @@ function ReadyTaskBubble({ entry, lift, away, front, held, onHeld, onSize, prepa
       <i style={{ transform: `scaleX(${progress})` }} />
     </span>}
   </>;
-  const open = spec.onOpen;
+  const open = spec.onOpen ?? (expandable ? () => setExpanded(!expanded) : undefined);
   // The key that sends it away points the way it goes.
   const Away = entry.place === "top" ? ChevronsUp : ChevronsDown;
   return <div className="kd-task-slot" data-size={spec.size ?? "regular"} data-resizable={resizable || undefined}
@@ -388,7 +388,7 @@ function ReadyTaskBubble({ entry, lift, away, front, held, onHeld, onSize, prepa
           </button>}
         </div>
       </div>
-      {expanded && <div className="kd-task-body kd-scroll">{spec.body}</div>}
+      {expanded && <div className="kd-task-body kd-scroll" data-kd-motion="unfold" style={{ transformOrigin: entry.place === "bottom" ? "bottom right" : "top right" }}>{spec.body}</div>}
       {(hasControls || controlsRow) && <div className="kd-task-controls" data-open={hasControls && controlsOpen ? "true" : undefined}
         inert={!hasControls}>
         <div ref={controlsClip} className="kd-task-controls-clip">

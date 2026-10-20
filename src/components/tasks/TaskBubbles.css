@@ -352,7 +352,6 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
   overflow: auto;
   overscroll-behavior: contain;
   padding: 0 12px 12px;
-  animation: kd-task-fade-in 160ms linear both;
 }
 
 /* The task's own live controls: a row along the bottom, under the summary or the open body.

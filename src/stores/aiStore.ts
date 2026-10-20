@@ -4,6 +4,7 @@
  * other store's events, and is carried out by aiEvents.tsx.
  */
 import { create } from "zustand";
+import type { AiTrace } from "../lib/aiTrace";
 import { aiApi } from "../lib/api";
 import { getBridge } from "../lib/bridge";
 import { imagesOf, withAttachments, type AiAttachment } from "../lib/aiAttachments";
@@ -28,6 +29,7 @@ export interface AiRun {
   attached: string[];
   supplements: string[];
   steps: AiStep[];
+  trace?: AiTrace;
   /** The earlier session this request went on in (历史 → 继续), by its title. */
   resumed?: string;
   /** What the AI said when it was done (its last reply), Markdown. */
