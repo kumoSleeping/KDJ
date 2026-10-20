@@ -11,7 +11,7 @@ members = [
     "crates/kdj-server",
     "src-tauri",
 ]
-exclude = ["vendor/rookie", "vendor/glib-0.18.5", "vendor/hls-transmux", "vendor/cpal-0.18.1"]
+exclude = ["vendor/rookie", "vendor/glib-0.18.5", "vendor/hls-transmux", "vendor/cpal-0.18.1", "vendor/tauri-plugin-updater-2.10.1"]
 
 [patch.crates-io]
 # Tauri's GTK3 stack still requires glib 0.18. Backport the upstream 0.20 pointer
@@ -22,6 +22,10 @@ hls-transmux = { path = "vendor/hls-transmux" }
 # cpal 0.18.1 hands WASAPI silent capture packets over as audio and drops discontinuity /
 # timestamp-error flags; 0.18.2 needs windows 0.62, which Tauri 2.11 cannot share yet.
 cpal = { path = "vendor/cpal-0.18.1" }
+# Every tauri-plugin-updater 2.x release pins zip ^4, whose ZipArchive::extract it calls on
+# Windows (RUSTSEC-2026-0367/0368/0369, fixed in zip 9). The same source on zip 9; see
+# vendor/tauri-plugin-updater-2.10.1/KDJ-PATCH.md.
+tauri-plugin-updater = { path = "vendor/tauri-plugin-updater-2.10.1" }
 
 [workspace.package]
 version = "1.1.0-rc11"
