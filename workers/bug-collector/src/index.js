@@ -1,5 +1,6 @@
 import dashboard from "./dashboard.html";
 import dashboardScript from "./dashboard.browser.js";
+import { compareVersions, summarize } from "./summary.js";
 
 const MAX_BYTES = 256 * 1024;
 const RETENTION_MS = 30 * 86400_000;
@@ -93,11 +94,12 @@ async function route(request, env) {
     const old = await env.DB.prepare("SELECT id FROM reports WHERE id = ?").bind(report.id).first();
     if (old) return json({ id: report.id });
     const categories = [...new Set(report.entries.map(e => e.category))].join(",");
+    const { note, top_error } = summarize(report);
     // Atomic storage quota: max 1000 retained reports and 100 submissions/day, independent of edge limits.
-    const result = await env.DB.prepare(`INSERT OR IGNORE INTO reports (id, received_at, app_version, os, categories, event_count, body)
-      SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT count(*) FROM reports) < 1000
+    const result = await env.DB.prepare(`INSERT OR IGNORE INTO reports (id, received_at, app_version, os, categories, event_count, body, note, top_error, summarized)
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 1 WHERE (SELECT count(*) FROM reports) < 1000
       AND (SELECT count(*) FROM reports WHERE received_at >= ?) < 100`)
-      .bind(report.id, Date.now(), report.app_version, report.os, categories, report.entries.length, body, Date.now() - 86400_000).run();
+      .bind(report.id, Date.now(), report.app_version, report.os, categories, report.entries.length, body, note, top_error, Date.now() - 86400_000).run();
     if (!result.meta.changes) {
       if (!(await env.DB.prepare("SELECT id FROM reports WHERE id = ?").bind(report.id).first())) throw new Rejected(429, "Collector storage quota reached");
     }
@@ -111,13 +113,42 @@ async function route(request, env) {
       const [stamp, id] = before.split(":");
       require(!before || (/^\d{1,16}$/.test(stamp) && /^[a-f0-9]{32}$/.test(id)), "Invalid cursor");
       const cutoff = before ? Number(stamp) : Date.now() + 1;
-      const result = await env.DB.prepare(`SELECT id, received_at, app_version, os, categories, event_count FROM reports
+      const result = await env.DB.prepare(`SELECT id, received_at, app_version, os, categories, event_count, note, top_error, summarized FROM reports
         WHERE received_at >= ? AND (received_at < ? OR (received_at = ? AND id < ?))
         AND (? = '' OR instr(',' || categories || ',', ',' || ? || ',') > 0)
         ORDER BY received_at DESC, id DESC LIMIT 50`)
         .bind(Date.now() - RETENTION_MS, cutoff, cutoff, id ?? "", category, category).all();
+      // Reports received before the summary columns existed are summarized once, when first listed.
+      for (const row of result.results.filter(row => !row.summarized)) {
+        const stored = await env.DB.prepare("SELECT body FROM reports WHERE id = ?").bind(row.id).first();
+        if (!stored) continue;
+        Object.assign(row, summarize(JSON.parse(stored.body)));
+        await env.DB.prepare("UPDATE reports SET note = ?, top_error = ?, summarized = 1 WHERE id = ?").bind(row.note, row.top_error, row.id).run();
+      }
+      for (const row of result.results) delete row.summarized;
       const last = result.results.at(-1);
       return json({ reports: result.results, next: result.results.length === 50 ? `${last.received_at}:${last.id}` : null });
+    }
+    // Deletes the reports named, or every report of a version below `below` (a problem fixed there).
+    if (path === "/admin/reports/delete" && method === "POST") {
+      const input = await boundedBody(request);
+      fields(input, ["ids", "below"]);
+      let ids = [];
+      if (input.ids !== undefined) {
+        require(Array.isArray(input.ids) && input.ids.length <= 1000 && input.ids.every(id => typeof id === "string" && /^[a-f0-9]{32}$/.test(id)), "Invalid ids");
+        ids = input.ids;
+      } else {
+        require(compareVersions(string(input.below, 64), "0.0.0") !== null, "Invalid version");
+        const rows = await env.DB.prepare("SELECT id, app_version FROM reports").all();
+        ids = rows.results.filter(row => compareVersions(row.app_version, input.below) < 0).map(row => row.id);
+      }
+      let deleted = 0;
+      for (let at = 0; at < ids.length; at += 90) {
+        const part = ids.slice(at, at + 90);
+        const result = await env.DB.prepare(`DELETE FROM reports WHERE id IN (${part.map(() => "?").join(",")})`).bind(...part).run();
+        deleted += result.meta.changes ?? 0;
+      }
+      return json({ deleted });
     }
     const id = path.match(/^\/admin\/reports\/([a-f0-9]{32})$/)?.[1];
     if (id && method === "GET") {

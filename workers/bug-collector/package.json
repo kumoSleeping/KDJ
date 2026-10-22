@@ -4,8 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "check": "node --check src/index.js && node --check src/dashboard.browser.js && wrangler deploy --dry-run",
-    "deploy": "wrangler deploy"
+    "check": "node --check src/index.js && node --check src/dashboard.browser.js && node --check scripts/reports.mjs && node --test test/summary.test.mjs && wrangler deploy --dry-run",
+    "deploy": "wrangler deploy",
+    "reports": "node scripts/reports.mjs"
   },
   "devDependencies": { "wrangler": "4.140.0" }
 }
