@@ -75,6 +75,7 @@ KDJ 的状态：各平台登录状态与登录方式、本机浏览器、账号�
 - <shot src="kdj_peek 给出的帧路径">这张图说明什么</shot>：你看过的画面，贴给用户自己判断（字幕、水印、是不是原作）。方案里有视频素材时必须给：每个推荐的视频素材至少一张；能截帧的（在线 B 站、曲库视频）没贴截图，方案会被退回。
 同一个问题默认单选；questions 里给 {id, multiple, default} 改成多选或预选。返回 answers（每个问题选中的值）和 note。方案不给 timeout。
 用户还可以写一句补充（note），要照着做。用户关掉或点「暂停」则 cancelled 为 true，停下。
+剪辑草稿里有几处要用户定（空档怎么补、两段素材怎么接、效果多强）：给 timeline，不写 body 里的标签。系统把草稿画成时间轴（小节尺、各条轨道、岔口），每个岔口的选项放在底部，用户点一个选项，顶部就换成这个选项在那里的画面（前一刻、这一处、后一刻，系统自己截帧，你不贴图）。question 是标题，body 写一两句：草稿做了什么、还有几处要定。返回 answers（每个岔口选中的选项 id）、note 和 project：系统已经把选中的选项放进草稿并保存，接着直接 kdj_play，不要再自己改一遍。岔口有问题（小节越界、选项超出岔口、放进去打不开、重复用了同一段素材）时会退回并写明原因，照着改。
 
 ### 参数
 
@@ -85,6 +86,11 @@ KDJ 的状态：各平台登录状态与登录方式、本机浏览器、账号�
 - `questions[].options`：不写 body 时的选项
 - `songs`：kdj_search 给出的 ref
 - `default`：选项文字或 ref
+- `timeline`：剪辑草稿的岔口确认：{project, song, forks}
+- `timeline.project`：已用 kdj_project_save 保存的 .kdjv 草稿的绝对路径，岔口处先铺好推荐的选项
+- `timeline.song`：草稿里那首歌：曲库 id（library:<id>）或文件路径；岔口的小节按它的小节线和它在草稿里的位置换算
+- `timeline.forks`：1–6 个岔口，每个 {id, kind, from_bar, to_bar, track, question, options, default}：from_bar 是岔口的第一个小节，to_bar 是岔口之后的那个小节（1 是第一条小节线）；track 是选项要替换的轨道（0 是最上层）；kind 是 gap（空档）、seam（交界）或 effect（效果）
+- `timeline.forks[].options`：2–4 个选项，每个 {id, label, note, clips}：clips 是 .kdjv 片段（at 用成片时间，秒），放进岔口时替换这条轨道在岔口里原有的片段；clips 为空就是这一段留空（例如「不加效果」「留黑」）
 
 ## tell_user
 

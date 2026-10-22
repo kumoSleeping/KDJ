@@ -31,7 +31,7 @@ const EDGE_GAP: Record<TaskPlacement, number> = { bottom: 12, top: 10 };
 /** How far inside the top edge of a base bubble a bubble that comes out from behind it starts,
  *  so that nothing of its edge or shadow shows before it moves. */
 const BEHIND_INSET = 6;
-const SIZE_RANK: Record<TaskSize, number> = { small: 0, regular: 1, large: 2 };
+const SIZE_RANK: Record<TaskSize, number> = { small: 0, regular: 1, large: 2, wide: 2 };
 /** A resizable bubble (TaskBubbleSpec.resizable) is never narrower than this, in px. */
 const RESIZE_MIN = 288;
 const widthKey = (kind: string) => `kd-task-width:${kind}`;
@@ -177,7 +177,9 @@ function ReadyTaskBubble({ entry, lift, away, front, held, onHeld, onSize, prepa
   const mini = useMiniPlayer(state => state.phase === "on") && entry.spec.song !== undefined;
   const node = useRef<HTMLElement>(null);
   const resizable = !!entry.spec.resizable;
-  const [width, setWidth] = useState(() => (resizable ? storedWidth(entry.spec.kind) : null));
+  // A wide bubble keeps a width of its own: the kind's narrower one would crowd it.
+  const widthName = entry.spec.size === "wide" ? `${entry.spec.kind}:wide` : entry.spec.kind;
+  const [width, setWidth] = useState(() => (resizable ? storedWidth(widthName) : null));
 
   // A bubble about the playing song keeps the old song while it rolls down, then rises with
   // the new one.
@@ -336,7 +338,7 @@ function ReadyTaskBubble({ entry, lift, away, front, held, onHeld, onSize, prepa
   return <div className="kd-task-slot" data-size={spec.size ?? "regular"} data-resizable={resizable || undefined}
     style={{ "--kd-task-lift": `${lift}px`, "--kd-task-away": away === null ? undefined : `${away}px`, zIndex: front,
       width: resizable && width !== null ? `min(${width}px, calc(100% - 2 * var(--kd-task-gap)))` : undefined } as CSSProperties}>
-    {resizable && !entry.leaving && <ResizeGrip kind={entry.spec.kind} width={width} onWidth={setWidth} />}
+    {resizable && !entry.leaving && <ResizeGrip kind={widthName} width={width} onWidth={setWidth} />}
     <article ref={node} className="kd-task" role={tone === "error" ? "alert" : "status"}
       data-kind={spec.kind} data-tone={tone} data-phase={entry.leaving || swapping ? "out" : "in"}
       data-expanded={expanded || undefined} data-held={held || preparing || swapping || undefined}

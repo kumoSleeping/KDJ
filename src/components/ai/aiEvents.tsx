@@ -34,6 +34,8 @@ import { emptyTrace, reduceAiTrace } from "../../lib/aiTrace";
 import { AiTaskTrace } from "./AiTaskTrace";
 import { useAiStore, type AiRun } from "../../stores/aiStore";
 import { PlanBody, PlanText, type PlanMedia } from "./AiMarkup";
+import { TimelineBoard } from "./AiTimeline";
+import type { AskTimeline } from "../../lib/aiTimeline";
 import "./AiAsk.css";
 
 /**
@@ -128,6 +130,8 @@ interface Asked {
   question: string; body: string; preview: string; questions: AskQuestion[];
   media: Record<string, PlanMedia>; shots: Record<string, string>;
   options: string[]; songs: AskSong[]; multiple: boolean; defaults: string[]; timeout: number;
+  /** A draft's forks (kdj-timeline.ts), drawn as a timeline. */
+  timeline: AskTimeline | null;
 }
 
 /** The dialog each `ask_user` call waits on (`kdj:ask:<call id>`), and an answer given before it came. */
@@ -168,6 +172,40 @@ function asked(details: unknown): Asked {
     multiple: data.multiple === true,
     defaults: strings(data.defaults),
     timeout: typeof data.timeout === "number" ? data.timeout : 0,
+    timeline: timelineOf(data.timeline),
+  };
+}
+
+/** The timeline as ask_user laid it out, or null when the call has none or it is not whole. */
+function timelineOf(value: unknown): AskTimeline | null {
+  const data = fields(value);
+  const num = (item: unknown) => (typeof item === "number" && Number.isFinite(item) ? item : 0);
+  const key = (item: unknown) => (typeof item === "string" ? item : null);
+  const clips = (items: unknown) => (Array.isArray(items) ? items : []).map(raw => {
+    const clip = fields(raw);
+    return { at: num(clip.at), length: num(clip.length), label: str(clip.label), kind: str(clip.kind) };
+  });
+  const forks = (Array.isArray(data.forks) ? data.forks : []).map(raw => {
+    const fork = fields(raw);
+    return {
+      id: str(fork.id), kind: str(fork.kind), question: str(fork.question), from_bar: num(fork.from_bar), to_bar: num(fork.to_bar),
+      track: num(fork.track), start: num(fork.start), end: num(fork.end), default: str(fork.default),
+      before: key(fork.before), after: key(fork.after),
+      options: (Array.isArray(fork.options) ? fork.options : []).map(item => {
+        const option = fields(item);
+        return { id: str(option.id), label: str(option.label), note: str(option.note),
+          frames: (Array.isArray(option.frames) ? option.frames : []).map(key), clips: clips(option.clips) };
+      }).filter(option => option.id),
+    };
+  }).filter(fork => fork.id && fork.options.length > 0);
+  if (forks.length === 0) return null;
+  return {
+    project: str(data.project), title: str(data.title), duration: num(data.duration),
+    bars: (Array.isArray(data.bars) ? data.bars : []).map(raw => { const bar = fields(raw); return { n: num(bar.n), at: num(bar.at) }; }),
+    tracks: (Array.isArray(data.tracks) ? data.tracks : []).map(clips),
+    forks,
+    frames: Object.fromEntries(Object.entries(fields(data.frames))
+      .filter(([, src]) => typeof src === "string" && src.startsWith("data:image/")).map(([at, src]) => [at, src as string])),
   };
 }
 
@@ -265,6 +303,31 @@ function AskPlan({ callId, ask }: { callId: string; ask: Asked }) {
   </form>;
 }
 
+/**
+ * A draft's forks (ask_user's `timeline`): the AI's words over the timeline, every fork answered
+ * together with one 确定; the AI's side puts the picks into the draft and saves it.
+ */
+function AskTimelinePlan({ callId, ask, timeline }: { callId: string; ask: Asked; timeline: AskTimeline }) {
+  const [picks, setPicks] = useState<Record<string, string>>(
+    () => Object.fromEntries(timeline.forks.map(fork => [fork.id, fork.default || fork.options[0].id])));
+  const [note, setNote] = useState("");
+  const submit = () => {
+    sendAsk(callId, { answers: Object.fromEntries(Object.entries(picks).map(([fork, option]) => [fork, [option]])), note: note.trim() || undefined });
+    dismissTask(`ai-ask:${callId}`);
+  };
+  const pause = () => {
+    sendAsk(callId, { answers: {}, cancelled: true });
+    dismissTask(`ai-ask:${callId}`);
+    void useAiStore.getState().abort();
+  };
+  return <form className="kd-ai-ask" data-timeline="" onSubmit={event => { event.preventDefault(); submit(); }}>
+    {ask.question && <p className="kd-ai-ask-title">{ask.question}</p>}
+    {ask.body && <PlanText text={ask.body} />}
+    <TimelineBoard timeline={timeline} picks={picks} onPick={(fork, option) => setPicks(before => ({ ...before, [fork]: option }))} />
+    <NoteField note={note} onNote={setNote} canSend onPause={pause} />
+  </form>;
+}
+
 /** The question's body: songs to pick, text choices, and a line for the listener's own words. */
 function AskPanel({ callId, ask }: { callId: string; ask: Asked }) {
   const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set(ask.defaults));
@@ -330,7 +393,9 @@ function askBubble(callId: string, ask: Asked) {
     icon: AI_MARK,
     stay: ask.timeout * 1000,
     resizable: true,
-    controls: ask.questions.length > 0 ? <AskPlan callId={callId} ask={ask} /> : <AskPanel callId={callId} ask={ask} />,
+    size: ask.timeline ? "wide" : undefined,
+    controls: ask.timeline ? <AskTimelinePlan callId={callId} ask={ask} timeline={ask.timeline} />
+      : ask.questions.length > 0 ? <AskPlan callId={callId} ask={ask} /> : <AskPanel callId={callId} ask={ask} />,
     // Put away by hand: nothing chosen. Run out: pi takes the AI's default itself.
     onDismiss: reason => { if (reason === "user") sendAsk(callId, { choices: [], cancelled: true }); },
   });

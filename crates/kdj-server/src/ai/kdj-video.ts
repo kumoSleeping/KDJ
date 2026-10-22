@@ -290,6 +290,59 @@ function dropped(was: unknown, now: Record<string, unknown>): string[] {
   return Object.keys(was).filter(key => !(key in now));
 }
 
+/**
+ * What `kdj project check` says of `document` as if saved in `folder`, written to a trial file in
+ * the workspace and removed after; a project that cannot play throws with KDJ's reason.
+ */
+export async function checkProject(deps: VideoDeps, document: Record<string, unknown>, folder: string, signal?: AbortSignal): Promise<unknown> {
+  const checks = join(WORKSPACE, "checks");
+  await mkdir(checks, { recursive: true });
+  const trial = join(checks, `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.kdjv`);
+  await writeFile(trial, `${JSON.stringify(checkable(document, folder), null, 2)}\n`, "utf8");
+  try {
+    return await deps.kdj(["project", "check", trial], signal);
+  } finally {
+    await rm(trial, { force: true });
+  }
+}
+
+/**
+ * A project written into the library: inside a library root, in a folder that is there, checked
+ * first, the old file kept in the workspace's backups and never left half-written. The save tool
+ * and a draft's forks (ask_user's timeline) both write through here.
+ */
+export async function saveProject(deps: VideoDeps, file: string, document: Record<string, unknown>, signal?: AbortSignal) {
+  const path = resolve(file);
+  if (extname(path).toLowerCase() !== ".kdjv") throw new Error("工程文件要以 .kdjv 结尾");
+  const roots = await deps.libraryRoots(signal);
+  if (!roots.some(root => inside(resolve(root), path))) throw new Error(`工程要放在曲库根目录内：${roots.join("、")}`);
+  // Saving a project never makes folders: it is not a way to lay out the library.
+  if (!statSync(dirname(path), { throwIfNoEntry: false })?.isDirectory()) throw new Error(`文件夹不存在：${dirname(path)}。工程只能存进已有的文件夹`);
+  if (document.kdjv !== 1) throw new Error("document 需要 \"kdjv\": 1");
+  // Checked before it is written: a project that cannot play never reaches the library.
+  let check: unknown;
+  try {
+    check = await checkProject(deps, document, dirname(path), signal);
+  } catch (error) {
+    throw new Error(`工程没有保存，检查没通过：${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (existsSync(path)) {
+    const old = await readFile(path, "utf8");
+    let parsed: unknown = null;
+    try { parsed = JSON.parse(old); } catch { /* not JSON: kept as the backup below */ }
+    const missing = dropped(parsed, document);
+    if (missing.length > 0) throw new Error(`新内容少了原有的字段：${missing.join("、")}。读出整份再改，不要删掉不认识的字段`);
+    const backups = join(WORKSPACE, "backups");
+    await mkdir(backups, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    await writeFile(join(backups, `${stamp}-${relative(dirname(path), path)}`), old, "utf8");
+  }
+  const temporary = `${path}.${process.pid}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(document, null, 2)}\n`, "utf8");
+  await rename(temporary, path);
+  return { saved: path, check };
+}
+
 function projectTools(deps: VideoDeps) {
   const save = defineTool({
     name: "kdj_project_save",
@@ -300,41 +353,7 @@ function projectTools(deps: VideoDeps) {
       document: Type.Record(Type.String(), Type.Unknown()),
     }),
     async execute(_id, params, signal) {
-      const path = resolve(params.path);
-      if (extname(path).toLowerCase() !== ".kdjv") throw new Error("工程文件要以 .kdjv 结尾");
-      const roots = await deps.libraryRoots(signal);
-      if (!roots.some(root => inside(resolve(root), path))) throw new Error(`工程要放在曲库根目录内：${roots.join("、")}`);
-      // Saving a project never makes folders: it is not a way to lay out the library.
-      if (!statSync(dirname(path), { throwIfNoEntry: false })?.isDirectory()) throw new Error(`文件夹不存在：${dirname(path)}。工程只能存进已有的文件夹`);
-      if (params.document.kdjv !== 1) throw new Error("document 需要 \"kdjv\": 1");
-      // Checked before it is written: a project that cannot play never reaches the library.
-      const checks = join(WORKSPACE, "checks");
-      await mkdir(checks, { recursive: true });
-      const trial = join(checks, `${process.pid}-${Date.now()}.kdjv`);
-      await writeFile(trial, `${JSON.stringify(checkable(params.document, dirname(path)), null, 2)}\n`, "utf8");
-      let check: unknown;
-      try {
-        check = await deps.kdj(["project", "check", trial], signal);
-      } catch (error) {
-        throw new Error(`工程没有保存，检查没通过：${error instanceof Error ? error.message : String(error)}`);
-      } finally {
-        await rm(trial, { force: true });
-      }
-      if (existsSync(path)) {
-        const old = await readFile(path, "utf8");
-        let parsed: unknown = null;
-        try { parsed = JSON.parse(old); } catch { /* not JSON: kept as the backup below */ }
-        const missing = dropped(parsed, params.document);
-        if (missing.length > 0) throw new Error(`新内容少了原有的字段：${missing.join("、")}。读出整份再改，不要删掉不认识的字段`);
-        const backups = join(WORKSPACE, "backups");
-        await mkdir(backups, { recursive: true });
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        await writeFile(join(backups, `${stamp}-${relative(dirname(path), path)}`), old, "utf8");
-      }
-      const temporary = `${path}.${process.pid}.tmp`;
-      await writeFile(temporary, `${JSON.stringify(params.document, null, 2)}\n`, "utf8");
-      await rename(temporary, path);
-      return text({ saved: path, check });
+      return text(await saveProject(deps, params.path, params.document, signal));
     },
   });
 

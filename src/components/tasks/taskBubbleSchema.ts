@@ -8,7 +8,7 @@ import type { ReactNode } from "react";
  */
 export type TaskTone = "info" | "success" | "error";
 
-export type TaskSize = "small" | "regular" | "large";
+export type TaskSize = "small" | "regular" | "large" | "wide";
 
 /**
  * Where a bubble comes up. `bottom` (the default): from behind the player bar's top edge, at
@@ -77,7 +77,8 @@ export interface TaskBubbleSpec {
   /**
    * How much room the bubble takes. `small`: a one-line note as wide as its text. `regular`
    * (the default): a task with a cover and two lines. `large`: the task the listener reads and
-   * acts on most, with a big cover and a title-size name (the playing song).
+   * acts on most, with a big cover and a title-size name (the playing song). `wide`: a bubble that
+   * lays something out across (an AI draft's timeline); a resizable one keeps its own width.
    */
   size?: TaskSize;
   /**

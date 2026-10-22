@@ -38,6 +38,7 @@ const TOOLS: &str = include_str!("kdj-tools.ts");
 const WEB: &str = include_str!("kdj-web.ts");
 const FOLDERS: &str = include_str!("kdj-folders.ts");
 const VIDEO: &str = include_str!("kdj-video.ts");
+const TIMELINE: &str = include_str!("kdj-timeline.ts");
 const PROMPTS_TS: &str = include_str!("kdj-prompts.ts");
 /// The words the model is given (prompts/README.md), as files under `<pi-agent>/kdj/prompts`.
 const PROMPTS: &[(&str, &str)] = &[
@@ -165,6 +166,9 @@ impl Paths {
     }
     fn video(&self) -> PathBuf {
         self.agent.join("kdj").join("kdj-video.ts")
+    }
+    fn timeline(&self) -> PathBuf {
+        self.agent.join("kdj").join("kdj-timeline.ts")
     }
     fn prompts_ts(&self) -> PathBuf {
         self.agent.join("kdj").join("kdj-prompts.ts")
@@ -471,6 +475,7 @@ impl AiBridge {
         write_if_changed(&paths.web(), WEB)?;
         write_if_changed(&paths.folders(), FOLDERS)?;
         write_if_changed(&paths.video(), VIDEO)?;
+        write_if_changed(&paths.timeline(), TIMELINE)?;
         write_if_changed(&paths.prompts_ts(), PROMPTS_TS)?;
         write_if_changed(&paths.agent.join("web-search.json"), ACCESS_CONFIG)?;
         for (name, contents) in PROMPTS {
@@ -1261,6 +1266,7 @@ mod tests {
         }
         assert_eq!(bridge.paths.prompt(), bridge.paths.prompts().join("system.md"));
         assert!(kdj.join("kdj-video.ts").is_file());
+        assert!(kdj.join("kdj-timeline.ts").is_file());
         assert!(kdj.join("kdj-prompts.ts").is_file());
         assert!(!kdj.join("kdj-prompt.md").exists() && !kdj.join("skills").exists(), "the old places are cleared");
     }

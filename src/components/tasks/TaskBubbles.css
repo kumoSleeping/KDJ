@@ -478,8 +478,8 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
 }
 :root[data-theme-pack="sakulaptop98"] .kd-task-progress > i { background: var(--kd-theme); border-radius: 0; }
 
-/* ---- Sizes. A task says how much room it takes (`size` in its spec); the host only has these
-   three. Everything is sized from the slot, so nothing but a row of controls unfolding changes
+/* ---- Sizes. A task says how much room it takes (`size` in its spec); the host has these
+   four. Everything is sized from the slot, so nothing but a row of controls unfolding changes
    a bubble's size while it is up. ---- */
 .kd-task-slot[data-size="small"] {
   width: fit-content;
@@ -487,6 +487,7 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
 }
 .kd-task-slot[data-size="small"] .kd-task-main { min-height: 2.5rem; padding-block: 5px; }
 .kd-task-slot[data-size="large"] { width: min(28rem, calc(100% - 2 * var(--kd-task-gap))); }
+.kd-task-slot[data-size="wide"] { width: min(44rem, calc(100% - 2 * var(--kd-task-gap))); }
 .kd-task-slot[data-size="large"] .kd-task { border-radius: 14px; }
 .kd-task-slot[data-size="large"] .kd-task-main:not([data-bare]) {
   gap: 14px;

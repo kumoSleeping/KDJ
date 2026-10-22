@@ -15,12 +15,16 @@
  */
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { basename, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, relative, resolve } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { folderScore, walk } from "./kdj-folders.ts";
 import { promptText, toolText } from "./kdj-prompts.ts";
-import { blindLine, registerVideo, videoHeight } from "./kdj-video.ts";
+import {
+  forkMoments, forkProblems, forkSpan, laneClip, projectDuration, repeats, replaceRange, songPlace, toProject, visibleAt,
+  type Doc, type Fork,
+} from "./kdj-timeline.ts";
+import { blindLine, checkProject, registerVideo, saveProject, videoHeight } from "./kdj-video.ts";
 import { registerWeb } from "./kdj-web.ts";
 
 /** The opening of the system prompt, in place of pi's coding-assistant one. */
@@ -126,6 +130,9 @@ async function libraryRoots(signal?: AbortSignal): Promise<string[]> {
   roots = { at: Date.now(), dirs };
   return dirs;
 }
+
+/** What the video tools (kdj-video.ts) borrow, and what saving a draft's forks writes through. */
+const videoDeps = { kdj, libraryRoots };
 
 const folders = defineTool({
   name: "kdj_folders",
@@ -464,6 +471,147 @@ async function shotPictures(paths: Iterable<string>) {
   return out;
 }
 
+// ---------------------------------------------------------------- a draft's forks
+
+/** A fork's frames are this wide: a bubble holds a few dozen of them. */
+const FORK_FRAME_WIDTH = 320;
+const IMAGE_MIME: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
+
+type Moment = { src: string; at: number; image: boolean };
+const frameKey = (moment: Moment) => `${moment.src}@${moment.at}`;
+
+/** The song's file and downbeats, from the library (analysed now if it has not been). */
+async function songGrid(song: string, signal?: AbortSignal) {
+  const id = /^(?:library:)?(\d+)$/.exec(song.trim())?.[1];
+  const data = await kdj(["library", "get", ...(id ? ["--id", id] : ["--path", resolve(song)])], signal) as
+    { path?: unknown; grid?: { downbeats?: unknown } } | null;
+  if (typeof data?.path !== "string") throw new Error(`曲库里找不到这首歌：${song}`);
+  const downbeats = Array.isArray(data.grid?.downbeats) ? data.grid.downbeats.filter((t): t is number => typeof t === "number") : [];
+  return { path: data.path, downbeats };
+}
+
+/**
+ * The pictures at the moments a fork is shown at, by `src@at`: frames KDJ cuts now (one peek per
+ * source), or the image itself. A moment that cannot be cut is left out and drawn as no picture.
+ */
+async function forkFrames(moments: readonly Moment[], signal?: AbortSignal) {
+  const out: Record<string, string> = {};
+  const bySource = new Map<string, Set<number>>();
+  for (const moment of moments) {
+    if (moment.image) {
+      try {
+        const data = await readFile(moment.src);
+        const type = IMAGE_MIME[extname(moment.src).toLowerCase()];
+        if (type && data.length <= SHOT_BYTES) out[frameKey(moment)] = `data:${type};base64,${data.toString("base64")}`;
+      } catch { /* An image that cannot be read is drawn as no picture. */ }
+      continue;
+    }
+    bySource.set(moment.src, (bySource.get(moment.src) ?? new Set()).add(moment.at));
+  }
+  for (const [src, times] of bySource) {
+    const wanted = [...times];
+    type Cut = { frames?: { at?: unknown; path?: unknown }[] } | null;
+    let cut: Cut;
+    try {
+      cut = await kdj(["peek", src, "--at", wanted.join(","), "--width", String(FORK_FRAME_WIDTH)], signal) as Cut;
+    } catch {
+      continue;
+    }
+    const frames = (cut?.frames ?? []).filter((frame): frame is { at: number; path: string } =>
+      typeof frame.at === "number" && typeof frame.path === "string");
+    for (const at of wanted) {
+      // KDJ pulls a moment at a source's very end back a little: the nearest frame is it.
+      const frame = frames.reduce<{ at: number; path: string } | null>((best, item) =>
+        !best || Math.abs(item.at - at) < Math.abs(best.at - at) ? item : best, null);
+      if (!frame || Math.abs(frame.at - at) > 0.5) continue;
+      try {
+        const data = await readFile(frame.path);
+        if (data.length <= SHOT_BYTES) out[`${src}@${at}`] = `data:image/jpeg;base64,${data.toString("base64")}`;
+      } catch { /* drawn as no picture */ }
+    }
+  }
+  return out;
+}
+
+/**
+ * A draft's forks made ready to ask: each place in the project's time, every option put into the
+ * draft and checked (it plays, and it shows no footage twice), and the frames the bubble shows —
+ * just before the place, three inside it with each option, just after it. What is wrong goes back
+ * to the model whole, before the listener is asked anything.
+ */
+async function timelinePlan(timeline: { project: string; song: string; forks: Fork[] }, signal?: AbortSignal) {
+  const path = resolve(timeline.project);
+  if (extname(path).toLowerCase() !== ".kdjv") throw new Error("timeline.project 要是已保存的 .kdjv 草稿：先用 kdj_project_save 把推荐项铺好存进曲库");
+  let doc: Doc;
+  try {
+    doc = JSON.parse(await readFile(path, "utf8")) as Doc;
+  } catch (error) {
+    throw new Error(`读不到草稿 ${path}：${error instanceof Error ? error.message : String(error)}`);
+  }
+  const base = dirname(path);
+  const song = await songGrid(timeline.song, signal);
+  const place = songPlace(doc, song.path, base);
+  const forks = timeline.forks;
+  const spans = forks.map(fork => forkSpan(fork, song.downbeats, place));
+  const problems = forkProblems(forks, spans);
+  if (problems.length > 0) throw new Error(`岔口有问题，没有问用户：\n${problems.join("\n")}`);
+  const variants = forks.map((fork, n) => fork.options.map(option => replaceRange(doc, fork.track, spans[n].start, spans[n].end, option.clips)));
+  for (const [n, fork] of forks.entries()) {
+    for (const [j, option] of fork.options.entries()) {
+      for (const repeat of repeats(variants[n][j], option.clips, base)) problems.push(`岔口 ${fork.id} 选项 ${option.id}：${repeat}`);
+      try {
+        await checkProject(videoDeps, variants[n][j] as Record<string, unknown>, base, signal);
+      } catch (error) {
+        problems.push(`岔口 ${fork.id} 选项 ${option.id} 放进草稿后打不开：${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+  if (problems.length > 0) throw new Error(`岔口有问题，没有问用户：\n${problems.join("\n")}`);
+
+  const duration = projectDuration(doc);
+  const moments: Moment[] = [];
+  // null: no such moment (the place starts the project); "": nothing on screen; else a frame's key.
+  const shown = (variant: Doc, t: number | null) => {
+    if (t === null) return null;
+    const seen = visibleAt(variant, t, base);
+    if (!seen) return "";
+    moments.push(seen);
+    return frameKey(seen);
+  };
+  const laid = forks.map((fork, n) => {
+    const { start, end } = spans[n];
+    const at = forkMoments(start, end, duration);
+    const chosen = fork.default ?? fork.options[0].id;
+    const around = variants[n][fork.options.findIndex(option => option.id === chosen)];
+    return {
+      id: fork.id, kind: fork.kind ?? "", question: fork.question, from_bar: fork.from_bar, to_bar: fork.to_bar,
+      track: fork.track, start, end, default: chosen,
+      before: shown(around, at.before), after: shown(around, at.after),
+      options: fork.options.map((option, j) => ({
+        id: option.id, label: option.label, note: option.note ?? "",
+        frames: at.inside.map(t => shown(variants[n][j], t)),
+        clips: option.clips.map(laneClip),
+      })),
+    };
+  });
+  const bars = song.downbeats
+    .map((t, i) => ({ n: i + 1, at: toProject(place, t), inside: t >= place.in && t <= place.out }))
+    .filter(bar => bar.inside && bar.at >= 0 && bar.at <= duration)
+    .map(({ n, at }) => ({ n, at }));
+  return {
+    path, doc, forks, spans,
+    shown: {
+      project: path,
+      title: typeof doc.title === "string" && doc.title ? doc.title : basename(path, extname(path)),
+      duration,
+      bars,
+      tracks: (doc.tracks ?? []).map(track => (track.clips ?? []).map(laneClip)),
+      forks: laid,
+      frames: await forkFrames(moments, signal),
+    },
+  };
+}
+
 const askUser = defineTool({
   name: "ask_user",
   label: "询问",
@@ -484,8 +632,55 @@ const askUser = defineTool({
     multiple: Type.Optional(Type.Boolean()),
     default: Type.Optional(Type.Array(Type.String(), { description: toolText("ask_user").param("default") })),
     timeout: Type.Optional(Type.Integer({ minimum: 3, maximum: 300 })),
+    timeline: Type.Optional(Type.Object({
+      project: Type.String({ description: toolText("ask_user").param("timeline.project") }),
+      song: Type.String({ description: toolText("ask_user").param("timeline.song") }),
+      forks: Type.Array(Type.Object({
+        id: Type.String(),
+        kind: Type.Optional(Type.String()),
+        from_bar: Type.Integer({ minimum: 1 }),
+        to_bar: Type.Integer({ minimum: 2 }),
+        track: Type.Integer({ minimum: 0 }),
+        question: Type.String(),
+        options: Type.Array(Type.Object({
+          id: Type.String(),
+          label: Type.String(),
+          note: Type.Optional(Type.String()),
+          clips: Type.Array(Type.Record(Type.String(), Type.Unknown())),
+        }), { minItems: 2, maxItems: 4, description: toolText("ask_user").param("timeline.forks[].options") }),
+        default: Type.Optional(Type.String()),
+      }), { minItems: 1, maxItems: 6, description: toolText("ask_user").param("timeline.forks") }),
+    }, { description: toolText("ask_user").param("timeline") })),
   }),
   async execute(id, params, signal, onUpdate, ctx) {
+    if (params.timeline) {
+      // A draft's forks: the bubble shows the draft as a timeline and each fork's options as
+      // frames; the picks are put into the draft and saved before the model hears of them.
+      const plan = await timelinePlan(params.timeline as unknown as { project: string; song: string; forks: Fork[] }, signal);
+      const asked = {
+        question: params.question ?? "", body: params.body ?? "", preview: "", questions: [], media: {}, shots: {},
+        options: [], songs: [], multiple: false, defaults: [], timeout: 0, timeline: plan.shown,
+      };
+      onUpdate?.({ content: [{ type: "text", text: "等待用户回答" }], details: asked });
+      const reply = await ctx.ui.editor(`kdj:ask:${id}`, "", { signal });
+      let answer: { answers?: unknown; note?: unknown; cancelled?: unknown } = {};
+      try { answer = reply ? JSON.parse(reply) : {}; } catch { answer = { note: reply }; }
+      const note = typeof answer.note === "string" && answer.note.trim() ? answer.note.trim() : null;
+      if (reply === undefined || answer.cancelled === true) return result({ cancelled: true, answers: {}, note });
+      const given = answer.answers && typeof answer.answers === "object" ? answer.answers as Record<string, unknown> : {};
+      const picks: Record<string, string> = {};
+      let doc = plan.doc;
+      plan.forks.forEach((fork, n) => {
+        const raw = given[fork.id];
+        const value = Array.isArray(raw) ? raw[0] : raw;
+        const option = fork.options.find(item => item.id === value)
+          ?? fork.options.find(item => item.id === (fork.default ?? fork.options[0].id)) ?? fork.options[0];
+        picks[fork.id] = option.id;
+        doc = replaceRange(doc, fork.track, plan.spans[n].start, plan.spans[n].end, option.clips);
+      });
+      const saved = await saveProject(videoDeps, plan.path, doc as Record<string, unknown>, signal);
+      return result({ answers: picks, note, project: saved.saved, saved: true });
+    }
     const body = params.body ?? "";
     const parts = planParts(body);
     const meta = new Map((params.questions ?? []).map(item => [item.id, item]));
@@ -567,7 +762,7 @@ export default function (pi: ExtensionAPI) {
   }
   registerWeb(pi);
   // Video work (the kdj-video skill): files in the workspace, FFmpeg, Remotion and .kdjv projects.
-  registerVideo(pi, { kdj, libraryRoots });
+  registerVideo(pi, videoDeps);
   pi.on("before_agent_start", (event, ctx) => {
     // pi's own opening line calls the model a coding assistant that runs commands and edits code;
     // this one has neither, and says what it is instead (prompts/system.md has the rest).
