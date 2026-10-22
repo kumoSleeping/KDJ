@@ -1,24 +1,16 @@
 import { useContext, useEffect, useId, useRef, useState, type HTMLAttributes, type ReactNode } from "react";
 import { LoaderCircle, Maximize2, Minimize2, Pause, Play, Volume2, VolumeX, X } from "lucide-react";
 import { formatDuration } from "../../lib/format";
-import { useMasterVolume, useMonitorVolume } from "../../lib/masterVolume";
+import { useMasterVolume } from "../../lib/masterVolume";
 import { PanelMediaControlsContext } from "../common/panelMediaControls";
 
-export type VolumeChannel = "master" | "monitor";
-
-function useVolumeChannel(channel: VolumeChannel) {
-  const master = useMasterVolume(), monitor = useMonitorVolume();
-  return channel === "monitor"
-    ? { name: "监听音量", volume: monitor.volume, muted: monitor.muted || monitor.volume === 0, setVolume: monitor.setVolume, toggleMute: monitor.toggleMute }
-    : { name: "音量", volume: master.volume, muted: master.volume === 0, setVolume: master.setVolume, toggleMute: master.toggleMute };
-}
-
 /** One volume control for every audible preview. It drives the output owner's
- * level (the shared master, or the editor's monitoring trim) and never unmutes
+ * level (the shared master) and never unmutes
  * a picture-only video element. No backdrop or drag state outlives the popover.
  */
-export function PreviewVolume({ channel = "master", layout = "popover" }: { channel?: VolumeChannel; layout?: "popover" | "inline" }) {
-  const { name, volume, muted, setVolume, toggleMute } = useVolumeChannel(channel);
+export function PreviewVolume({ layout = "popover" }: { layout?: "popover" | "inline" }) {
+  const master = useMasterVolume();
+  const name = "音量", volume = master.volume, muted = master.volume === 0, setVolume = master.setVolume, toggleMute = master.toggleMute;
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -70,10 +62,9 @@ export function PreviewVolume({ channel = "master", layout = "popover" }: { chan
 }
 
 /** Shared by local playback and the video previews. Chrome stays inside the picture. */
-export function FloatingVideoControls({ title, playing, loading = false, position, duration, fullscreen, showTitle = true, showVolume = true, volumeChannel = "master", onClose, onToggle, onFullscreen, onTitlePointerDown, extra, titleExtra, error, closeLabel = "关闭预览" }: {
+export function FloatingVideoControls({ title, playing, loading = false, position, duration, fullscreen, showTitle = true, showVolume = true, onClose, onToggle, onFullscreen, onTitlePointerDown, extra, titleExtra, error, closeLabel = "关闭预览" }: {
   title: string; playing: boolean; loading?: boolean; position: number; duration: number; fullscreen: boolean; showTitle?: boolean; showVolume?: boolean;
   /** Which level this surface's sound actually passes through. */
-  volumeChannel?: VolumeChannel;
   onClose?(): void; onToggle(): void; onFullscreen(): void; extra?: ReactNode; error?: string; closeLabel?: string;
   /** Controls for surfaces whose bottom row is owned by an embedded player. */
   titleExtra?: ReactNode;
@@ -100,7 +91,7 @@ export function FloatingVideoControls({ title, playing, loading = false, positio
           onClick={e => { e.stopPropagation(); onFullscreen(); }}>
           {fullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
         </button>
-        {showVolume && <PreviewVolume channel={volumeChannel} />}
+        {showVolume && <PreviewVolume />}
         {extra}
       </div>
       {error && <div className="kd-pip-float-error">{error}</div>}

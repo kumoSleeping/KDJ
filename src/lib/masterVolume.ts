@@ -4,7 +4,6 @@ import { readLocalStorage, writeLocalStorageSoon } from "./storageWrite";
 
 export const MASTER_VOLUME_STORAGE_KEY = "kd-player-volume";
 const MASTER_RESTORE_STORAGE_KEY = "kd-player-volume-restore";
-const MONITOR_VOLUME_STORAGE_KEY = "kd-workshop-monitor-volume";
 
 export function normalizeMasterVolume(value: number): number {
   return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
@@ -30,26 +29,15 @@ export function getPreviewOutputGain(): number {
   return masterVolumeGain(useMasterVolume.getState().volume) * previewGain(coplay, x);
 }
 
-/** The editor window's own audio element: project mix × monitor trim × master.
- * The trim is applied at the element only; it is never written to a project or an export.
- */
-export function getMonitorOutputGain(): number {
-  return masterVolumeGain(useMasterVolume.getState().volume) * masterVolumeGain(useMonitorVolume.getState().volume);
-}
-
 /** Bind before play/source loading; subscriptions also cover non-React mute controls. */
-export function bindMediaMasterVolume(media: HTMLMediaElement, route: "master" | "preview" | "monitor" = "master"): () => void {
+export function bindMediaMasterVolume(media: HTMLMediaElement, route: "master" | "preview" = "master"): () => void {
   const apply = () => {
-    media.volume = route === "preview" ? getPreviewOutputGain()
-      : route === "monitor" ? getMonitorOutputGain() : masterVolumeGain(useMasterVolume.getState().volume);
-    // Muting keeps the element's level, so unmuting never ramps from zero.
-    if (route === "monitor") media.muted = useMonitorVolume.getState().muted;
+    media.volume = route === "preview" ? getPreviewOutputGain() : masterVolumeGain(useMasterVolume.getState().volume);
   };
   const unlistenVolume = useMasterVolume.subscribe(apply);
   const unlistenCrossfade = route === "preview" ? useCrossfade.subscribe(apply) : undefined;
-  const unlistenMonitor = route === "monitor" ? useMonitorVolume.subscribe(apply) : undefined;
   apply();
-  return () => { unlistenVolume(); unlistenCrossfade?.(); unlistenMonitor?.(); };
+  return () => { unlistenVolume(); unlistenCrossfade?.(); };
 }
 
 /** Below this a slider is on its way to silence; it is not a level worth returning to. */
@@ -110,41 +98,6 @@ export const useMasterVolume = create<MasterVolumeState>((set, get) => {
           ? normalizeMasterVolume(values.restoreVolume) : state.restoreVolume,
       };
       if (next.volume !== state.volume || next.restoreVolume !== state.restoreVolume) persist(next);
-    },
-  };
-});
-
-interface MonitorVolumeState {
-  /** Persisted slider position of the editor's own monitoring trim. */
-  volume: number;
-  restoreVolume: number;
-  /** Session state: a new launch never starts with a silent editor. */
-  muted: boolean;
-  setVolume(volume: number): void;
-  toggleMute(): void;
-}
-
-/**
- * 剪辑窗口的监听音量。只作用于该窗口自己的预览音频，位于工程混音之后、主音量之前；
- * 不写入工程，也不参与导出。
- */
-export const useMonitorVolume = create<MonitorVolumeState>((set, get) => {
-  const volume = savedVolume(MONITOR_VOLUME_STORAGE_KEY) ?? 1;
-  return {
-    volume,
-    restoreVolume: volume > 0 ? volume : 1,
-    muted: false,
-    setVolume: (rawVolume) => {
-      const next = normalizeMasterVolume(rawVolume);
-      writeLocalStorageSoon(MONITOR_VOLUME_STORAGE_KEY, String(next), 1_000);
-      // Moving the slider is a request to hear the result.
-      set({ volume: next, muted: false, restoreVolume: next >= RESTORABLE_VOLUME ? next : get().restoreVolume });
-    },
-    toggleMute: () => {
-      const state = get();
-      if (!state.muted && state.volume > 0) set({ muted: true });
-      else if (state.volume > 0) set({ muted: false });
-      else state.setVolume(state.restoreVolume);
     },
   };
 });
