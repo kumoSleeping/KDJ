@@ -1,8 +1,2 @@
-.kd-ai-trace { display: flex; flex-direction: column; gap: 18px; color: var(--kd-text); font-size: var(--kd-size-sm); }
-.kd-ai-trace-message:empty { display: none; }
-.kd-ai-trace section { display: flex; flex-direction: column; gap: 6px; }
-.kd-ai-trace-message { display: flex; flex-direction: column; gap: 18px; }
-.kd-ai-trace strong { font-weight: 600; }
-.kd-ai-trace span { color: var(--kd-muted); }
-.kd-ai-trace pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.6; user-select: text; }
-.kd-ai-trace [data-failed] > strong, .kd-ai-trace p[data-failed] { color: var(--kd-danger); }
+.kd-ai-trace { color: var(--kd-text); font-size: var(--kd-size-sm); }
+.kd-ai-trace-error { color: var(--kd-danger); font-size: var(--kd-size-sm); overflow-wrap: anywhere; }

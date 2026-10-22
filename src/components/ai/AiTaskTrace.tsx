@@ -1,17 +1,16 @@
 import { useLayoutEffect, useRef } from "react";
+import { LoaderCircle } from "lucide-react";
 import { useAiStore } from "../../stores/aiStore";
+import { resultText } from "../../lib/aiTasks";
 import type { AiTrace } from "../../lib/aiTrace";
+import { StepRow } from "./AiSessions";
 import "./AiTaskTrace.css";
 
-function printable(value: unknown): string {
-  if (value === undefined) return "";
-  if (typeof value === "string") return value;
-  return JSON.stringify(value, (key, item) => {
-    if (key === "data" && typeof item === "string" && item.length > 1024) return "[二进制内容]";
-    return item;
-  }, 2);
-}
-
+/**
+ * What the AI is doing, inside its task bubble: each tool it called, in the words of the drawer's
+ * steps, and a single 正在思考 line while it thinks or writes. Its own words — the thinking and
+ * the text it streams — are not shown, nor the raw arguments and results of its tools.
+ */
 export function AiTaskTrace({ snapshot }: { snapshot?: AiTrace }) {
   const live = useAiStore(state => snapshot ? undefined : state.run?.trace);
   const trace = snapshot ?? live;
@@ -28,16 +27,21 @@ export function AiTaskTrace({ snapshot }: { snapshot?: AiTrace }) {
     const scroller = node.current?.closest<HTMLElement>(".kd-task-body");
     if (scroller && following.current) scroller.scrollTop = scroller.scrollHeight;
   }, [trace]);
+  // Only a live task is thinking; a finished one's snapshot has no message under way.
+  const thinking = !snapshot && trace?.message !== null && trace?.message !== undefined;
   return <div ref={node} className="kd-ai-trace" aria-label="AI 执行记录">
-    {trace?.entries.map((entry, index) => entry.kind === "message"
-      ? <div key={index} className="kd-ai-trace-message">{entry.blocks.map((block, i) => block.text && <section key={i}>
-        <strong>{block.kind === "thinking" ? "思考" : "AI"}</strong><pre>{block.text}</pre>
-      </section>)}</div>
-      : entry.kind === "error" ? <p key={index} data-failed="true">{entry.text}</p>
-      : <section key={index} data-failed={entry.state === "failed" || undefined}>
-        <strong>{entry.name} · {{ running: "调用中", done: "完成", failed: "失败", stopped: "已停止" }[entry.state]}</strong>
-        {entry.args !== undefined && <><span>参数</span><pre>{printable(entry.args)}</pre></>}
-        {entry.result !== undefined && <><span>结果</span><pre>{printable(entry.result)}</pre></>}
-      </section>)}
+    <ol className="kd-ai-steps">
+      {trace?.entries.map((entry, index) => entry.kind === "tool"
+        ? <StepRow key={index} tool={entry.name} args={entry.args}
+          state={entry.state === "running" ? "running" : entry.state === "done" ? "done" : "failed"}
+          details={(entry.result as { details?: unknown } | undefined)?.details}
+          text={entry.state === "stopped" ? "已停止" : resultText(entry.result)} />
+        : entry.kind === "error" ? <li key={index} className="kd-ai-trace-error">{entry.text}</li>
+        : null)}
+      {thinking && <li className="kd-ai-step" data-state="running">
+        <span className="kd-ai-step-mark" aria-hidden="true"><LoaderCircle size={12} className="kd-spin" /></span>
+        <span className="kd-ai-step-copy"><span>正在思考</span></span>
+      </li>}
+    </ol>
   </div>;
 }
