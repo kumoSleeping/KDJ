@@ -393,14 +393,14 @@ pub fn read_tags(path: &Path) -> TrackTags {
     // 扫描只要文字标签和技术参数，封面走 read_cover；不跳过的话每个文件都整块读一遍原图
     let options = lenient().read_cover_art(false);
     let Ok(tagged) = Probe::open(path).and_then(|probe| probe.options(options).read()) else {
+        out.duration = crate::ffmpeg::probe_duration_secs(path);
         return out;
     };
 
     let properties = tagged.properties();
     let secs = properties.duration().as_secs_f64();
-    if secs > 0.0 {
-        out.duration = Some(secs);
-    }
+    // A header with no length (a fragmented M4A, many downloads): the container is asked instead.
+    out.duration = if secs > 0.0 { Some(secs) } else { crate::ffmpeg::probe_duration_secs(path) };
     out.bitrate = properties.audio_bitrate().map(|value| value as i64);
     out.samplerate = properties.sample_rate().map(|value| value as i64);
     out.channels = properties.channels().map(|value| value as i64);

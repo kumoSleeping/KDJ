@@ -611,7 +611,8 @@ fn existing_file(conn: &Connection, key_path: &str) -> Result<Option<ExistingFil
     conn.query_row(
         &format!("SELECT id, file_mtime, file_created_at, COALESCE(size, 0), COALESCE(source_platform, ''), \
          COALESCE(source_key, ''), \
-         (COALESCE(artist, '') = '' AND COALESCE(album, '') = '') \
+         ((COALESCE(artist, '') = '' AND COALESCE(album, '') = '') \
+          OR ((duration IS NULL OR duration <= 0) AND LOWER(COALESCE(format, '')) NOT IN ('png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif'))) \
          FROM tracks WHERE {PATH_MATCH} ORDER BY id LIMIT 1"),
         [key],
         |row| {
@@ -3709,11 +3710,14 @@ impl LibraryService {
     /// 光靠"文件动过才重读"永远修不好——所以这种行不许走快路径。
     /// 真没标签的文件会因此每次扫描都被多读一遍标签，代价是每个文件几毫秒，
     /// 换来的是坏行自动愈合，不用用户挨个点「重读标签」。
+    /// 没有时长的媒体行（图片除外）同理：早先读不出时长的文件（分片的 M4A）现在能从容器读到，
+    /// 不重读就永远是空的，剪辑器也就拿它当不了歌。
     pub fn file_index(&self) -> Result<HashMap<String, (i64, f64, Option<f64>, bool)>> {
         let conn = self.db.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, path, file_mtime, file_created_at, \
-             (COALESCE(artist, '') = '' AND COALESCE(album, '') = '') \
+             ((COALESCE(artist, '') = '' AND COALESCE(album, '') = '') \
+              OR ((duration IS NULL OR duration <= 0) AND LOWER(COALESCE(format, '')) NOT IN ('png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif'))) \
              FROM tracks ORDER BY id",
         )?;
         let rows = stmt.query_map([], |row| {

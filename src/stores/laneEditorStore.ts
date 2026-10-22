@@ -101,8 +101,10 @@ export const isSongTrack = (track: Pick<Track, "format">) =>
   !isVideoTrack(track.format) && !isImageTrack(track.format) && !isProjectTrack(track.format);
 export const isPictureTrack = (track: Pick<Track, "format">) => isVideoTrack(track.format) || isImageTrack(track.format);
 
-export const songOf = (track: Track) => ({ src: track.path, in: 0, out: track.duration ?? 0 });
-export const clipOf = (track: Track, muted: boolean) => ({ src: track.path, in: 0, out: track.duration ?? 0, muted, fill: true });
+/** The whole file, its length when the library knows it, else measured by the server (no `out`). */
+const length = (track: Track) => (track.duration && track.duration > 0 ? { out: track.duration } : {});
+export const songOf = (track: Track) => ({ src: track.path, in: 0, ...length(track) });
+export const clipOf = (track: Track, muted: boolean) => ({ src: track.path, in: 0, ...length(track), muted, fill: true });
 
 /** The songs of a document in order: `songs`, or the one `song`. */
 export function songsOf(doc: LaneDocument) {
@@ -127,11 +129,16 @@ function projectGrid(doc: LaneDocument, layout: LaneLayout, songIds: Array<numbe
   return grid;
 }
 
-/** Edits run one after another: one sent while the last is being saved waits for it. */
+/**
+ * Edits run one after another: one sent while the last is being saved waits for it — but not for
+ * longer than TURN_WAIT_MS, so that one save that never answers cannot hold every later edit
+ * (a delete pressed after it did nothing at all).
+ */
+const TURN_WAIT_MS = 20_000;
 let chain: Promise<unknown> = Promise.resolve();
 function inTurn<T>(task: () => Promise<T>): Promise<T> {
   const run = chain.then(task, task);
-  chain = run.catch(() => undefined);
+  chain = Promise.race([run, new Promise(resolve => window.setTimeout(resolve, TURN_WAIT_MS))]).catch(() => undefined);
   return run;
 }
 
@@ -287,11 +294,6 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
     startVj: song => get().createFrom([song]),
     startVideo: video => get().createFrom([video]),
     async createFrom(tracks, sound = false) {
-      const missing = tracks.find(track => !(track.duration && track.duration > 0));
-      if (missing) {
-        set({ open: true, error: `「${missing.title || "未命名"}」还读不到时长，等曲库读完再试` });
-        return;
-      }
       const songs = tracks.filter(track => isSongTrack(track) || (sound && isVideoTrack(track.format)));
       const pictures = tracks.filter(track => !songs.includes(track) && isPictureTrack(track));
       if (songs.length) {
@@ -299,8 +301,10 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
         await create(songs[0].path, title, [
           { op: "new", title, song: songOf(songs[0]) },
           ...songs.slice(1).map(song => ({ op: "add_song" as const, song: songOf(song) })),
-          ...fitPictures(pictures, songs.reduce((sum, song) => sum + (song.duration ?? 0), 0)),
         ]);
+        // The pictures go in once the songs are there and their lengths known, from the start.
+        const made = get().active;
+        if (pictures.length && made) await get().placeTracks(made, pictures, 0);
       } else if (pictures.length) {
         const title = `${pictures[0].title || "未命名"} 剪辑`;
         await create(pictures[0].path, title, [
@@ -338,25 +342,33 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
     async placeTracks(path, tracks, at, sound = false) {
       // A project dropped in is opened, as a page of its own, not put inside another.
       for (const project of tracks.filter(track => isProjectTrack(track.format))) await get().openTrack(project);
-      const rest = tracks.filter(track => !isProjectTrack(track.format) && (track.duration ?? 0) > 0);
+      const rest = tracks.filter(track => !isProjectTrack(track.format));
       if (rest.length === 0) return;
       const heard = (track: Track) => isSongTrack(track) || (sound && isVideoTrack(track.format));
       const project = path ? get().projects.find(p => p.path === path) : undefined;
       if (!project) { await get().createFrom(rest, sound); return; }
       const { doc, layout, grid } = project;
       const songs = rest.filter(heard), pictures = rest.filter(track => !heard(track) && isPictureTrack(track));
-      const ops: LaneOp[] = [];
       const placed = layout.songs ?? [];
+      // Songs and pictures at once: the songs first, then the pictures over the song lane as it is
+      // then, with every song's length known (the library may not have had it).
+      if (songs.length && pictures.length) {
+        await get().placeTracks(project.path, songs, at, sound);
+        await get().placeTracks(project.path, pictures, at);
+        return;
+      }
+      const ops: LaneOp[] = [];
       let index = placed.filter(s => s.at + s.length / 2 < at).length;
       for (const song of songs) ops.push({ op: "add_song", song: songOf(song), index: index++ });
       if (pictures.length) {
-        if (placed.length > 0 || songs.length > 0) {
+        if (placed.length > 0) {
           // In a VJ a picture goes in at the bar where it is let go, over whatever is there, as far
           // as the songs reach.
-          const end = placed.reduce((sum, s) => sum + s.length, 0) + songs.reduce((sum, s) => sum + (s.duration ?? 0), 0);
+          const end = placed.reduce((sum, s) => sum + s.length, 0);
           let place = Math.min(snapToBar(grid?.downbeats ?? [], at), Math.max(0, end - 0.1));
           for (const picture of pictures) {
-            const out = Math.round(Math.min(picture.duration ?? 0, end - place) * 1000) / 1000;
+            // A picture whose length the library does not know runs to the end of the songs.
+            const out = Math.round(Math.min(picture.duration && picture.duration > 0 ? picture.duration : Infinity, end - place) * 1000) / 1000;
             if (out <= 0.05) break;
             ops.push({ op: "add", clip: { ...clipOf(picture, true), out }, at: Math.round(place * 1000) / 1000, over: true });
             place += out;
@@ -416,19 +428,6 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
     },
   };
 });
-
-/** Pictures laid end to end from the start, as many as fit in `length` seconds. */
-function fitPictures(pictures: Track[], length: number): LaneOp[] {
-  const ops: LaneOp[] = [];
-  let at = 0;
-  for (const picture of pictures) {
-    const out = Math.min(picture.duration ?? 0, length - at);
-    if (out <= 0.05) break;
-    ops.push({ op: "add", clip: { ...clipOf(picture, true), out } });
-    at += out;
-  }
-  return ops;
-}
 
 /** A clip of the project with the song it starts over, and how to name that song to the aligner. */
 function songUnder(project: LaneProject, clipId: string) {

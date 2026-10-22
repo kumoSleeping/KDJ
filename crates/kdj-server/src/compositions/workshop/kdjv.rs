@@ -865,7 +865,9 @@ impl Workshop {
         // Opening a project (no operations) only reads it: the file is not written, and one that does
         // not play as it is still opens, saying why, so that it can be put right here.
         let opening = ops.is_empty() && !create;
-        let after = super::lanes::apply(&before, ops)?;
+        let folder = file.parent().unwrap_or(Path::new("."));
+        let ops = Self::with_lengths(ops, folder, cancel).await?;
+        let after = super::lanes::apply(&before, &ops)?;
         let text = serde_json::to_string_pretty(&after)?;
         let base = file.parent().filter(|dir| dir.is_dir()).with_context(|| format!("文件夹不存在：{}", file.display()))?;
         // A draft with nothing in it yet is kept as it is; anything else has to play.
@@ -915,6 +917,30 @@ impl Workshop {
             "document": after, "layout": super::lanes::layout(&after), "duration": duration,
             "lengths": lengths, "problem": problem,
         }))
+    }
+
+    /// The operations with every clip and song that came without an `out` given its file's whole
+    /// length, measured here: the library may not know it (a fragmented M4A says 0 in its header).
+    async fn with_lengths(ops: &[super::lanes::Op], base: &Path, cancel: &CancellationToken) -> Result<Vec<super::lanes::Op>> {
+        use super::lanes::Op;
+        let mut out = ops.to_vec();
+        for op in &mut out {
+            let item = match op {
+                Op::Add { clip, .. } => Some(clip),
+                Op::AddSong { song, .. } => Some(song),
+                Op::New { song: Some(serde_json::Value::Object(song)), .. } => Some(song),
+                _ => None,
+            };
+            let Some(item) = item else { continue };
+            if item.get("out").is_some_and(|v| v.as_f64().is_some_and(|out| out > 0.)) {
+                continue;
+            }
+            let Some(src) = item.get("src").and_then(|v| v.as_str()) else { continue };
+            let probed = Self::probe_source(&source_path(base, src), cancel).await?;
+            let seconds = (probed.duration_ms / 1000. * 1000.).floor() / 1000.;
+            item.insert("out".into(), serde_json::json!(seconds));
+        }
+        Ok(out)
     }
 
     /// The project's sound alone, keyed like its render but by what is heard only.

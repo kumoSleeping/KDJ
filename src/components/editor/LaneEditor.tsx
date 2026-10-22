@@ -40,7 +40,7 @@ function usePlayhead(trackId: number | null) {
 /** The library rows of a drop, read whole (their lengths), in the order they were dragged. */
 async function droppedTracks(ids: readonly number[]): Promise<Track[]> {
   const tracks = await Promise.all(ids.map(id => api.track(id).catch(() => null)));
-  return tracks.filter((track): track is Track => Boolean(track && (track.duration ?? 0) > 0));
+  return tracks.filter((track): track is Track => Boolean(track));
 }
 
 export function LaneEditor() {

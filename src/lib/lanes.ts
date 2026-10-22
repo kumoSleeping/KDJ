@@ -76,9 +76,9 @@ export interface LaneEdited {
 
 /** One operation (lanes.rs `Op`). */
 export type LaneOp =
-  | { op: "new"; title: string; song?: LaneSong | null; canvas?: { width: number; height: number; fps?: number } }
+  | { op: "new"; title: string; song?: NewLaneSong | null; canvas?: { width: number; height: number; fps?: number } }
   | { op: "title"; title: string }
-  | { op: "add"; clip: Partial<LaneClip> & { src: string; out: number }; at?: number; index?: number; over?: boolean }
+  | { op: "add"; clip: Partial<LaneClip> & { src: string; out?: number }; at?: number; index?: number; over?: boolean }
   | { op: "remove"; id: string }
   | { op: "move"; id: string; index: number }
   | { op: "trim"; id: string; in?: number; out?: number }
@@ -93,10 +93,14 @@ export type LaneOp =
   | { op: "gap"; index: number; length: number }
   | { op: "branch"; clip: string; side: BranchSide; length: number; opacity?: number; fade?: boolean }
   | { op: "unbranch"; clip: string; side: BranchSide }
-  | { op: "add_song"; song: LaneSong; index?: number }
+  | { op: "add_song"; song: NewLaneSong; index?: number }
   | { op: "remove_song"; index: number }
   | { op: "move_song"; from: number; to: number }
   | { op: "set_song"; index: number; fields: { volume?: number } };
+
+/** A song (or a clip) put in without `out` is given its file's whole length by the server, which
+ *  measures the file: the library does not always know it. */
+export type NewLaneSong = Omit<LaneSong, "out"> & { out?: number };
 
 export const isGap = (item: LaneItem): item is { gap: number } => "gap" in item;
 

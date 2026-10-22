@@ -14,7 +14,7 @@ use serde_json::{json, Map, Value};
 const EPS: f64 = 1e-3;
 
 /// One edit. Times are seconds of the project.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     /// A new document (replaces what was there): its title and, for a VJ, its song.
