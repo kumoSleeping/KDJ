@@ -16,7 +16,7 @@
 - 视频常常比歌短（TV size、剪过的 MV），对上之后会有没画面的空档（`kdj_align` 每套方案的 `gaps`）。空档不是错误，是用户要做的决定。
 - DJ 接歌时开头和结尾需要画面：哪怕中间全都对上，头尾也可能需要几小节冗余。
 - 没有空档就只确认比例和交付；有空档时问：没画面的部分保留黑屏还是填；填多少（开头结尾各留 8 小节冗余 / 全部填满）；
-  用什么填（原作动画随机剪辑 / KDJ 可视化 / 其他）。
+  用什么填（原作动画随机剪辑 / 其他）。KDJ 可视化不是填空档的素材，用户明确要才用。
 
 ### 禁止事项
 
@@ -49,7 +49,7 @@
 <choice q="amount" value="edges">开头结尾各留 8 小节冗余</choice> <choice q="amount" value="all">全部填满</choice>
 
 ### 用什么填
-<choice q="fill" value="anime">原作动画随机剪辑</choice> <choice q="fill" value="visualizer">KDJ 可视化</choice> <choice q="fill" value="other">其他（写在补充里）</choice>
+<choice q="fill" value="anime">原作动画随机剪辑</choice> <choice q="fill" value="other">其他（写在补充里）</choice>
 
 ### 交付
 <choice q="deliver" value="kdjv">先给 .kdjv 预览</choice> <choice q="deliver" value="mp4">直接导出 MP4</choice>
