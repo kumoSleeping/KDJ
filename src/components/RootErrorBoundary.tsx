@@ -39,3 +39,36 @@ export class RootErrorBoundary extends Component<
   }
 }
 
+/**
+ * The same for one app of the drawer: what broke is that app, so only it shows the error, with the
+ * report and a way to draw it again; the list, the player and the other apps go on.
+ */
+export class PanelErrorBoundary extends Component<
+  { name: string; children: ReactNode; /** The app's content turned (another song): drawn again. */ turn?: string | number },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidUpdate(previous: { turn?: string | number }): void {
+    if (this.state.error && previous.turn !== this.props.turn) this.setState({ error: null });
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    recordCrash(`react.boundary.${this.props.name}`, error, info);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="kd-crash-panel" role="alert">
+        <p className="kd-crash-message">{this.state.error.message}</p>
+        <Suspense fallback={null}><ErrorReport problem={`${this.props.name}出错：${this.state.error.message}`} /></Suspense>
+        <button type="button" className="kd-crash-reload" onClick={() => this.setState({ error: null })}>重新显示</button>
+      </div>
+    );
+  }
+}

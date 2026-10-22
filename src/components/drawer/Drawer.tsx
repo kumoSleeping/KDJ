@@ -1,6 +1,7 @@
 import { createContext, startTransition, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent, type Ref } from "react";
 import { ChevronsRight, Minimize2 } from "lucide-react";
 import { TitleTabs } from "./TitleTabs";
+import { PanelErrorBoundary } from "../RootErrorBoundary";
 import { useSurfaceBackdrop } from "../common/SurfaceBackdrop";
 import { createPortal } from "react-dom";
 import { MOTION_IN_MS, MOTION_OUT_MS, MOTION_REDUCED_MS, prefersReducedMotion } from "../../lib/motion";
@@ -314,7 +315,7 @@ function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart }: {
       {spec.usePage ? <PagedTitle spec={spec} usePage={spec.usePage} leaving={leaving} panelId={panelId} />
         : <DrawerTitle spec={spec} leaving={leaving} panelId={panelId} />}
       <div ref={body} className="kd-drawer-body" id={panelId} role={spec.pages ? "tabpanel" : undefined}
-        data-late={eager || spec.extent === "fit" ? undefined : "true"}>{built ? spec.body : null}</div>
+        data-late={eager || spec.extent === "fit" ? undefined : "true"}>{built ? <PanelErrorBoundary name={spec.title} turn={spec.contentKey}>{spec.body}</PanelErrorBoundary> : null}</div>
     </DrawerContext.Provider>
     {onResizeStart && !leaving && !inWindow && <div className="kd-drawer-resize" role="separator" aria-orientation="vertical"
       aria-label="调整抽屉宽度" onPointerDown={onResizeStart} />}

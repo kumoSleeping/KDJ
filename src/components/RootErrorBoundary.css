@@ -33,3 +33,5 @@
   cursor: pointer;
 }
 .kd-crash-reload:focus-visible { outline: 1px solid var(--kd-focus, var(--kd-text, CanvasText)); outline-offset: 2px; }
+/* One drawer app that failed: the same words and keys, in that app's place. */
+.kd-crash-panel { display: grid; gap: 0.9rem; padding: 0.75rem 1rem 1rem; min-width: 0; }
