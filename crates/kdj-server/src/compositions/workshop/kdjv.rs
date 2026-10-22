@@ -10,8 +10,9 @@ use super::render::{check, key, Scratch, Step};
 use super::*;
 
 pub const EXTENSION: &str = kdj_providers::tags::PROJECT_EXTENSION;
-/// The format this build reads.
+/// The formats this build reads: 1, tracks of timed clips; 2, the editor's lanes (`Lanes`).
 const VERSION: u64 = 1;
+const LANES: u64 = 2;
 
 fn one() -> f64 {
     1.
@@ -78,6 +79,190 @@ struct DocClip {
     audio_fade_in: Option<f64>,
     #[serde(default)]
     audio_fade_out: Option<f64>,
+    /// How a message names the clip: a lane document's own place for it (`main[2]`).
+    #[serde(skip)]
+    name: Option<String>,
+    /// A lane's branch fades over its whole length, not only half of it.
+    #[serde(skip)]
+    whole_fade: bool,
+}
+
+impl DocClip {
+    fn new(src: &str, at: f64, from: f64, out: f64) -> Self {
+        DocClip {
+            src: src.to_string(), at, from, out, speed: 1., volume: 1., muted: false, x: 0.5, y: 0.5, scale: 1.,
+            opacity: 1., fill: false, fade_in: 0., fade_out: 0., audio_fade_in: None, audio_fade_out: None,
+            name: None, whole_fade: false,
+        }
+    }
+}
+
+/// `.kdjv` 2: the editor's lanes (docs/kdjv.md). A main lane of clips laid end to end like a
+/// railway, gaps of black among them, and branches up onto the lane above it: the end of a clip
+/// running on over the start of the next ("out"), or the start of one coming in early over the
+/// end of the one before ("in"), fading by default. In VJ mode a song is the base and sets the
+/// length. It is read into the tracks of format 1 — branches on top, the main lane, the song —
+/// so playing, checking, mixing and rendering are those of any project.
+#[derive(Debug, Deserialize)]
+struct Lanes {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    canvas: Option<DocCanvas>,
+    #[serde(default)]
+    song: Option<LaneSong>,
+    #[serde(default)]
+    main: Vec<LaneItem>,
+    #[serde(default)]
+    branches: Vec<Branch>,
+}
+#[derive(Debug, Deserialize)]
+struct LaneSong {
+    src: String,
+    #[serde(rename = "in", default)]
+    from: f64,
+    out: f64,
+    #[serde(default = "one")]
+    volume: f64,
+}
+/// One stretch of the main lane: a clip, or `{"gap": seconds}` of black.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LaneItem {
+    Gap { gap: f64 },
+    Clip(LaneClip),
+}
+#[derive(Debug, Deserialize)]
+struct LaneClip {
+    #[serde(default)]
+    id: String,
+    src: String,
+    #[serde(rename = "in", default)]
+    from: f64,
+    out: f64,
+    #[serde(default = "one")]
+    speed: f64,
+    #[serde(default = "one")]
+    volume: f64,
+    #[serde(default)]
+    muted: bool,
+    #[serde(default = "half")]
+    x: f64,
+    #[serde(default = "half")]
+    y: f64,
+    #[serde(default = "one")]
+    scale: f64,
+    #[serde(default = "one")]
+    opacity: f64,
+    #[serde(default)]
+    fill: bool,
+}
+#[derive(Debug, Deserialize)]
+struct Branch {
+    /// The id of the main lane's clip that branches.
+    clip: String,
+    /// `out`: its end runs on over the next; `in`: its start comes in early over the one before.
+    side: String,
+    /// Seconds of the project the branch lasts.
+    length: f64,
+    #[serde(default = "one")]
+    opacity: f64,
+    /// Fade over the branch (the default), or cover at a steady opacity.
+    #[serde(default = "yes")]
+    fade: bool,
+}
+fn yes() -> bool {
+    true
+}
+
+impl Lanes {
+    fn doc(self) -> Result<Doc> {
+        let mut main = vec![];
+        let mut placed: HashMap<String, usize> = HashMap::new();
+        let mut at = 0.;
+        for (n, item) in self.main.iter().enumerate() {
+            match item {
+                LaneItem::Gap { gap } => {
+                    if !(gap.is_finite() && *gap > 0.) {
+                        bail!("main[{n}]：gap 是 {gap}，要大于 0 秒")
+                    }
+                    at += gap;
+                }
+                LaneItem::Clip(c) => {
+                    if !(c.speed.is_finite() && c.speed > 0.) {
+                        bail!("main[{n}]：speed 是 {}，要在 0.5–2 之间", c.speed)
+                    }
+                    if !c.id.is_empty() && placed.insert(c.id.clone(), main.len()).is_some() {
+                        bail!("main[{n}]：id「{}」和前面的片段重复", c.id)
+                    }
+                    let mut clip = DocClip::new(&c.src, at, c.from, c.out);
+                    clip.speed = c.speed;
+                    clip.volume = c.volume;
+                    clip.muted = c.muted;
+                    (clip.x, clip.y, clip.scale, clip.opacity, clip.fill) = (c.x, c.y, c.scale, c.opacity, c.fill);
+                    clip.name = Some(format!("main[{n}]（主线第 {} 段，{}）", n + 1, file_name(&c.src)));
+                    at += (c.out - c.from) / c.speed;
+                    main.push(clip);
+                }
+            }
+        }
+        let mut aux: Vec<DocClip> = vec![];
+        for (j, b) in self.branches.iter().enumerate() {
+            let where_ = format!("branches[{j}]（{} 的{}分叉）", b.clip, if b.side == "in" { "入" } else { "出" });
+            let Some(&n) = placed.get(&b.clip) else { bail!("{where_}：主线上没有 id 为「{}」的片段", b.clip) };
+            if !(b.length.is_finite() && b.length > 0. && b.length <= 30.) {
+                bail!("{where_}：length 是 {}，要在 0–30 秒之间", b.length)
+            }
+            let c = &main[n];
+            let span = b.length * c.speed;
+            let mut clip = match b.side.as_str() {
+                "out" => DocClip::new(&c.src, c.at + (c.out - c.from) / c.speed, c.out, c.out + span),
+                "in" => {
+                    if c.from < span - 1e-6 {
+                        bail!("{where_}：这一段从素材第 {:.3} 秒开始，前面不够 {:.3} 秒素材提前进来", c.from, span)
+                    }
+                    DocClip::new(&c.src, c.at - b.length, c.from - span, c.from)
+                }
+                other => bail!("{where_}：side 是「{other}」，要是 out 或 in"),
+            };
+            if clip.at < -1e-6 {
+                bail!("{where_}：提前进来的 {:.3} 秒落在成片开头之前", b.length)
+            }
+            clip.at = clip.at.max(0.);
+            clip.speed = c.speed;
+            clip.volume = c.volume;
+            // The branch is picture over the seam; the sound stays the main lane's.
+            clip.muted = true;
+            (clip.x, clip.y, clip.scale, clip.fill) = (c.x, c.y, c.scale, c.fill);
+            clip.opacity = b.opacity;
+            if b.fade {
+                if b.side == "in" { clip.fade_in = b.length } else { clip.fade_out = b.length }
+                clip.whole_fade = true;
+            }
+            clip.name = Some(where_.clone());
+            if let Some(other) = aux.iter().find(|o| o.at < clip.at + b.length - 1e-6 && clip.at < o.at + (o.out - o.from) / o.speed - 1e-6) {
+                bail!("{where_}：和 {} 在辅线上重叠", other.name.clone().unwrap_or_default())
+            }
+            aux.push(clip);
+        }
+        aux.sort_by(|a, b| a.at.total_cmp(&b.at));
+        let mut tracks = vec![DocTrack { clips: aux }, DocTrack { clips: main }];
+        if let Some(song) = &self.song {
+            let length = song.out - song.from;
+            if at > length + 0.05 {
+                bail!("主线长 {at:.3} 秒，比歌（{length:.3} 秒）长：VJ 的长度由歌决定")
+            }
+            let mut clip = DocClip::new(&song.src, 0., song.from, song.out);
+            clip.volume = song.volume;
+            clip.name = Some(format!("song（{}）", file_name(&song.src)));
+            tracks.push(DocTrack { clips: vec![clip] });
+        }
+        Ok(Doc { title: self.title, canvas: self.canvas, tracks })
+    }
+}
+
+fn file_name(src: &str) -> String {
+    Path::new(src).file_name().map_or(src.to_string(), |f| f.to_string_lossy().into_owned())
 }
 
 impl Doc {
@@ -132,12 +317,12 @@ fn source_path(base: &Path, src: &str) -> PathBuf {
 /// Reads a `.kdjv` document. Anything but this format's version is refused, not guessed at.
 pub fn parse(text: &str) -> Result<Doc> {
     let value: serde_json::Value = serde_json::from_str(text).context("不是有效的 JSON")?;
-    match value.get("kdjv").and_then(|v| v.as_u64()) {
-        Some(VERSION) => {}
+    let doc: Doc = match value.get("kdjv").and_then(|v| v.as_u64()) {
+        Some(VERSION) => serde_json::from_value(value).context("工程内容无效")?,
+        Some(LANES) => serde_json::from_value::<Lanes>(value).context("工程内容无效")?.doc()?,
         Some(other) => bail!("工程格式版本 {other} 需要更新的 KDJ"),
-        None => bail!("缺少 \"kdjv\": 1"),
-    }
-    let doc: Doc = serde_json::from_value(value).context("工程内容无效")?;
+        None => bail!("缺少 \"kdjv\": 1 或 2"),
+    };
     if doc.tracks.iter().all(|t| t.clips.is_empty()) {
         bail!("工程里没有片段")
     }
@@ -191,7 +376,8 @@ pub fn project(doc: &Doc, base: &Path, probed: &HashMap<PathBuf, Probed>) -> Res
             // Names the clip the way the AI can find it again in its own document: track, index,
             // where it sits in the project and which file it plays.
             let file = Path::new(&c.src).file_name().map_or(c.src.clone(), |f| f.to_string_lossy().into_owned());
-            let where_ = format!("tracks[{t}].clips[{n}]（第 {} 条轨道第 {} 个片段，at {:.3} 秒，{file}）", t + 1, n + 1, c.at);
+            let where_ = c.name.clone()
+                .unwrap_or_else(|| format!("tracks[{t}].clips[{n}]（第 {} 条轨道第 {} 个片段，at {:.3} 秒，{file}）", t + 1, n + 1, c.at));
             let sid = source_id(&c.src).with_context(|| format!("{where_}：找不到素材"))?;
             if !(c.at.is_finite() && c.at >= 0. && c.from.is_finite() && c.from >= 0. && c.out.is_finite() && c.out > c.from) {
                 bail!("{where_}：at、in、out 无效（at {}，in {}，out {}；秒，out 要大于 in）", c.at, c.from, c.out)
@@ -259,7 +445,8 @@ pub fn project(doc: &Doc, base: &Path, probed: &HashMap<PathBuf, Probed>) -> Res
                 ("audio_fade_out", c.audio_fade_out),
             ] {
                 let Some(value) = value else { continue };
-                if !(value.is_finite() && value >= 0. && value * 1000. <= span / 2. + 0.01) {
+                let limit = if c.whole_fade { span } else { span / 2. };
+                if !(value.is_finite() && value >= 0. && value * 1000. <= limit + 0.01) {
                     bail!("{where_}：{field} {value} 秒超过这一段在成片里长度 {:.3} 秒的一半（最多 {:.3} 秒）", span / 1000., span / 2000.)
                 }
             }
@@ -664,6 +851,47 @@ mod kdjv_tests {
     }
 
     #[test]
+    fn lanes_lay_the_main_clips_end_to_end_with_branches_above_and_the_song_below() {
+        let doc = parse(
+            r#"{"kdjv":2,"title":"VJ","song":{"src":"/music/song.flac","in":0,"out":60},
+                "main":[{"id":"a","src":"/vj/a.mp4","in":0,"out":10,"muted":true,"fill":true},
+                        {"gap":2},
+                        {"id":"b","src":"/vj/b.mp4","in":20,"out":40,"speed":2,"muted":true}],
+                "branches":[{"clip":"a","side":"out","length":1,"opacity":0.8},
+                            {"clip":"b","side":"in","length":0.5,"fade":false}]}"#,
+        )
+        .unwrap();
+        let probed = HashMap::from([
+            (PathBuf::from("/vj/a.mp4"), video()),
+            (PathBuf::from("/vj/b.mp4"), video()),
+            (PathBuf::from("/music/song.flac"), Probed { video: false, kind: "audio".into(), ..video() }),
+        ]);
+        let p = project(&doc, Path::new("/projects"), &probed).unwrap();
+        assert_eq!(p.layers.len(), 3, "branches, the main lane, the song");
+        let main: Vec<(f64, f64, f64)> = p.layers[1].clips.iter().map(|c| (c.start_ms, c.source_in_ms, c.duration())).collect();
+        assert_eq!(main, vec![(0., 0., 10_000.), (12_000., 20_000., 10_000.)], "end to end, the gap kept, b twice as fast");
+        let tail = &p.layers[0].clips[0];
+        assert_eq!((tail.start_ms, tail.source_in_ms, tail.source_out_ms), (10_000., 10_000., 11_000.), "a runs on past its end");
+        assert_eq!((tail.fades.video_out_ms, tail.picture.opacity, tail.sound.muted), (1_000., 0.8, true), "fading over all of it, silent");
+        let head = &p.layers[0].clips[1];
+        assert_eq!((head.start_ms, head.source_in_ms, head.source_out_ms), (11_500., 19_000., 20_000.), "b comes in early, at its speed");
+        assert_eq!(head.fades.video_in_ms, 0., "a branch without a fade covers at its opacity");
+        assert_eq!(p.layers[2].clips[0].duration(), 60_000.);
+        assert_eq!(p.duration(), 60_000., "the song sets the length");
+    }
+
+    #[test]
+    fn a_lane_document_says_which_clip_or_branch_is_wrong() {
+        let error = |text: &str| parse(text).unwrap_err().to_string();
+        let main = r#""main":[{"id":"a","src":"/vj/a.mp4","in":0,"out":10},{"id":"b","src":"/vj/b.mp4","in":0,"out":10}]"#;
+        assert!(error(&format!(r#"{{"kdjv":2,{main},"branches":[{{"clip":"x","side":"out","length":1}}]}}"#)).contains("没有 id"));
+        assert!(error(&format!(r#"{{"kdjv":2,{main},"branches":[{{"clip":"b","side":"in","length":1}}]}}"#)).contains("前面不够"));
+        assert!(error(&format!(r#"{{"kdjv":2,{main},"branches":[{{"clip":"a","side":"out","length":1}},{{"clip":"a","side":"out","length":2}}]}}"#)).contains("重叠"));
+        assert!(error(&format!(r#"{{"kdjv":2,{main},"song":{{"src":"/s.flac","out":15}}}}"#)).contains("比歌"));
+        assert!(error(r#"{"kdjv":2,"main":[{"gap":0}]}"#).contains("main[0]"));
+    }
+
+    #[test]
     fn a_document_becomes_the_workshop_project_it_describes() {
         let doc = parse(
             r#"{"kdjv":1,"title":"Set","tracks":[
@@ -739,7 +967,7 @@ mod kdjv_tests {
     #[test]
     fn what_cannot_play_is_said_instead_of_guessed() {
         assert!(parse(r#"{"tracks":[]}"#).unwrap_err().to_string().contains("kdjv"));
-        assert!(parse(r#"{"kdjv":2,"tracks":[]}"#).unwrap_err().to_string().contains("更新"));
+        assert!(parse(r#"{"kdjv":3,"tracks":[]}"#).unwrap_err().to_string().contains("更新"));
         assert!(parse(r#"{"kdjv":1,"tracks":[{"clips":[]}]}"#).is_err());
         let doc = parse(r#"{"kdjv":1,"tracks":[{"clips":[{"src":"/a.mp4","at":0,"in":0,"out":90}]}]}"#).unwrap();
         let probed = HashMap::from([(PathBuf::from("/a.mp4"), video())]);

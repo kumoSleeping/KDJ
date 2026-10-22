@@ -542,10 +542,12 @@ impl CompositionProject {
                 {
                     return Err(format!("素材“{}”的淡入淡出范围未覆盖片段", s.title));
                 }
-                if ![f.video_in_ms, f.video_out_ms, f.audio_in_ms, f.audio_out_ms]
-                    .iter()
-                    .all(|v| finite_range(*v, 0., f.span_ms / 2. + 0.01))
-                {
+                // A fade in and a fade out share the envelope: together they fit in it, so one
+                // may cover all of it (a lane's branch fades out over its whole length).
+                let fits = |i: f64, o: f64| {
+                    finite_range(i, 0., f.span_ms + 0.01) && finite_range(o, 0., f.span_ms + 0.01) && i + o <= f.span_ms + 0.01
+                };
+                if !(fits(f.video_in_ms, f.video_out_ms) && fits(f.audio_in_ms, f.audio_out_ms)) {
                     return Err(format!("素材“{}”的淡入淡出时长超出范围", s.title));
                 }
             }
@@ -694,7 +696,7 @@ mod tests {
             match field {
                 "span" => f.span_ms -= 1.,
                 "offset" => f.offset_ms = 1.,
-                "fade" => f.video_in_ms = f.span_ms / 2. + 1.,
+                "fade" => f.video_in_ms = f.span_ms - f.video_out_ms + 1.,
                 _ => f.span_ms = f64::NAN,
             }
             assert!(p.validate().unwrap_err().contains("video"), "{field}");

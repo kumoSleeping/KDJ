@@ -60,11 +60,28 @@ pub fn is_media_extension(ext: &str) -> bool {
 }
 
 /// A project's title and length, read from its own JSON (no source is opened): the length is
-/// where its last clip ends.
+/// where its last clip ends; in the editor's lanes (format 2), the song's length, else the main
+/// lane's clips and gaps end to end.
 fn project_tags(path: &Path, out: &mut TrackTags) {
     let Ok(text) = std::fs::read_to_string(path) else { return };
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { return };
     out.title = doc["title"].as_str().unwrap_or_default().trim().to_string();
+    let length = |clip: &serde_json::Value| {
+        let speed = clip["speed"].as_f64().unwrap_or(1.);
+        let from = clip["in"].as_f64().unwrap_or(0.);
+        (speed > 0.).then(|| clip["out"].as_f64().map(|out| (out - from) / speed)).flatten()
+    };
+    if doc["kdjv"].as_u64() == Some(2) {
+        let song = length(&doc["song"]).unwrap_or(0.);
+        let main: f64 = doc["main"].as_array().into_iter().flatten()
+            .map(|item| item["gap"].as_f64().or_else(|| length(item)).unwrap_or(0.))
+            .sum();
+        let end = if song > 0. { song } else { main };
+        if end > 0. {
+            out.duration = Some(end);
+        }
+        return;
+    }
     let end = doc["tracks"]
         .as_array()
         .into_iter()
@@ -609,6 +626,10 @@ pub(crate) mod tests {
         assert_eq!(tags.title, "开场");
         assert_eq!(tags.duration, Some(12.), "the last clip ends at 4 + 8 s");
         assert!(is_project_path(Path::new("/x/SET.KDJV")));
+        std::fs::write(&path, r#"{"kdjv":2,"main":[{"src":"a.mp4","in":10,"out":20,"speed":2},{"gap":3},{"src":"b.mp4","out":4}]}"#).unwrap();
+        assert_eq!(read_tags(&path).duration, Some(12.), "lanes: 5 + 3 + 4 s end to end");
+        std::fs::write(&path, r#"{"kdjv":2,"song":{"src":"s.flac","in":1,"out":61},"main":[{"gap":3}]}"#).unwrap();
+        assert_eq!(read_tags(&path).duration, Some(60.), "a VJ is as long as its song");
     }
 
     /// 造一个 8000Hz / 8bit / 单声道的静音 WAV，用来测时长读取。
