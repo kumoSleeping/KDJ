@@ -38,7 +38,7 @@ let drops = 0;
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** Downloads what was dropped and remembers where it goes. */
-export async function downloadIntoEditor(payload: ActiveSearchDrag, path: string | null, at: number): Promise<void> {
+export async function downloadIntoEditor(payload: ActiveSearchDrag, path: string | null, at: number, sound = false): Promise<void> {
   watchEditorDownloads();
   const settings = useAppStore.getState().settings;
   const folder = settings?.download_dir?.trim() || "";
@@ -62,7 +62,7 @@ export async function downloadIntoEditor(payload: ActiveSearchDrag, path: string
       const task = await api.videoDownload(request);
       rememberVideoEnqueue(task.id, request);
       downloads.mergeTasks([withDownloadDisplay(task, { title, artist: payload.artist, cover: payload.cover, dest_dir: folder })]);
-      remember([{ task: task.id, path, lane: payload.request.audio_only ? "song" : "main", at, title, drop, order: 0 }]);
+      remember([{ task: task.id, path, lane: sound || payload.request.audio_only ? "song" : "main", at, title, drop, order: 0 }]);
       return;
     }
     const tasks = await downloads.enqueue(payload.sources, { quality: settings?.default_quality ?? null, dest_dir: folder, follow_default_dir: true });
@@ -124,7 +124,7 @@ async function place(item: EditorDownload, task: DownloadTask): Promise<void> {
   const songs = project?.layout.songs ?? [];
   const slot = songs.filter(s => s.at + s.length / 2 < item.at).length;
   const start = slot > 0 ? songs[slot - 1].at + songs[slot - 1].length : 0;
-  await editor.placeTracks(project ? project.path : null, [track], item.at);
+  await editor.placeTracks(project ? project.path : null, [track], item.at, item.lane === "song");
   // The rest of the drop goes after it: into the project it went into (or started), past it.
   const into = project ? project.path : useLaneEditor.getState().active;
   const next = item.lane === "song" ? start + (track.duration ?? 0) : Number.MAX_SAFE_INTEGER;

@@ -526,7 +526,7 @@ impl Workshop {
         for layer in visual.layers.iter().rev() {
             for c in &layer.clips {
                 let s = p.source(&c.source_id).context("素材不存在")?;
-                if !s.visual() || c.start_ms >= hi || c.start_ms + c.duration() <= lo {
+                if !s.visual() || c.picture.opacity <= 0. || c.start_ms >= hi || c.start_ms + c.duration() <= lo {
                     continue;
                 }
                 let clip = slice(

@@ -60,9 +60,9 @@ export function LaneEditor() {
   const span = Math.max(1, layout.duration);
 
   /** What was dropped goes where it belongs (laneEditorStore `placeTracks`). */
-  const dropInto = async (ids: readonly number[], at: number) => {
+  const dropInto = async (ids: readonly number[], at: number, sound: boolean) => {
     const tracks = await droppedTracks(ids);
-    if (tracks.length) await placeTracks(active?.path ?? null, tracks, at);
+    if (tracks.length) await placeTracks(active?.path ?? null, tracks, at, sound);
   };
 
   /** One beat at `t` (the song's own beat there, through any tempo change), else half a second. */
@@ -141,8 +141,8 @@ export function LaneEditor() {
     {status && <p className="kd-lanes-status" role={error ? "alert" : undefined} data-error={error ? "" : undefined} title={error ?? undefined}>{status}</p>}
 
     <LaneBoard project={project} zoom={zoom} selected={selected} select={id => { select(id); setTool(null); }} playhead={playhead.position}
-      seek={seek} beatNear={beatNear} edit={send} onDropped={(ids, at) => void dropInto(ids, at)}
-      onSearchDropped={(payload, at) => void downloadIntoEditor(payload, active?.path ?? null, at)} />
+      seek={seek} beatNear={beatNear} edit={send} onDropped={(ids, at, sound) => void dropInto(ids, at, sound)}
+      onSearchDropped={(payload, at, sound) => void downloadIntoEditor(payload, active?.path ?? null, at, sound)} />
 
     <div className="kd-lanes-tools" role="toolbar" aria-label="剪辑工具">
       <span className="kd-lanes-grow" />

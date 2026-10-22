@@ -291,6 +291,8 @@ impl Lanes {
                 }
                 let mut clip = DocClip::new(&song.src, end, song.from, song.out);
                 clip.volume = song.volume;
+                // A song is heard, never seen: a video put in the sound lane gives only its sound.
+                clip.opacity = 0.;
                 clip.name = Some(format!("song（{}）", file_name(&song.src)));
                 end += song.out - song.from;
                 clips.push(clip);
@@ -680,7 +682,8 @@ pub fn live(p: &CompositionProject) -> Live {
     for (track, layer) in p.layers.iter().enumerate() {
         for c in &layer.clips {
             let Some(n) = p.sources.iter().position(|s| s.id == c.source_id) else { continue };
-            if !p.sources[n].visual() {
+            // Nothing to draw: a sound, or a clip nobody can see (a video giving only its sound).
+            if !p.sources[n].visual() || c.picture.opacity <= 0. {
                 continue;
             }
             clips.push(LiveClip {
@@ -1067,6 +1070,20 @@ mod kdjv_tests {
             fps: 30.,
             signature: "sig".into(),
         }
+    }
+
+    #[test]
+    fn a_video_in_the_sound_lane_is_heard_and_not_seen() {
+        let doc = parse(
+            r#"{"kdjv":2,"title":"VJ","song":{"src":"/vj/op.mp4","in":0,"out":30},
+                "main":[{"id":"a","src":"/vj/a.mp4","in":0,"out":10,"muted":true}]}"#,
+        )
+        .unwrap();
+        let probed = HashMap::from([(PathBuf::from("/vj/a.mp4"), video()), (PathBuf::from("/vj/op.mp4"), video())]);
+        let p = project(&doc, Path::new("/projects"), &probed).unwrap();
+        let song = &p.layers.last().unwrap().clips[0];
+        assert_eq!((song.picture.opacity, song.sound.muted), (0., false), "its sound only");
+        assert_eq!(live(&p).clips.len(), 1, "only the picture lane's clip is drawn");
     }
 
     #[test]

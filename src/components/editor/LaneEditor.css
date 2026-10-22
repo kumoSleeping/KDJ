@@ -49,6 +49,15 @@
 }
 .kd-lanes-status[data-error] { color: var(--kd-danger, var(--kd-text)); }
 
+/* The lanes' names stand in a narrow column at the left, level with the lanes. */
+.kd-lanes-frame { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px; min-width: 0; }
+.kd-lanes-names { display: grid; grid-auto-rows: max-content; gap: 4px; padding-bottom: 4px; }
+.kd-lanes-name { color: var(--kd-muted); font-size: var(--kd-size-xs); line-height: 1; display: flex; align-items: center; white-space: nowrap; }
+.kd-lanes-name[data-lane="ruler"] { height: 16px; }
+.kd-lanes-name[data-lane="title"] { height: 16px; }
+.kd-lanes-name[data-lane="aux"] { height: 18px; }
+.kd-lanes-name[data-lane="main"] { height: 48px; }
+.kd-lanes-name[data-lane="song"] { height: 22px; }
 .kd-lanes-scroll { overflow-x: auto; overflow-y: hidden; min-width: 0; }
 .kd-lanes-board { position: relative; display: grid; gap: 4px; min-width: 100%; padding-bottom: 4px; }
 .kd-lanes-ruler { position: relative; height: 16px; cursor: pointer; }

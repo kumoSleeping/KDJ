@@ -65,8 +65,9 @@ interface LaneEditorState {
   openPath(path: string): Promise<boolean>;
   startVj(song: Track): Promise<void>;
   startVideo(video: Track): Promise<void>;
-  /** A new project from what was dropped: the songs one after another (a VJ), else the videos. */
-  createFrom(tracks: Track[]): Promise<void>;
+  /** A new project from what was dropped: the songs one after another (a VJ), else the videos;
+   *  with `sound`, videos too give only their sound, as songs. */
+  createFrom(tracks: Track[], sound?: boolean): Promise<void>;
   activate(path: string): void;
   /** Takes a project out of the editor (the file stays). */
   closeProject(path: string): void;
@@ -76,9 +77,9 @@ interface LaneEditorState {
    * Library rows dropped at `at` seconds of the project at `path` go where they belong: songs into
    * the song lane at that slot, pictures there (in a VJ at the bar, over what is there). A project
    * among them opens as a page of its own. No project (`path` null, or one no longer open): they
-   * start a new one.
+   * start a new one. `sound`: let go on the sound lane, where a video gives only its sound.
    */
-  placeTracks(path: string | null, tracks: Track[], at: number): Promise<void>;
+  placeTracks(path: string | null, tracks: Track[], at: number, sound?: boolean): Promise<void>;
   undo(): Promise<void>;
   redo(): Promise<void>;
   select(id: string | null): void;
@@ -285,14 +286,14 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
     },
     startVj: song => get().createFrom([song]),
     startVideo: video => get().createFrom([video]),
-    async createFrom(tracks) {
+    async createFrom(tracks, sound = false) {
       const missing = tracks.find(track => !(track.duration && track.duration > 0));
       if (missing) {
         set({ open: true, error: `「${missing.title || "未命名"}」还读不到时长，等曲库读完再试` });
         return;
       }
-      const songs = tracks.filter(isSongTrack);
-      const pictures = tracks.filter(isPictureTrack);
+      const songs = tracks.filter(track => isSongTrack(track) || (sound && isVideoTrack(track.format)));
+      const pictures = tracks.filter(track => !songs.includes(track) && isPictureTrack(track));
       if (songs.length) {
         const title = `${songs[0].title || "未命名"} VJ`;
         await create(songs[0].path, title, [
@@ -334,15 +335,16 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
         }
       });
     },
-    async placeTracks(path, tracks, at) {
+    async placeTracks(path, tracks, at, sound = false) {
       // A project dropped in is opened, as a page of its own, not put inside another.
       for (const project of tracks.filter(track => isProjectTrack(track.format))) await get().openTrack(project);
       const rest = tracks.filter(track => !isProjectTrack(track.format) && (track.duration ?? 0) > 0);
       if (rest.length === 0) return;
+      const heard = (track: Track) => isSongTrack(track) || (sound && isVideoTrack(track.format));
       const project = path ? get().projects.find(p => p.path === path) : undefined;
-      if (!project) { await get().createFrom(rest); return; }
+      if (!project) { await get().createFrom(rest, sound); return; }
       const { doc, layout, grid } = project;
-      const songs = rest.filter(isSongTrack), pictures = rest.filter(isPictureTrack);
+      const songs = rest.filter(heard), pictures = rest.filter(track => !heard(track) && isPictureTrack(track));
       const ops: LaneOp[] = [];
       const placed = layout.songs ?? [];
       let index = placed.filter(s => s.at + s.length / 2 < at).length;

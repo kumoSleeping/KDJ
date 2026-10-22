@@ -42,16 +42,40 @@ export interface LiveTransport {
   playing: boolean;
 }
 
-/** Where the project is: the player's device clock, else its last word (web and Android). */
-function projectTime(trackId: number, heard: { position: number; at: number; playing: boolean; rate: number } | null) {
+type Heard = { position: number; at: number; playing: boolean; rate: number };
+/** How long a clock gone quiet is carried on from where it was, before the picture waits. */
+const CARRY_MS = 1_500;
+
+/**
+ * Where the project is: the player's device clock, else its last word (web and Android). The
+ * device clock is unreadable for moments — while a seek swaps the decks, or the other deck holds
+ * the next song — and the last word may be about another row: then the time last known is carried
+ * on (and held after a while), never put back to 0, which threw the picture and the window's
+ * progress back to the start and forth again.
+ */
+function projectTime(trackId: number, heard: Heard | null, known: { current: Heard | null }) {
+  const carried = () => {
+    const last = known.current;
+    if (!last) return null;
+    const age = performance.now() - last.at;
+    const position = last.position + (last.playing ? Math.min(age, CARRY_MS) / 1000 * last.rate : 0);
+    return { position, playing: last.playing && age <= CARRY_MS, rate: last.rate, clock: null };
+  };
   if (usesLocalVideoDeviceClock()) {
     const clock = getLocalVideoClock(trackId);
-    if (clock) return { position: clock.position, playing: clock.playing && clock.rate > 0, rate: clock.rate, clock };
+    if (clock) {
+      const playing = clock.playing && clock.rate > 0;
+      known.current = { position: clock.position, at: performance.now(), playing, rate: clock.rate };
+      return { position: clock.position, playing, rate: clock.rate, clock };
+    }
     const last = getLatestPlayerSync(trackId);
+    const kept = carried();
+    if (kept) return kept;
     return { position: last?.position ?? 0, playing: false, rate: 1, clock: null };
   }
-  if (!heard) return { position: 0, playing: false, rate: 1, clock: null };
+  if (!heard) return carried() ?? { position: 0, playing: false, rate: 1, clock: null };
   const position = heard.position + (heard.playing ? (performance.now() - heard.at) / 1000 * heard.rate : 0);
+  known.current = { position, at: performance.now(), playing: heard.playing, rate: heard.rate };
   return { position, playing: heard.playing, rate: heard.rate, clock: null };
 }
 
@@ -84,7 +108,8 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
   }, [project.width, project.height]);
 
   useEffect(() => {
-    let heard: { position: number; at: number; playing: boolean; rate: number } | null = null;
+    let heard: Heard | null = null;
+    const known: { current: Heard | null } = { current: null };
     const onSync = (event: Event) => {
       const detail = (event as CustomEvent<MediaSyncDetail>).detail;
       if (detail.owner !== "player" || detail.trackId !== trackId) return;
@@ -115,7 +140,7 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
     };
     const tick = (now: number) => {
       frame = requestAnimationFrame(tick);
-      const t = projectTime(trackId, heard);
+      const t = projectTime(trackId, heard, known);
       const held = heldClips(project, t.position, isShown);
       const want = [...new Set([...preparedClips(project, t.position, t.playing), ...held])].sort((a, b) => a - b);
       const key = want.join(",");
