@@ -28,13 +28,16 @@ pub enum Op {
     },
     Title { title: String },
     /// A clip into the main lane: starting at `at` (into the black there, or after the end), else at
-    /// `index`, else at the end. Without an `id` it gets one.
+    /// `index`, else at the end. Without an `id` it gets one. With `over` (and `at`) it goes in over
+    /// what is there: the clips it covers are cut back where it starts and ends.
     Add {
         clip: Map<String, Value>,
         #[serde(default)]
         at: Option<f64>,
         #[serde(default)]
         index: Option<usize>,
+        #[serde(default)]
+        over: bool,
     },
     /// A clip out of the main lane, with its branches.
     Remove { id: String },
@@ -78,8 +81,14 @@ pub enum Op {
     MoveSong { from: usize, to: usize },
     /// A song's other fields: volume.
     SetSong { index: usize, fields: Map<String, Value> },
-    /// A clip of a VJ to start at `at`, into the black there; it keeps its id and branches.
-    MoveTo { id: String, at: f64 },
+    /// A clip of a VJ to start at `at`, into the black there (with `over`, over what is there, as
+    /// `add` does); it keeps its id and branches.
+    MoveTo {
+        id: String,
+        at: f64,
+        #[serde(default)]
+        over: bool,
+    },
     /// The whole document as it was (undo and redo): checked like any other result.
     Restore { document: Value },
     /// The markers of the ruler, all of them: `{"at": seconds, "name"?: text}`.
@@ -253,6 +262,15 @@ fn place_at(main: &mut Vec<Value>, item: Value, at: f64) -> Result<()> {
         bail!("{at:.3} 秒处是 main[{k}]，只能放进黑的地方")
     }
     let (from, gap) = (begins[k], length(&main[k]));
+    // The black at the end runs on as far as the clip needs.
+    if k + 1 == main.len() && at + span > from + gap {
+        main.truncate(k);
+        if at - from > EPS {
+            main.push(json!({ "gap": round(at - from) }));
+        }
+        main.push(item);
+        return Ok(());
+    }
     if at + span > from + gap + EPS {
         bail!("放在 {at:.3} 秒长 {span:.3} 秒，会盖住 main[{}]（这里的黑只到 {:.3} 秒）", k + 1, from + gap)
     }
@@ -265,6 +283,125 @@ fn place_at(main: &mut Vec<Value>, item: Value, at: f64) -> Result<()> {
         stretch.push(json!({ "gap": round(from + gap - at - span) }));
     }
     main.splice(k..k + 1, stretch);
+    Ok(())
+}
+
+/// Cuts the clip at `main[k]` in two `at` seconds of the project: the second half gets a new id and
+/// the clip's `out` branch (the end is now the second half's). Answers the second half's id.
+fn cut_clip(doc: &mut Value, k: usize, at: f64) -> Result<String> {
+    let main = main_of(doc)?;
+    let id = main[k].get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+    let start = starts(main)[k];
+    let speed = num(&main[k], "speed").unwrap_or(1.);
+    let cut = round(num(&main[k], "in").unwrap_or(0.) + (at - start) * speed);
+    let mut second = main[k].clone();
+    main[k]["out"] = json!(cut);
+    second["in"] = json!(cut);
+    let next = fresh_id(main, &id);
+    second["id"] = json!(next.clone());
+    main.insert(k + 1, second);
+    if let Some(branches) = doc.get_mut("branches").and_then(Value::as_array_mut) {
+        for b in branches.iter_mut() {
+            if b["clip"] == json!(id) && b["side"] == json!("out") {
+                b["clip"] = json!(next.clone());
+            }
+        }
+    }
+    Ok(next)
+}
+
+/// Makes the main lane change at `t`: a clip or black running across it is cut in two there. Past
+/// the end, black runs up to it. Answers the index of the stretch starting at `t` (the length of the
+/// lane, at its end).
+fn split_at(doc: &mut Value, t: f64) -> Result<usize> {
+    let main = main_of(doc)?;
+    let begins = starts(main);
+    let end = begins.last().map_or(0., |s| s + length(main.last().unwrap()));
+    if t >= end - EPS {
+        if t - end > EPS {
+            main.push(json!({ "gap": round(t - end) }));
+        }
+        return Ok(main.len());
+    }
+    let k = (0..main.len()).rev().find(|&k| begins[k] <= t + EPS).unwrap_or(0);
+    if (t - begins[k]).abs() <= EPS {
+        return Ok(k);
+    }
+    if is_gap(&main[k]) {
+        let whole = length(&main[k]);
+        main[k]["gap"] = json!(round(t - begins[k]));
+        main.insert(k + 1, json!({ "gap": round(begins[k] + whole - t) }));
+        return Ok(k + 1);
+    }
+    cut_clip(doc, k, t)?;
+    Ok(k + 1)
+}
+
+/// The stretch `from`–`to` of the main lane made black: what covers it is cut back to its edges.
+fn clear(doc: &mut Value, from: f64, to: f64) -> Result<()> {
+    // The far edge first: what is left after it keeps the name the clip's next half has always got.
+    let j = split_at(doc, to)?;
+    let before = main_of(doc)?.len();
+    let i = split_at(doc, from)?;
+    let j = j + (main_of(doc)?.len() - before);
+    main_of(doc)?.splice(i..j, [json!({ "gap": round(to - from) })]);
+    Ok(())
+}
+
+/// The main lane cut into the stretches of the songs `bounds` (each song's start, then the end of
+/// the last): what plays over each song. What runs past the last song stays with it.
+fn song_chunks(doc: &mut Value, bounds: &[f64]) -> Result<Vec<Vec<Value>>> {
+    let cuts: Vec<f64> = bounds[1..bounds.len().saturating_sub(1)].to_vec();
+    for t in &cuts {
+        split_at(doc, *t)?;
+    }
+    let main = main_of(doc)?.clone();
+    let begins = starts(&main);
+    let mut chunks = vec![vec![]; bounds.len().saturating_sub(1).max(1)];
+    for (item, at) in main.into_iter().zip(begins) {
+        let n = cuts.iter().filter(|&&t| at >= t - EPS).count().min(chunks.len() - 1);
+        chunks[n].push(item);
+    }
+    Ok(chunks)
+}
+
+/// The song lane's starts, then the end of its last song.
+fn song_bounds(songs: &[Value]) -> Vec<f64> {
+    let mut at = 0.;
+    let mut out = vec![0.];
+    for song in songs {
+        at += song_length(song);
+        out.push(round(at));
+    }
+    out
+}
+
+/// The main lane put back together from the songs' stretches, each padded with black to its song's
+/// length (but the last), and the times of titles and markers moved as `place` says: from a time of
+/// the old project to the new one, or None for what went.
+fn rejoin(doc: &mut Value, chunks: Vec<(Vec<Value>, f64)>, place: impl Fn(f64) -> Option<f64>) -> Result<()> {
+    let count = chunks.len();
+    let mut main = vec![];
+    for (n, (chunk, span)) in chunks.into_iter().enumerate() {
+        let filled: f64 = chunk.iter().map(length).sum();
+        main.extend(chunk);
+        if n + 1 < count && span - filled > EPS {
+            main.push(json!({ "gap": round(span - filled) }));
+        }
+    }
+    while main.last().is_some_and(is_gap) {
+        main.pop();
+    }
+    *main_of(doc)? = main;
+    for key in ["titles", "markers"] {
+        if let Some(list) = doc.get_mut(key).and_then(Value::as_array_mut) {
+            list.retain_mut(|item| match num(item, "at").and_then(&place) {
+                Some(at) => { item["at"] = json!(round(at)); true }
+                None => false,
+            });
+            list.sort_by(|a, b| num(a, "at").unwrap_or(0.).total_cmp(&num(b, "at").unwrap_or(0.)));
+        }
+    }
     Ok(())
 }
 
@@ -329,7 +466,7 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
             *doc = fresh;
         }
         Op::Title { title } => doc["title"] = json!(title),
-        Op::Add { clip, at, index } => {
+        Op::Add { clip, at, index, over } => {
             let mut item = Value::Object(clip.clone());
             if item.get("src").and_then(Value::as_str).is_none() || num(&item, "out").is_none() {
                 bail!("片段要有 src 和 out")
@@ -344,6 +481,14 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
             if !(span > EPS) {
                 bail!("片段长度要大于 0（out 要大于 in）")
             }
+            if let (Some(at), true) = (at, over) {
+                let at = at.max(0.);
+                clear(doc, at, at + span)?;
+                let main = main_of(doc)?;
+                tidy(main);
+                return place_at(main, item, at);
+            }
+            let main = main_of(doc)?;
             match (at, index) {
                 (Some(at), _) => place_at(main, item, *at)?,
                 (None, Some(index)) => {
@@ -400,22 +545,7 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
             if !(*at > start + EPS && *at < start + span - EPS) {
                 bail!("{at:.3} 秒不在 {id}（{start:.3}–{:.3} 秒）里面", start + span)
             }
-            let speed = num(&main[i], "speed").unwrap_or(1.);
-            let cut = round(num(&main[i], "in").unwrap_or(0.) + (at - start) * speed);
-            let mut second = main[i].clone();
-            main[i]["out"] = json!(cut);
-            second["in"] = json!(cut);
-            let next = fresh_id(main, id);
-            second["id"] = json!(next.clone());
-            main.insert(i + 1, second);
-            // The end of the clip is now the second half's: so is a branch from it.
-            if let Some(branches) = doc.get_mut("branches").and_then(Value::as_array_mut) {
-                for b in branches.iter_mut() {
-                    if b["clip"] == json!(id) && b["side"] == json!("out") {
-                        b["clip"] = json!(next.clone());
-                    }
-                }
-            }
+            cut_clip(doc, i, *at)?;
         }
         Op::Set { id, fields } => {
             if let Some(key) = fields.keys().find(|key| !SETTABLE.contains(&key.as_str())) {
@@ -483,6 +613,15 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
             if at > songs.len() {
                 bail!("index {at} 超出歌曲行（共 {} 首）", songs.len())
             }
+            // What plays over the songs after it moves along with them.
+            if at < songs.len() {
+                let bounds = song_bounds(&songs);
+                let (t, span) = (bounds[at], song_length(&song));
+                let mut chunks: Vec<(Vec<Value>, f64)> = song_chunks(doc, &bounds)?.into_iter()
+                    .zip(songs.iter().map(song_length)).collect();
+                chunks.insert(at, (vec![], span));
+                rejoin(doc, chunks, |old| Some(if old >= t - EPS { old + span } else { old }))?;
+            }
             songs.insert(at, song);
             put_songs(doc, songs)?;
         }
@@ -490,6 +629,16 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
             let mut songs = songs_of(doc);
             if *index >= songs.len() {
                 bail!("歌曲行没有第 {} 首（共 {} 首）", index + 1, songs.len())
+            }
+            // What played over the song goes with it; what came after moves up. The last song going
+            // leaves the picture as it is: a video of its own now.
+            if songs.len() > 1 {
+                let bounds = song_bounds(&songs);
+                let (from, to) = (bounds[*index], bounds[*index + 1]);
+                let mut chunks: Vec<(Vec<Value>, f64)> = song_chunks(doc, &bounds)?.into_iter()
+                    .zip(songs.iter().map(song_length)).collect();
+                chunks.remove(*index);
+                rejoin(doc, chunks, |old| if old < from - EPS { Some(old) } else if old >= to - EPS { Some(old - (to - from)) } else { None })?;
             }
             songs.remove(*index);
             put_songs(doc, songs)?;
@@ -499,6 +648,23 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
             if *from >= songs.len() || *to >= songs.len() {
                 bail!("歌曲行共 {} 首，没有第 {} 或第 {} 首", songs.len(), from + 1, to + 1)
             }
+            // What plays over each song goes where its song goes.
+            let bounds = song_bounds(&songs);
+            let mut chunks: Vec<(Vec<Value>, f64, usize)> = song_chunks(doc, &bounds)?.into_iter()
+                .zip(songs.iter().map(song_length)).enumerate().map(|(n, (chunk, span))| (chunk, span, n)).collect();
+            let moved = chunks.remove(*from);
+            chunks.insert(*to, moved);
+            let mut start = vec![0.; chunks.len()];
+            let mut at = 0.;
+            for (_, span, old) in &chunks {
+                start[*old] = at;
+                at += span;
+            }
+            let place = |old: f64| {
+                let n = (0..bounds.len() - 1).rev().find(|&n| old >= bounds[n] - EPS).unwrap_or(0);
+                Some(old - bounds[n] + start[n.min(start.len() - 1)])
+            };
+            rejoin(doc, chunks.into_iter().map(|(chunk, span, _)| (chunk, span)).collect(), place)?;
             let song = songs.remove(*from);
             songs.insert(*to, song);
             put_songs(doc, songs)?;
@@ -518,7 +684,7 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
             }
             put_songs(doc, songs)?;
         }
-        Op::MoveTo { id, at } => {
+        Op::MoveTo { id, at, over } => {
             if !vj {
                 bail!("没有歌的工程按顺序排，用 move 换位置")
             }
@@ -527,7 +693,12 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
             let item = main[i].clone();
             main[i] = json!({ "gap": round(length(&item)) });
             tidy(main);
-            place_at(main, item, at.max(0.))?;
+            let at = at.max(0.);
+            if *over {
+                clear(doc, at, at + length(&item))?;
+                tidy(main_of(doc)?);
+            }
+            place_at(main_of(doc)?, item, at)?;
         }
         Op::Restore { document } => {
             if document.get("kdjv").and_then(Value::as_u64) != Some(2) || !document["main"].is_array() {
@@ -615,7 +786,12 @@ pub fn layout(doc: &Value) -> Value {
         at += song_length(song);
         placed
     }).collect();
-    json!({ "duration": round(if at > 0. { at } else { end }), "main_end": round(end), "main": items, "branches": branches, "songs": songs })
+    // Without songs the project runs as long as anything in it: the main lane, a branch out of its
+    // last clip, a title past its end.
+    let reach = branches.iter().map(|b| num(b, "at").unwrap_or(0.) + num(b, "length").unwrap_or(0.))
+        .chain(doc["titles"].as_array().into_iter().flatten().map(|t| num(t, "at").unwrap_or(0.) + num(t, "length").unwrap_or(0.)))
+        .fold(end, f64::max);
+    json!({ "duration": round(if at > 0. { at } else { reach }), "main_end": round(end), "main": items, "branches": branches, "songs": songs })
 }
 
 #[cfg(test)]
@@ -748,6 +924,42 @@ mod tests {
         assert!(apply(&titled, &ops(r#"[{"op":"set_title","id":"t1","fields":{"text":" "}}]"#)).is_err());
         let gone = apply(&titled, &ops(r#"[{"op":"remove_title","id":"t1"}]"#)).unwrap();
         assert!(gone.get("titles").is_none());
+    }
+
+    #[test]
+    fn the_last_clip_moves_into_the_black_at_the_end_and_a_drop_can_go_over_what_is_there() {
+        let later = apply(&vj(), &ops(r#"[{"op":"move_to","id":"c2","at":25}]"#)).unwrap();
+        assert_eq!(shape(&later)[2], ("c2".into(), 25., 10.), "{later}");
+        let pulled = apply(&vj(), &ops(r#"[{"op":"trim","id":"c2","in":22},{"op":"move_to","id":"c2","at":22}]"#)).unwrap();
+        assert_eq!(shape(&pulled)[2], ("c2".into(), 22., 8.), "the start of the last clip pulled in");
+        let over = apply(&vj(), &ops(r#"[{"op":"add","clip":{"src":"/c.mp4","out":12},"at":5,"over":true}]"#)).unwrap();
+        assert_eq!(shape(&over), vec![("c1".into(), 0., 5.), ("c3".into(), 5., 12.), ("-".into(), 17., 3.), ("c2".into(), 20., 10.)], "{over}");
+        let across = apply(&vj(), &ops(r#"[{"op":"add","clip":{"src":"/c.mp4","out":2},"at":4,"over":true}]"#)).unwrap();
+        assert_eq!(shape(&across)[..3], [("c1".into(), 0., 4.), ("c3".into(), 4., 2.), ("c1-2".into(), 6., 4.)]);
+        assert_eq!(across["main"][2]["in"], json!(6.), "the rest of c1 plays on from where it was");
+        let moved = apply(&vj(), &ops(r#"[{"op":"move_to","id":"c2","at":8,"over":true}]"#)).unwrap();
+        assert_eq!(shape(&moved), vec![("c1".into(), 0., 8.), ("c2".into(), 8., 10.), ("-".into(), 18., 12.)], "{moved}");
+    }
+
+    #[test]
+    fn the_picture_goes_with_its_song_when_songs_are_added_moved_or_removed() {
+        let two = apply(&vj(), &ops(r#"[
+            {"op":"add_song","song":{"src":"/t.flac","out":40}},
+            {"op":"add","clip":{"src":"/d.mp4","out":5},"at":62},
+            {"op":"markers","markers":[{"at":21},{"at":63}]}
+        ]"#)).unwrap();
+        let first = apply(&two, &ops(r#"[{"op":"add_song","song":{"src":"/x.flac","out":30},"index":0}]"#)).unwrap();
+        let c2 = |doc: &Value| layout(doc)["main"].as_array().unwrap().iter().find(|m| m["id"] == json!("c2")).unwrap()["at"].clone();
+        assert_eq!(c2(&first), json!(50.), "30 s of song in front of it");
+        assert_eq!(first["markers"], json!([{"at":51.0},{"at":93.0}]));
+        let swapped = apply(&two, &ops(r#"[{"op":"move_song","from":1,"to":0}]"#)).unwrap();
+        assert_eq!(c2(&swapped), json!(60.), "after the 40 s song now");
+        let c3 = layout(&swapped)["main"].as_array().unwrap().iter().find(|m| m["id"] == json!("c3")).unwrap()["at"].clone();
+        assert_eq!(c3, json!(2.), "the clip over the second song came first with it");
+        assert_eq!(swapped["markers"], json!([{"at":3.0},{"at":61.0}]));
+        let gone = apply(&two, &ops(r#"[{"op":"remove_song","index":0}]"#)).unwrap();
+        assert_eq!(shape(&gone), vec![("-".into(), 0., 2.), ("c3".into(), 2., 5.)], "{gone}");
+        assert_eq!(gone["markers"], json!([{"at":3.0}]));
     }
 
     #[test]

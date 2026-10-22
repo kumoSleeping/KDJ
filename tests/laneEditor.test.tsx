@@ -3,7 +3,7 @@ import test from "node:test";
 import { JSDOM } from "jsdom";
 import { act, createElement } from "react";
 
-test("the editor shows a project's three lanes, and each tool unfolds its own controls for what is chosen", async () => {
+test("the editor shows a project's three lanes, and everything about what is chosen in one place under them", async () => {
   const dom = new JSDOM("<!doctype html><div id='root'></div>", { url: "http://localhost/" });
   Object.assign(globalThis, {
     window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement,
@@ -25,7 +25,8 @@ test("the editor shows a project's three lanes, and each tool unfolds its own co
     assert.ok(document.querySelector(".kd-lanes[data-empty]"));
     assert.equal(document.querySelectorAll(".kd-lanes-lane").length, 3, "branches, picture, songs");
     assert.equal([...document.querySelectorAll(".kd-lanes-lane")].map(lane => lane.textContent).join(""), "");
-    assert.equal((button("剪切") as HTMLButtonElement).disabled, true);
+    assert.equal((button("字幕") as HTMLButtonElement).disabled, true);
+    assert.equal(document.querySelector(".kd-lanes-panel"), null, "nothing under the lanes");
 
     const doc = {
       kdjv: 2 as const, title: "Set",
@@ -41,30 +42,27 @@ test("the editor shows a project's three lanes, and each tool unfolds its own co
     };
     await act(async () => useLaneEditor.setState({
       open: true, active: "/p/set.kdjv", selected: null,
-      projects: [{ path: "/p/set.kdjv", trackId: 7, songIds: [1, 2], doc, layout, grid: { downbeats: [0, 2, 4], beats: [0, 0.5, 1, 1.5, 2] }, analysing: false }],
+      projects: [{ path: "/p/set.kdjv", trackId: 7, songIds: [1, 2], doc, layout, grid: { downbeats: [0, 2, 4], beats: [0, 0.5, 1, 1.5, 2] }, analysing: false, lengths: {} }],
     }));
     assert.equal(document.querySelectorAll(".kd-lanes-lane").length, 3, "branches, picture, songs");
     assert.deepEqual([...document.querySelectorAll(".kd-lanes-song")].map(node => node.textContent), ["a", "b"]);
     assert.equal(document.querySelectorAll(".kd-lanes-clip").length, 1);
-    assert.equal(document.querySelector(".kd-lanes-panel"), null, "no tool unfolded yet");
 
-    // 画面 with nothing chosen acts on every picture; with a clip chosen, on that clip.
-    await click(button("画面"));
+    // Nothing chosen: what acts on every picture.
     assert.ok(button("全部铺满"));
+    // A clip chosen: its cut, picture, sound, branches and (in a VJ) its place in the song, together.
     await click(document.querySelector(".kd-lanes-clip"));
+    assert.deepEqual([...document.querySelectorAll(".kd-lanes-section-label")].map(node => node.textContent), ["剪", "画面", "声音", "转场", "校准"]);
+    assert.ok(button("切开"));
     assert.ok(document.querySelector('.kd-lanes-panel [role="radiogroup"][aria-label="画面大小"]'));
+    assert.ok(button("对齐到歌"));
     assert.equal(button("全部铺满"), undefined);
 
-    // 剪切 for a song: its place in the song lane.
-    await click(button("剪切"));
-    assert.ok(button("切开"));
+    // A song chosen: its place in the song lane and its volume.
     await click(document.querySelectorAll(".kd-lanes-song")[1]);
     assert.ok(button("删掉这首歌"));
     assert.equal((button("往后") as HTMLButtonElement).disabled, true, "the last song cannot go later");
-
-    // The same tool again folds it away.
-    await click(button("剪切"));
-    assert.equal(document.querySelector(".kd-lanes-panel"), null);
+    assert.equal(button("切开"), undefined);
 
     // 字幕 offers a new title at the playhead; 导出 its settings; nothing to undo yet.
     await click(button("字幕"));

@@ -68,19 +68,23 @@ export interface LaneEdited {
   document: LaneDocument;
   layout: LaneLayout;
   duration: number;
+  /** How long each file the document names is, in seconds, by its name there. */
+  lengths?: Record<string, number>;
+  /** Why the project does not play as it is (only when opening it). */
+  problem?: string | null;
 }
 
 /** One operation (lanes.rs `Op`). */
 export type LaneOp =
   | { op: "new"; title: string; song?: LaneSong | null; canvas?: { width: number; height: number; fps?: number } }
   | { op: "title"; title: string }
-  | { op: "add"; clip: Partial<LaneClip> & { src: string; out: number }; at?: number; index?: number }
+  | { op: "add"; clip: Partial<LaneClip> & { src: string; out: number }; at?: number; index?: number; over?: boolean }
   | { op: "remove"; id: string }
   | { op: "move"; id: string; index: number }
   | { op: "trim"; id: string; in?: number; out?: number }
   | { op: "split"; id: string; at: number }
   | { op: "set"; id: string; fields: Partial<Pick<LaneClip, "speed" | "volume" | "muted" | "x" | "y" | "scale" | "opacity" | "fill" | "crop">> }
-  | { op: "move_to"; id: string; at: number }
+  | { op: "move_to"; id: string; at: number; over?: boolean }
   | { op: "restore"; document: LaneDocument }
   | { op: "markers"; markers: LaneMarker[] }
   | { op: "add_title"; title: Omit<LaneTitle, "id"> }
@@ -127,6 +131,35 @@ export function laneClock(seconds: number): string {
 export function fileLabel(src: string): string {
   const name = src.split(/[\\/]/).pop() ?? src;
   return name.replace(/\.[^.]+$/, "");
+}
+
+/**
+ * The operations that branch `clip` on `side` for `length` seconds. A branch plays more of the
+ * clip's file than the clip does (after its out, or before its in); when the file has not that
+ * much more, the clip gives it up: it is cut back by as much, and the branch plays what was cut.
+ * In a VJ a clip whose start is cut back also starts later by as much, so that its picture stays
+ * on the song's beat. `sourceLength` is the file's length, when known.
+ */
+export function branchOps(clip: LaneClip, side: BranchSide, length: number, vj: boolean, at: number,
+  sourceLength: number | undefined, keep: { opacity?: number; fade?: boolean } = {}): LaneOp[] {
+  const speed = clip.speed ?? 1;
+  const need = length * speed;
+  const r = (value: number) => Math.round(value * 1000) / 1000;
+  const branch: LaneOp = { op: "branch", clip: clip.id, side, length: r(length), ...keep };
+  if (side === "out") {
+    const spare = sourceLength === undefined ? Infinity : sourceLength - clip.out;
+    if (spare + 0.05 >= need) return [branch];
+    const out = r(clip.out - (need - Math.max(0, spare)));
+    if (out - (clip.in ?? 0) <= 0.1) return [branch];
+    return [{ op: "trim", id: clip.id, out }, branch];
+  }
+  const spare = clip.in ?? 0;
+  if (spare + 1e-6 >= need) return [branch];
+  const from = r(need);
+  if (clip.out - from <= 0.1) return [branch];
+  const ops: LaneOp[] = [{ op: "trim", id: clip.id, in: from }];
+  if (vj) ops.push({ op: "move_to", id: clip.id, at: r(at + (from - spare) / speed) });
+  return [...ops, branch];
 }
 
 /** One way a video lies in a song, as `/api/cli/align` answers it: ref = ref_at + (video - video_in) / speed. */

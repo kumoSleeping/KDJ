@@ -1,18 +1,18 @@
 /**
- * What the editor's tools unfold (LaneEditor.tsx): each its few controls for what is chosen on
- * the lanes, nothing when they have nothing to act on. Values that slide are sent once, when they
- * settle; text is sent when it is left.
+ * What stands under the editor's lanes (LaneEditor.tsx): everything that can be done to what is
+ * chosen on them, in labelled rows, or what 字幕 and 导出 unfold. Values that slide are sent
+ * once, when they settle; text is sent when it is left.
  */
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { ArrowLeft, ArrowRight, Crosshair, Download, LoaderCircle, Plus, RotateCcw, Scissors, Trash2 } from "lucide-react";
 import { api } from "../../lib/api";
-import { exportProject } from "../../lib/kdjvPlay";
-import { isGap, laneClock, type BranchSide, type ExportOptions, type LaneBranch, type LaneClip, type LaneOp, type LaneTitle } from "../../lib/lanes";
+import { exportProject, useKdjvLive } from "../../lib/kdjvPlay";
+import { branchOps, isGap, laneClock, type BranchSide, type ExportOptions, type LaneBranch, type LaneClip, type LaneOp, type LaneTitle } from "../../lib/lanes";
 import { drawTitle, TITLE_DEFAULTS, type TitleLook } from "../../lib/titleImage";
 import { songsOf, useLaneEditor, type LaneProject } from "../../stores/laneEditorStore";
 import { Segmented, Slider } from "../common";
 
-export type Tool = "cut" | "picture" | "sound" | "seam" | "title" | "align" | "export";
+export type Tool = "title" | "export";
 type Crop = [number, number, number, number];
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -63,8 +63,9 @@ function CropBox({ crop, onCommit }: { crop: Crop; onCommit(crop: Crop): void })
   const [live, setLive] = useState<Crop | null>(null);
   const c = live ?? crop;
   const SIDES = ["左", "上", "右", "下"] as const;
+  // Rounded last: 0.9 - 0.3 is 0.6000000000000001, and with 0.3 that is more than the 0.9 allowed.
   const limit = (side: number, value: number, from: Crop) =>
-    Math.max(0, Math.min(0.9 - from[(side + 2) % 4], Math.round(value * 100) / 100));
+    Math.round(Math.max(0, Math.min(0.9 - from[(side + 2) % 4], value)) * 100) / 100;
   const pull = (side: number) => (event: ReactPointerEvent<HTMLSpanElement>) => {
     if (event.button !== 0 || !frame.current) return;
     event.preventDefault();
@@ -115,25 +116,27 @@ function CropBox({ crop, onCommit }: { crop: Crop; onCommit(crop: Crop): void })
   </div>;
 }
 
-function Branch({ clip, side, branch, beat, onOps }: {
-  clip: LaneClip; side: BranchSide; branch: LaneBranch | undefined; beat: number; onOps(ops: LaneOp[]): void;
+/** A branch of the chosen clip on one side: on or off, how long, how opaque, faded or not. */
+function Branch({ clip, side, branch, beat, vj, at, sourceLength, onOps }: {
+  clip: LaneClip; side: BranchSide; branch: LaneBranch | undefined; beat: number; vj: boolean; at: number;
+  sourceLength: number | undefined; onOps(ops: LaneOp[]): void;
 }) {
-  const length = branch?.length ?? beat;
-  const send = (more: Partial<LaneBranch>) => onOps([{ op: "branch", clip: clip.id, side, length, opacity: branch?.opacity, fade: branch?.fade, ...more }]);
+  const keep = { opacity: branch?.opacity, fade: branch?.fade };
+  const make = (length: number, more: Partial<LaneBranch> = {}) =>
+    onOps(branchOps(clip, side, length, vj, at, sourceLength, { ...keep, ...more }));
   return <div className="kd-lanes-row" data-on={branch ? "" : undefined}>
     <label className="kd-lanes-check" title={side === "out" ? "这一段的结尾继续放，盖在下一段的开头上" : "这一段提前进来，盖在上一段的结尾上"}>
       <input type="checkbox" checked={Boolean(branch)}
-        onChange={event => onOps([event.target.checked
-          ? { op: "branch", clip: clip.id, side, length: beat }
-          : { op: "unbranch", clip: clip.id, side }])} />
+        onChange={event => { if (event.target.checked) make(beat); else onOps([{ op: "unbranch", clip: clip.id, side }]); }} />
       <span>{side === "out" ? "出分叉" : "入分叉"}</span>
     </label>
     {branch && <>
-      <NumberField label="秒" value={branch.length} step={0.05} min={0.05} max={30} onCommit={value => send({ length: value })} />
+      <NumberField label="秒" value={branch.length} step={0.05} min={0.05} max={30} onCommit={value => make(value)} />
       <SettleSlider label="透明度" value={branch.opacity ?? 1} min={0} max={1} step={0.05} defaultValue={1} format={percent}
-        onCommit={value => send({ opacity: value })} />
+        onCommit={value => onOps([{ op: "branch", clip: clip.id, side, length: branch.length, ...keep, opacity: value }])} />
       <label className="kd-lanes-check">
-        <input type="checkbox" checked={branch.fade !== false} onChange={event => send({ fade: event.target.checked })} />
+        <input type="checkbox" checked={branch.fade !== false}
+          onChange={event => onOps([{ op: "branch", clip: clip.id, side, length: branch.length, ...keep, fade: event.target.checked }])} />
         <span>淡入淡出</span>
       </label>
     </>}
@@ -234,7 +237,9 @@ function TitlePanel({ title, playhead, beat, edit }: {
   </div>;
 }
 
-const SIZES = { project: null, "1080": [1920, 1080], "720": [1280, 720], "2160": [3840, 2160] } as const;
+/** The export's short side: the long one follows the project's own shape, upright or wide. */
+const SIZES = { project: null, "1080": 1080, "720": 720, "2160": 2160 } as const;
+const even = (value: number) => Math.round(value / 2) * 2;
 const QUALITY = { high: 16, standard: 20, compact: 26 } as const;
 
 /** 导出: the project written out beside it, as it plays or as set here. */
@@ -249,8 +254,14 @@ function ExportPanel({ project }: { project: LaneProject }) {
   const go = async () => {
     if (project.trackId === null) return;
     const options: ExportOptions = {};
-    const wh = SIZES[size];
-    if (wh) { options.width = wh[0]; options.height = wh[1]; }
+    const short = SIZES[size];
+    if (short) {
+      const canvas = project.doc.canvas as { width?: number; height?: number } | undefined;
+      const live = project.trackId !== null ? useKdjvLive.getState().live[project.trackId] : undefined;
+      const w = canvas?.width ?? live?.width ?? 16, h = canvas?.height ?? live?.height ?? 9;
+      if (h > w) { options.width = short; options.height = even(short * h / w); }
+      else { options.height = short; options.width = even(short * w / h); }
+    }
     if (fps !== "project") options.fps = fps;
     if (quality !== "standard") options.quality = QUALITY[quality];
     if (range === "marks" && marked) { options.from = markers[0].at; options.to = markers[markers.length - 1].at; }
@@ -282,9 +293,21 @@ function ExportPanel({ project }: { project: LaneProject }) {
   </div>;
 }
 
-/** The chosen tool's controls for what is chosen on the lanes. */
+/** A labelled row of the inspector: a quiet word, then its controls. */
+function Section({ label, children }: { label: string; children: ReactNode }) {
+  return <div className="kd-lanes-section">
+    <span className="kd-lanes-section-label">{label}</span>
+    <div className="kd-lanes-rows">{children}</div>
+  </div>;
+}
+
+/**
+ * Under the lanes: what is chosen, with everything that can be done to it in one place — a clip's
+ * cut, picture, sound, branches and (in a VJ) its place in the song; a song's place and volume; a
+ * title's words and look. `tool` (字幕, 导出) shows that instead; nothing chosen, the whole picture.
+ */
 export function ToolPanel({ tool, project, selected, playhead, beatNear, edit }: {
-  tool: Tool; project: LaneProject; selected: string | null; playhead: number | null;
+  tool: Tool | null; project: LaneProject; selected: string | null; playhead: number | null;
   beatNear(t: number): number; edit(ops: LaneOp[]): void;
 }) {
   const { doc, layout, grid } = project;
@@ -300,40 +323,28 @@ export function ToolPanel({ tool, project, selected, playhead, beatNear, edit }:
   const clips = doc.main.filter((item): item is LaneClip => !isGap(item));
 
   if (tool === "export") return <ExportPanel project={project} />;
-  if (tool === "title") return <TitlePanel key={title?.id ?? "new"} title={title} playhead={playhead} beat={beatNear(playhead ?? 0)} edit={edit} />;
+  if (tool === "title" || title) return <TitlePanel key={title?.id ?? "new"} title={title} playhead={playhead} beat={beatNear(playhead ?? 0)} edit={edit} />;
 
-  if (tool === "cut") {
-    if (clip && placed) {
-      // In a VJ the cut lands on the beat nearest the playhead.
-      const beats = grid?.beats ?? [];
-      const at = playhead === null || !vj || beats.length === 0 ? playhead
-        : beats.reduce((best, t) => (Math.abs(t - playhead) < Math.abs(best - playhead) ? t : best), beats[0]);
-      const inside = at !== null && at > placed.at + 0.05 && at < placed.at + placed.length - 0.05;
-      return <div className="kd-lanes-row">
-        <button type="button" className="kd-lanes-action" disabled={!inside} title="S"
-          onClick={() => at !== null && edit([{ op: "split", id: clip.id, at }])}>
-          <Scissors size={14} />切开{inside ? ` · ${laneClock(at!)}` : ""}
-        </button>
-        <NumberField label="入点" value={clip.in ?? 0} step={0.1} min={0} onCommit={value => edit([{ op: "trim", id: clip.id, in: value }])} />
-        <NumberField label="出点" value={clip.out} step={0.1} min={0} onCommit={value => edit([{ op: "trim", id: clip.id, out: value }])} />
-        <button type="button" className="kd-lanes-action" onClick={() => edit([{ op: "remove", id: clip.id }])}><Trash2 size={14} />删掉</button>
-      </div>;
-    }
-    if (song && songIndex !== null) {
-      return <div className="kd-lanes-row">
-        <button type="button" className="kd-lanes-action" disabled={songIndex === 0}
-          onClick={() => edit([{ op: "move_song", from: songIndex, to: songIndex - 1 }])}><ArrowLeft size={14} />往前</button>
-        <button type="button" className="kd-lanes-action" disabled={songIndex === songs.length - 1}
-          onClick={() => edit([{ op: "move_song", from: songIndex, to: songIndex + 1 }])}><ArrowRight size={14} />往后</button>
-        <button type="button" className="kd-lanes-action" onClick={() => edit([{ op: "remove_song", index: songIndex }])}><Trash2 size={14} />删掉这首歌</button>
-      </div>;
-    }
-    return null;
-  }
-
-  if (tool === "picture") {
-    if (clip) {
-      return <div className="kd-lanes-rows">
+  if (clip && placed) {
+    // In a VJ the cut lands on the beat nearest the playhead.
+    const beats = grid?.beats ?? [];
+    const at = playhead === null || !vj || beats.length === 0 ? playhead
+      : beats.reduce((best, t) => (Math.abs(t - playhead) < Math.abs(best - playhead) ? t : best), beats[0]);
+    const inside = at !== null && at > placed.at + 0.05 && at < placed.at + placed.length - 0.05;
+    const branchOf = (side: BranchSide) => doc.branches?.find(b => b.clip === clip.id && b.side === side);
+    return <div className="kd-lanes-rows">
+      <Section label="剪">
+        <div className="kd-lanes-row">
+          <button type="button" className="kd-lanes-action" disabled={!inside} title="在播放头切开 · S"
+            onClick={() => at !== null && edit([{ op: "split", id: clip.id, at }])}>
+            <Scissors size={14} />切开{inside ? ` · ${laneClock(at!)}` : ""}
+          </button>
+          <NumberField label="入点" value={clip.in ?? 0} step={0.1} min={0} onCommit={value => edit([{ op: "trim", id: clip.id, in: value }])} />
+          <NumberField label="出点" value={clip.out} step={0.1} min={0} onCommit={value => edit([{ op: "trim", id: clip.id, out: value }])} />
+          <button type="button" className="kd-lanes-action" title="Delete" onClick={() => edit([{ op: "remove", id: clip.id }])}><Trash2 size={14} />删掉</button>
+        </div>
+      </Section>
+      <Section label="画面">
         <div className="kd-lanes-row">
           <Segmented label="画面大小" value={clip.fill ? "fill" : "fit"}
             options={[{ value: "fill", label: "铺满" }, { value: "fit", label: "完整" }]}
@@ -351,43 +362,53 @@ export function ToolPanel({ tool, project, selected, playhead, beatNear, edit }:
               onCommit={value => edit([{ op: "set", id: clip.id, fields: { opacity: value } }])} />
           </div>
         </div>
-      </div>;
-    }
-    if (clips.length === 0) return null;
-    // Nothing chosen: every picture of the project at once.
-    return <div className="kd-lanes-row">
-      <button type="button" className="kd-lanes-action" onClick={() => edit(clips.map(c => ({ op: "set" as const, id: c.id, fields: { fill: true } })))}>全部铺满</button>
-      <button type="button" className="kd-lanes-action" onClick={() => edit(clips.map(c => ({ op: "set" as const, id: c.id, fields: { fill: false } })))}>全部完整</button>
+      </Section>
+      <Section label="声音">
+        <div className="kd-lanes-row">
+          <label className="kd-lanes-check">
+            <input type="checkbox" checked={Boolean(clip.muted)} onChange={event => edit([{ op: "set", id: clip.id, fields: { muted: event.target.checked } }])} />
+            <span>静音</span>
+          </label>
+          <SettleSlider label="音量" value={clip.volume ?? 1} min={0} max={2} step={0.05} defaultValue={1} format={percent}
+            onCommit={value => edit([{ op: "set", id: clip.id, fields: { volume: value } }])} />
+        </div>
+      </Section>
+      <Section label="转场">
+        <Branch clip={clip} side="in" branch={branchOf("in")} beat={beatNear(placed.at)} vj={vj} at={placed.at}
+          sourceLength={project.lengths[clip.src]} onOps={edit} />
+        <Branch clip={clip} side="out" branch={branchOf("out")} beat={beatNear(placed.at + placed.length)} vj={vj} at={placed.at}
+          sourceLength={project.lengths[clip.src]} onOps={edit} />
+      </Section>
+      {vj && <Section label="校准"><AlignPanel clipId={clip.id} /></Section>}
     </div>;
   }
 
-  if (tool === "sound") {
-    if (clip) {
-      return <div className="kd-lanes-row">
-        <label className="kd-lanes-check">
-          <input type="checkbox" checked={Boolean(clip.muted)} onChange={event => edit([{ op: "set", id: clip.id, fields: { muted: event.target.checked } }])} />
-          <span>静音</span>
-        </label>
-        <SettleSlider label="音量" value={clip.volume ?? 1} min={0} max={2} step={0.05} defaultValue={1} format={percent}
-          onCommit={value => edit([{ op: "set", id: clip.id, fields: { volume: value } }])} />
-      </div>;
-    }
-    if (song && songIndex !== null) {
-      return <div className="kd-lanes-row">
-        <SettleSlider label="音量" value={song.volume ?? 1} min={0} max={2} step={0.05} defaultValue={1} format={percent}
-          onCommit={value => edit([{ op: "set_song", index: songIndex, fields: { volume: value } }])} />
-      </div>;
-    }
-    return null;
+  if (song && songIndex !== null) {
+    return <div className="kd-lanes-rows">
+      <Section label="歌">
+        <div className="kd-lanes-row">
+          <button type="button" className="kd-lanes-action" disabled={songIndex === 0}
+            onClick={() => edit([{ op: "move_song", from: songIndex, to: songIndex - 1 }])}><ArrowLeft size={14} />往前</button>
+          <button type="button" className="kd-lanes-action" disabled={songIndex === songs.length - 1}
+            onClick={() => edit([{ op: "move_song", from: songIndex, to: songIndex + 1 }])}><ArrowRight size={14} />往后</button>
+          <button type="button" className="kd-lanes-action" onClick={() => edit([{ op: "remove_song", index: songIndex }])}><Trash2 size={14} />删掉这首歌</button>
+        </div>
+      </Section>
+      <Section label="声音">
+        <div className="kd-lanes-row">
+          <SettleSlider label="音量" value={song.volume ?? 1} min={0} max={2} step={0.05} defaultValue={1} format={percent}
+            onCommit={value => edit([{ op: "set_song", index: songIndex, fields: { volume: value } }])} />
+        </div>
+      </Section>
+    </div>;
   }
 
-  if (tool === "align") return clip && vj ? <AlignPanel clipId={clip.id} /> : null;
-
-  // 转场
-  if (!clip || !placed) return null;
-  const branchOf = (side: BranchSide) => doc.branches?.find(b => b.clip === clip.id && b.side === side);
-  return <div className="kd-lanes-rows">
-    <Branch clip={clip} side="in" branch={branchOf("in")} beat={beatNear(placed.at)} onOps={edit} />
-    <Branch clip={clip} side="out" branch={branchOf("out")} beat={beatNear(placed.at + placed.length)} onOps={edit} />
-  </div>;
+  if (clips.length === 0) return null;
+  // Nothing chosen: every picture of the project at once.
+  return <Section label="画面">
+    <div className="kd-lanes-row">
+      <button type="button" className="kd-lanes-action" onClick={() => edit(clips.map(c => ({ op: "set" as const, id: c.id, fields: { fill: true } })))}>全部铺满</button>
+      <button type="button" className="kd-lanes-action" onClick={() => edit(clips.map(c => ({ op: "set" as const, id: c.id, fields: { fill: false } })))}>全部完整</button>
+    </div>
+  </Section>;
 }

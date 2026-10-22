@@ -1,14 +1,21 @@
 /**
  * The lanes of a project in the editor (LaneEditor.tsx): the ruler with its markers, the titles
  * (when there are any), the branches, the picture and the songs, under one clock. Everything on
- * them is handled directly: a press chooses it, a drag moves it, a drag at either end pulls that
- * end; in a VJ what is dragged lands on the song's beats unless Alt is held. Library rows dropped
- * here go where they belong (LaneEditor's `onDropped`), whether the system carried them (the
- * harmonic list) or the track table followed the pointer by hand (lib/pointerTrackDrop.ts).
+ * them is handled directly: a press chooses it (and puts the playhead there), a drag moves it, a
+ * drag at either end pulls that end; in a VJ what is dragged lands on the song's beats unless Alt
+ * is held. A clip pulled up into the branch lane branches there: let go past its end, its tail
+ * carries on over the next clip (`out`); before its start, it comes in early over the one before
+ * (`in`). A branch is pulled longer or shorter by its far end and dragged back down to go away.
+ * A press anywhere else puts the playhead there, and dragging moves it along. The picture lane
+ * shows each clip's frames. Library rows dropped here go where they belong (LaneEditor's
+ * `onDropped`), whether the system carried them (the harmonic list) or the track table followed
+ * the pointer by hand (lib/pointerTrackDrop.ts).
  */
-import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { api } from "../../lib/api";
 import { rulerStep } from "../../lib/aiTimeline";
-import { fileLabel, isGap, laneClock, snapToBar, type LaneClip, type LaneOp } from "../../lib/lanes";
+import { isImageTrack } from "../../lib/format";
+import { branchOps, fileLabel, isGap, laneClock, snapToBar, type BranchSide, type LaneClip, type LaneOp } from "../../lib/lanes";
 import { activeTrackDragIds, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
 import { usePointerTrackDrop } from "../../lib/pointerTrackDrop";
 import { useLibraryStore } from "../../stores/libraryStore";
@@ -16,19 +23,37 @@ import { isSongTrack, songsOf, type LaneProject } from "../../stores/laneEditorS
 
 export const ZOOMS = [1, 2, 4, 8, 16];
 const pct = (t: number, span: number) => `${Math.max(0, Math.min(100, (t / span) * 100))}%`;
+const round = (v: number) => Math.round(v * 1000) / 1000;
 /** How near an end a press has to be to pull that end, in pixels. */
 const EDGE_PX = 7;
 /** How far a press has to travel before it is a drag. */
 const DRAG_PX = 3;
+/** The picture lane's frames: drawn this high (twice for sharp screens), 16:9 wide. */
+const FRAME_PX = 40;
+const FRAME_W = Math.round(FRAME_PX * 16 / 9);
+/** The shortest branch a pull makes. */
+const MIN_BRANCH = 0.1;
+/** How often the playhead follows a drag along the lanes, in milliseconds. */
+const SCRUB_MS = 80;
 
-type Lane = "main" | "song" | "title";
+type Lane = "main" | "song" | "title" | "branch";
 type Grip = "move" | "in" | "out";
-interface Drag { lane: Lane; key: string; grip: Grip; x0: number; dt: number; moved: boolean; free: boolean }
+interface Drag {
+  lane: Lane; key: string; grip: Grip; x0: number; dt: number; moved: boolean; free: boolean;
+  /** A clip held over the branch lane, or a branch held off it: where it would branch, if anywhere. */
+  up: boolean; t: number;
+}
 
 /** Every how many seconds the ruler names one, so that about a dozen names fit at this zoom. */
 function secondStep(span: number): number {
   for (const step of [1, 2, 5, 10, 15, 30, 60, 120]) if (span / step <= 12) return step;
   return 300;
+}
+
+/** A round number of seconds near `seconds`, so that frames are asked for at the same times at every zoom. */
+function frameStep(seconds: number): number {
+  for (const step of [0.5, 1, 2, 5, 10, 15, 30, 60]) if (seconds <= step) return step;
+  return 120;
 }
 
 /** What a library drag holds, read while it is still over the lanes: songs, or pictures. */
@@ -39,16 +64,41 @@ function draggedKind(ids: readonly number[]): "song" | "picture" | null {
   return rows.some(row => isSongTrack(row!)) ? "song" : "picture";
 }
 
-export function LaneBoard({ project, zoom, selected, select, playhead, seek, edit, onDropped }: {
+/** A clip's frames along it, one every frame's width, each at the moment of its source it starts on. */
+function ClipFrames({ trackId, clip, width }: { trackId: number; clip: LaneClip; width: number }) {
+  if (width < FRAME_W / 3) return null;
+  const extension = clip.src.split(".").pop() ?? "";
+  const still = isImageTrack(extension);
+  const count = Math.max(1, Math.ceil(width / FRAME_W));
+  const from = clip.in ?? 0;
+  const seconds = Math.max(0, clip.out - from);
+  const step = frameStep(seconds * FRAME_W / width);
+  return <span className="kd-lanes-frames" aria-hidden="true">
+    {Array.from({ length: Math.min(count, 400) }, (_, n) => {
+      const t = still ? 0 : Math.max(from, Math.min(clip.out - 0.1, Math.round((from + seconds * (n * FRAME_W / width)) / step) * step));
+      return <img key={n} src={api.kdjvFrameUrl(trackId, clip.src, t, FRAME_PX * 2)} alt="" draggable={false} loading="lazy"
+        decoding="async" onError={event => { event.currentTarget.style.visibility = "hidden"; }} />;
+    })}
+  </span>;
+}
+
+export function LaneBoard({ project, zoom, selected, select, playhead, seek, beatNear, edit, onDropped }: {
   project: LaneProject; zoom: number; selected: string | null; select(id: string | null): void;
-  playhead: number | null; seek(t: number): void; edit(ops: LaneOp[]): void;
+  /** Where the project is playing, or null when it is not the one loaded. */
+  playhead: number | null; seek(t: number): void;
+  /** One beat's length near `t`: how long a branch is when only pulled up. */
+  beatNear(t: number): number;
+  edit(ops: LaneOp[]): void;
   onDropped(ids: readonly number[], at: number): void;
 }) {
   const { doc, layout, grid } = project;
   const board = useRef<HTMLDivElement>(null);
+  const aux = useRef<HTMLDivElement>(null);
+  const [boardWidth, setBoardWidth] = useState(0);
   const [drop, setDrop] = useState<{ lane: "song" | "main"; at: number } | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const dragRef = useRef<Drag | null>(null);
+  const [scrub, setScrub] = useState<number | null>(null);
   const span = Math.max(1, layout.duration);
   const vj = songsOf(doc).length > 0;
   const downbeats = useMemo(() => grid?.downbeats ?? [], [grid]);
@@ -56,6 +106,16 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, edi
   const songs = layout.songs ?? [];
   const titles = doc.titles ?? [];
   const markers = doc.markers ?? [];
+
+  useEffect(() => {
+    const node = board.current;
+    if (!node) return;
+    const measure = () => setBoardWidth(node.clientWidth);
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(node);
+    return () => observer?.disconnect();
+  }, []);
 
   const ruler = useMemo(() => {
     if (vj && downbeats.length > 1) {
@@ -78,6 +138,11 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, edi
     const box = node.getBoundingClientRect();
     return Math.max(0, Math.min(span, ((clientX - box.left) / box.width) * span));
   };
+  /** Whether a point is up in the branch lane (or above it). */
+  const overAux = (clientY: number) => {
+    const box = aux.current?.getBoundingClientRect();
+    return box ? clientY <= box.bottom + 2 : false;
+  };
   /** The beat nearest `t` in a VJ (when not let free), else `t`. */
   const snap = (t: number, free: boolean) => {
     if (free || !vj || beats.length === 0) return Math.max(0, t);
@@ -86,15 +151,17 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, edi
 
   // ---- what is dragged, and where it is drawn meanwhile ----
   const clipOf = (id: string) => doc.main.find((item): item is LaneClip => !isGap(item) && item.id === id);
+  const placedClip = (id: string) => layout.main.find(item => item.id === id);
   const placedOf = (lane: Lane, key: string) => {
-    if (lane === "main") { const m = layout.main.find(item => item.id === key); return m && { at: m.at, length: m.length }; }
+    if (lane === "main") { const m = placedClip(key); return m && { at: m.at, length: m.length }; }
     if (lane === "song") { const s = songs[Number(key)]; return s && { at: s.at, length: s.length }; }
+    if (lane === "branch") { const b = layout.branches.find(x => `${x.clip}:${x.side}` === key); return b && { at: b.at, length: b.length }; }
     const t = titles.find(title => title.id === key);
     return t && { at: t.at, length: t.length };
   };
-  /** Where an item stands while it is dragged: its start and length after the drag so far. */
-  const shown = (lane: Lane, key: string, at: number, length: number) => {
-    if (!drag || !drag.moved || drag.lane !== lane || drag.key !== key) return { at, length };
+  /** Where an item stands after `drag` so far: its start and length. */
+  const shownBy = (drag: Drag | null, lane: Lane, key: string, at: number, length: number) => {
+    if (!drag || !drag.moved || drag.lane !== lane || drag.key !== key || (lane === "main" && drag.up)) return { at, length };
     if (drag.grip === "move") {
       const start = lane === "song" ? at + drag.dt : snap(at + drag.dt, drag.free);
       return { at: start, length };
@@ -106,15 +173,32 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, edi
     const end = Math.max(at + 0.1, snap(at + length + drag.dt, drag.free));
     return { at, length: end - at };
   };
+  /** Where an item stands while it is dragged. */
+  const shown = (lane: Lane, key: string, at: number, length: number) => shownBy(drag, lane, key, at, length);
+  /** The branch a clip held up over the branch lane at `t` would make. */
+  const branchFrom = (id: string, t: number, free: boolean): { side: BranchSide; at: number; length: number } | null => {
+    const placed = placedClip(id);
+    if (!placed) return null;
+    const end = placed.at + placed.length;
+    const at = snap(t, free);
+    if (t >= placed.at + placed.length / 2) {
+      const length = round(Math.max(MIN_BRANCH, at - end > MIN_BRANCH / 2 ? at - end : beatNear(end)));
+      return { side: "out", at: end, length };
+    }
+    const length = round(Math.max(MIN_BRANCH, placed.at - at > MIN_BRANCH / 2 ? placed.at - at : beatNear(placed.at)));
+    return { side: "in", at: placed.at - length, length };
+  };
 
   const press = (lane: Lane, key: string) => (event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 0) return;
+    event.stopPropagation();
     const box = event.currentTarget.getBoundingClientRect();
     const grip: Grip = lane === "song" ? "move"
-      : event.clientX - box.left <= EDGE_PX && box.width > EDGE_PX * 3 ? "in"
-        : box.right - event.clientX <= EDGE_PX && box.width > EDGE_PX * 3 ? "out" : "move";
+      : lane === "branch" ? "out"
+        : event.clientX - box.left <= EDGE_PX && box.width > EDGE_PX * 3 ? "in"
+          : box.right - event.clientX <= EDGE_PX && box.width > EDGE_PX * 3 ? "out" : "move";
     event.currentTarget.setPointerCapture(event.pointerId);
-    const next = { lane, key, grip, x0: event.clientX, dt: 0, moved: false, free: event.altKey };
+    const next: Drag = { lane, key, grip, x0: event.clientX, dt: 0, moved: false, free: event.altKey, up: lane === "branch", t: timeAt(event.clientX) };
     dragRef.current = next;
     setDrag(next);
   };
@@ -122,26 +206,51 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, edi
     const now = dragRef.current;
     if (!now) return;
     const dx = event.clientX - now.x0;
-    const next = { ...now, dt: dx / width() * span, moved: now.moved || Math.abs(dx) > DRAG_PX, free: event.altKey };
+    const up = now.lane === "main" ? overAux(event.clientY) : now.lane === "branch" ? overAux(event.clientY) : false;
+    const next = { ...now, dt: dx / width() * span, moved: now.moved || Math.abs(dx) > DRAG_PX || up !== now.up, free: event.altKey, up, t: timeAt(event.clientX) };
     dragRef.current = next;
     setDrag(next);
   };
-  const release = (id: string) => () => {
+  const release = (id: string) => (event: ReactPointerEvent<HTMLElement>) => {
     const done = dragRef.current;
     dragRef.current = null;
     setDrag(null);
     if (!done) return;
-    if (!done.moved) { select(selected === id ? null : id); return; }
-    const placed = placedOf(done.lane, done.key);
-    if (!placed) return;
-    const after = shown(done.lane, done.key, placed.at, placed.length);
-    const ops = commit(done, placed, after);
+    if (!done.moved) {
+      // A press chooses it and puts the playhead where it was pressed.
+      select(selected === id ? null : id);
+      seek(timeAt(event.clientX));
+      return;
+    }
+    const ops = commit(done);
     if (ops.length) edit(ops);
   };
 
   /** The operations that make a drag stick. */
-  const commit = (done: Drag, before: { at: number; length: number }, after: { at: number; length: number }): LaneOp[] => {
-    const round = (v: number) => Math.round(v * 1000) / 1000;
+  const commit = (done: Drag): LaneOp[] => {
+    if (done.lane === "branch") {
+      const [clip, side] = done.key.split(":") as [string, BranchSide];
+      const branch = doc.branches?.find(b => b.clip === clip && b.side === side);
+      if (!done.up || !branch) return [{ op: "unbranch", clip, side }];
+      const placed = placedClip(clip);
+      if (!placed) return [];
+      const at = snap(done.t, done.free);
+      const length = round(Math.max(MIN_BRANCH, side === "out" ? at - (placed.at + placed.length) : placed.at - at));
+      const owner = clipOf(clip);
+      return Math.abs(length - branch.length) < 0.01 || !owner ? []
+        : branchOps(owner, side, length, vj, placed.at, project.lengths[owner.src], { opacity: branch.opacity, fade: branch.fade });
+    }
+    if (done.lane === "main" && done.up) {
+      const made = branchFrom(done.key, done.t, done.free);
+      const owner = clipOf(done.key);
+      const placed = placedClip(done.key);
+      if (!made || !owner || !placed) return [];
+      const kept = doc.branches?.find(b => b.clip === done.key && b.side === made.side);
+      return branchOps(owner, made.side, made.length, vj, placed.at, project.lengths[owner.src], { opacity: kept?.opacity, fade: kept?.fade });
+    }
+    const before = placedOf(done.lane, done.key);
+    if (!before) return [];
+    const after = shownBy(done, done.lane, done.key, before.at, before.length);
     if (done.lane === "title") {
       return [{ op: "set_title", id: done.key, fields: { at: round(after.at), length: round(after.length) } }];
     }
@@ -155,7 +264,8 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, edi
     if (!clip) return [];
     const speed = clip.speed ?? 1;
     if (done.grip === "move") {
-      if (vj) return [{ op: "move_to", id: clip.id, at: round(after.at) }];
+      // In a VJ it goes where it is let go, over whatever is there.
+      if (vj) return [{ op: "move_to", id: clip.id, at: round(after.at), over: true }];
       const middle = after.at + after.length / 2;
       const index = layout.main.filter(item => item.id !== clip.id && item.at + item.length / 2 < middle).length;
       const now = layout.main.findIndex(item => item.id === clip.id);
@@ -168,7 +278,8 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, edi
     const shift = after.at - before.at;
     const trim: LaneOp = { op: "trim", id: clip.id, in: round(Math.max(0, (clip.in ?? 0) + shift * speed)) };
     if (!vj) return [trim];
-    const place: LaneOp = { op: "move_to", id: clip.id, at: round(after.at) };
+    // Pulled earlier it goes over the end of what was before it.
+    const place: LaneOp = { op: "move_to", id: clip.id, at: round(after.at), over: true };
     return shift > 0 ? [trim, place] : [place, trim];
   };
 
@@ -179,6 +290,32 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, edi
     onClick: (event: { detail: number }) => { if (event.detail === 0) select(selected === id ? null : id); },
     "data-dragging": drag?.moved && drag.lane === lane && drag.key === key ? "" : undefined,
   });
+
+  // ---- a press anywhere else: the playhead goes there and follows the pointer ----
+  const scrubRef = useRef<{ pointer: number; last: number } | null>(null);
+  const scrubDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || (event.target as Element).closest("button, input, textarea, [role=slider]")) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const t = timeAt(event.clientX);
+    scrubRef.current = { pointer: event.pointerId, last: performance.now() };
+    setScrub(t);
+    // A project not loaded yet is loaded once, where the pointer is let go.
+    if (playhead !== null) seek(t);
+  };
+  const scrubMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const now = scrubRef.current;
+    if (!now || now.pointer !== event.pointerId) return;
+    const t = timeAt(event.clientX);
+    setScrub(t);
+    if (playhead !== null && performance.now() - now.last >= SCRUB_MS) { now.last = performance.now(); seek(t); }
+  };
+  const scrubUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const now = scrubRef.current;
+    if (!now || now.pointer !== event.pointerId) return;
+    scrubRef.current = null;
+    setScrub(null);
+    seek(timeAt(event.clientX));
+  };
 
   /** Where rows let go at `x` land: songs at a slot of the song lane, pictures at a time. */
   const landing = (ids: readonly number[], x: number): { lane: "song" | "main"; at: number } => {
@@ -201,8 +338,32 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, edi
     drop: (ids, x) => dropRows(ids, x),
   });
 
+  // The branch a drag is making or changing, drawn in the branch lane meanwhile.
+  const pending = (() => {
+    if (!drag?.moved || !drag.up) return null;
+    if (drag.lane === "main") {
+      const made = branchFrom(drag.key, drag.t, drag.free);
+      return made && { key: `${drag.key}:${made.side}`, ...made };
+    }
+    if (drag.lane !== "branch") return null;
+    const [clip, side] = drag.key.split(":") as [string, BranchSide];
+    const placed = placedClip(clip);
+    if (!placed) return null;
+    const at = snap(drag.t, drag.free);
+    const length = Math.max(MIN_BRANCH, side === "out" ? at - (placed.at + placed.length) : placed.at - at);
+    return { key: drag.key, side, at: side === "out" ? placed.at + placed.length : placed.at - length, length };
+  })();
+  const branchBlocks = [
+    ...layout.branches.filter(b => `${b.clip}:${b.side}` !== pending?.key && !(drag?.moved && drag.lane === "branch" && drag.key === `${b.clip}:${b.side}`)),
+    ...(pending ? [{ clip: pending.key.split(":")[0], side: pending.side, at: pending.at, length: pending.length, pending: true }] : []),
+  ];
+  const pixels = (seconds: number) => (boardWidth / span) * seconds;
+  const head = scrub ?? playhead;
+
   return <div className="kd-lanes-scroll">
     <div ref={board} className="kd-lanes-board" style={{ width: `${ZOOMS[zoom] * 100}%` }}
+      onPointerDown={scrubDown} onPointerMove={scrubMove} onPointerUp={scrubUp}
+      onPointerCancel={() => { scrubRef.current = null; setScrub(null); }}
       onDragOver={event => {
         if (!isTrackDrag(event)) return;
         event.preventDefault();
@@ -217,7 +378,7 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, edi
         const ids = readTrackDragIds(event.dataTransfer);
         dropRows(ids.length ? ids : activeTrackDragIds(), event.clientX);
       }}>
-      <div className="kd-lanes-ruler" onPointerDown={event => { if (event.target === event.currentTarget) seek(timeAt(event.clientX)); }}>
+      <div className="kd-lanes-ruler">
         {beatTicks.map(at => <span key={`b${at}`} className="kd-lanes-beat" style={{ left: pct(at, span) }} />)}
         {ruler.map(mark => <span key={mark.at} className="kd-lanes-mark" style={{ left: pct(mark.at, span) }}>{mark.label}</span>)}
         {markers.map((marker, n) => <button key={`${n}:${marker.at}`} type="button" className="kd-lanes-marker"
@@ -237,14 +398,19 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, edi
           </button>;
         })}
       </div>}
-      <div className="kd-lanes-lane" data-lane="aux" aria-label="辅线">
-        {layout.branches.map(b => <button key={`${b.clip}:${b.side}`} type="button" className="kd-lanes-branch-block"
-          data-side={b.side} aria-pressed={b.clip === selected}
-          style={{ left: pct(b.at, span), width: pct(b.length, span) }}
-          title={`${b.side === "out" ? "出" : "入"}分叉 · ${b.length} 秒`} onClick={() => select(b.clip)} />)}
+      <div ref={aux} className="kd-lanes-lane" data-lane="aux" aria-label="辅线" data-drop={drag?.moved && drag.lane === "main" && drag.up || undefined}>
+        {branchBlocks.map(b => {
+          const key = `${b.clip}:${b.side}`;
+          const pendingBlock = "pending" in b;
+          return <button key={key} type="button" className="kd-lanes-branch-block"
+            data-side={b.side} data-pending={pendingBlock || undefined} aria-pressed={b.clip === selected}
+            style={{ left: pct(b.at, span), width: pct(b.length, span) }}
+            title={`${b.side === "out" ? "出分叉" : "入分叉"} · ${round(b.length)} 秒 · 拉它的头改长短，拖下去去掉`}
+            {...(pendingBlock ? {} : grip("branch", key, b.clip))} />;
+        })}
       </div>
       <svg className="kd-lanes-switches" data-titles={titles.length > 0 || undefined} viewBox="0 0 1000 40" preserveAspectRatio="none" aria-hidden="true">
-        {layout.branches.map(b => {
+        {branchBlocks.map(b => {
           // The points: from the clip on the picture up onto the branch, like railway points.
           const edge = (b.side === "out" ? b.at : b.at + b.length) / span * 1000;
           const far = (b.side === "out" ? b.at + Math.min(b.length, span / 50) : b.at + b.length - Math.min(b.length, span / 50)) / span * 1000;
@@ -259,10 +425,13 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, edi
           }
           const id = item.id ?? "";
           const at = shown("main", id, item.at, item.length);
+          const clip = clipOf(id);
           return <button key={id} type="button" className="kd-lanes-clip" aria-pressed={id === selected}
+            data-up={drag?.moved && drag.lane === "main" && drag.key === id && drag.up || undefined}
             style={{ left: pct(at.at, span), width: pct(at.length, span) }}
-            title={`${fileLabel(item.src ?? "")} · ${laneClock(at.at)}–${laneClock(at.at + at.length)}`} {...grip("main", id, id)}>
-            {fileLabel(item.src ?? "")}
+            title={`${fileLabel(item.src ?? "")} · ${laneClock(at.at)}–${laneClock(at.at + at.length)} · 往上拉进辅线做分叉`} {...grip("main", id, id)}>
+            {clip && project.trackId !== null && <ClipFrames trackId={project.trackId} clip={clip} width={pixels(at.length)} />}
+            <span className="kd-lanes-clip-name">{fileLabel(item.src ?? "")}</span>
           </button>;
         })}
       </div>
@@ -277,7 +446,7 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, edi
           </button>;
         })}
       </div>
-      {playhead !== null && <span className="kd-lanes-playhead" style={{ left: pct(playhead, span) }} />}
+      {head !== null && <span className="kd-lanes-playhead" style={{ left: pct(head, span) }} />}
       {drop && <span className="kd-lanes-drop" data-lane={drop.lane} style={{ left: pct(drop.at, span) }} />}
     </div>
   </div>;

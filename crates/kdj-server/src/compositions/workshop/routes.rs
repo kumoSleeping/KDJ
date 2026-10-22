@@ -3,7 +3,7 @@ use super::*;
 use crate::{error::ApiResult, state::AppState};
 use axum::{
     body::{Body, Bytes},
-    extract::Path as AxumPath,
+    extract::{Path as AxumPath, Query},
     http::{header, HeaderMap},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -16,6 +16,7 @@ pub fn router(manager: Arc<Workshop>) -> Router<Arc<AppState>> {
         .route("/api/kdjv/edit", post(kdjv_edit))
         .route("/api/kdjv/preview", post(kdjv_preview))
         .route("/api/kdjv/source/{track_id}/{n}", get(kdjv_source))
+        .route("/api/kdjv/frame", get(kdjv_frame))
         .route("/api/kdjv/render", post(kdjv_render))
         .route("/api/kdjv/export", post(kdjv_export))
         .route("/api/kdjv/title-image", post(kdjv_title_image).layer(axum::extract::DefaultBodyLimit::max(TITLE_IMAGE_BYTES * 2)))
@@ -126,6 +127,75 @@ async fn kdjv_source(
     };
     let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok()).filter(|v| !v.trim().is_empty());
     crate::routes::audio_response(&path, total, mime.into(), range).await
+}
+/// One frame of a project's source, for the editor's picture lane.
+#[derive(Deserialize)]
+struct KdjvFrame {
+    track_id: i64,
+    /// The source as the document names it.
+    src: String,
+    /// Seconds into the source.
+    t: f64,
+    /// Pixels high (the width follows the picture).
+    #[serde(default)]
+    h: Option<u32>,
+}
+/// A small JPEG of the source at `t`, made once by ffmpeg and kept in the render cache, named by
+/// the file (and its change time), the time to a tenth of a second and the height.
+async fn kdjv_frame(
+    Extension(m): Extension<Arc<Workshop>>,
+    Query(q): Query<KdjvFrame>,
+) -> ApiResult<Response> {
+    use sha2::Digest;
+    let (file, _) = kdjv_file(&m, &KdjvTarget { path: None, track_id: Some(q.track_id), stream: false })?;
+    let source = kdjv::named_source(&file, &q.src).ok_or_else(|| crate::error::ApiError::not_found("工程里没有这个素材"))?;
+    let height = q.h.unwrap_or(72).clamp(24, 240);
+    let tenths = (q.t.max(0.0) * 10.0).round() as u64;
+    let changed = std::fs::metadata(&source)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
+    let digest = sha2::Sha256::digest(format!("{}\0{changed}\0{tenths}\0{height}", source.display()).as_bytes());
+    let name: String = digest.iter().take(12).map(|b| format!("{b:02x}")).collect();
+    // Beside the renders, so the cache's own trim keeps it in bounds.
+    let folder = m.cache.clone();
+    let target = folder.join(format!("frame-{name}.jpg"));
+    let cached = tokio::fs::read(&target).await.ok().filter(|data| !data.is_empty());
+    let data = match cached {
+        Some(data) => data,
+        None => {
+            let _slot = m.frame_slots.acquire().await.map_err(anyhow::Error::from)?;
+            let partial = folder.join(format!("frame-{name}.{}.part", std::process::id()));
+            let log = folder.join(format!("frame-{name}.log"));
+            let args: Vec<String> = vec![
+                "-y".into(), "-ss".into(), format!("{:.1}", tenths as f64 / 10.0),
+                "-i".into(), source.to_string_lossy().into_owned(),
+                "-frames:v".into(), "1".into(), "-an".into(),
+                "-vf".into(), format!("scale=-2:{height}"),
+                "-q:v".into(), "5".into(), "-f".into(), "mjpeg".into(), partial.to_string_lossy().into_owned(),
+            ];
+            let cancel = CancellationToken::new();
+            let made = tokio::time::timeout(std::time::Duration::from_secs(20), kdj_providers::ffmpeg::run(&args, &log, &cancel)).await;
+            let _ = std::fs::remove_file(&log);
+            let data = match made {
+                Ok(Ok(())) => tokio::fs::read(&partial).await.ok().filter(|data| !data.is_empty()),
+                _ => None,
+            };
+            let Some(data) = data else {
+                let _ = std::fs::remove_file(&partial);
+                return Err(crate::error::ApiError::not_found("这一帧取不出来").expected());
+            };
+            let _ = std::fs::rename(&partial, &target);
+            m.trim_cache();
+            data
+        }
+    };
+    Ok((
+        [(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "private, max-age=604800")],
+        data,
+    )
+        .into_response())
 }
 /// Starts a project's render, or the wait for one under way (kdjv.rs keeps one per project).
 /// It runs on its own: a caller that goes away leaves it to finish. `kdjv.progress` tells the

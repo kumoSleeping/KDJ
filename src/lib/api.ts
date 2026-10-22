@@ -945,6 +945,9 @@ export const api = {
   previewKdjv: (trackId: number) => post<import("../types").KdjvPreview>("/kdjv/preview", { track_id: trackId }),
   /** The n-th source file of a project's live preview, with Range. */
   kdjvSourceUrl: (trackId: number, n: number) => authenticatedGetUrl(`${bridge().baseUrl}/api/kdjv/source/${trackId}/${n}`),
+  /** A small JPEG of a project's source (`src` as its document names it) at `t` seconds, `h` pixels high. */
+  kdjvFrameUrl: (trackId: number, src: string, t: number, h: number) =>
+    authenticatedGetUrl(`${bridge().baseUrl}/api/kdjv/frame?track_id=${trackId}&src=${encodeURIComponent(src)}&t=${t.toFixed(1)}&h=${h}`),
   /** A `.kdjv` project's render (docs/kdjv.md): found in the cache, or made now (can take minutes). */
   renderKdjv: (trackId: number) => post<{ path: string; track_id: number | null }>("/kdjv/render", { track_id: trackId }),
   /** A track's beat grid (kdj-analysis rhythm): bar lines, beats and tempo stretches in seconds, or null before it is analysed. */

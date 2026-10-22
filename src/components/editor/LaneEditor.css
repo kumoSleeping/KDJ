@@ -66,7 +66,8 @@
 }
 .kd-lanes-beat { position: absolute; bottom: 0; height: 5px; border-left: 1px solid var(--kd-line); pointer-events: none; }
 .kd-lanes-lane { position: relative; height: 26px; }
-.kd-lanes-lane[data-lane="aux"] { height: 14px; }
+.kd-lanes-lane[data-lane="aux"] { height: 18px; border-radius: 4px; }
+.kd-lanes-lane[data-lane="main"] { height: 48px; }
 .kd-lanes-lane[data-lane="song"] { height: 22px; }
 .kd-lanes-lane[data-lane="title"] { height: 16px; }
 /* A lane that something dragged over it would land in lifts a tone. */
@@ -80,20 +81,36 @@
   border-radius: 4px;
 }
 .kd-lanes-clip {
-  padding: 0 6px;
+  padding: 0;
   overflow: hidden;
   border: 1px solid transparent;
   background: color-mix(in srgb, var(--kd-text) 12%, transparent);
   color: var(--kd-muted);
   font: inherit;
   font-size: 11px;
-  line-height: 24px;
   text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
+  cursor: grab;
 }
 .kd-lanes-clip:hover { color: var(--kd-text); }
+/* The clip's frames, side by side under its name; a frame not there yet leaves the clip's tone. */
+.kd-lanes-frames { position: absolute; inset: 0; display: flex; overflow: hidden; pointer-events: none; }
+.kd-lanes-frames img { flex: none; width: 71px; height: 100%; object-fit: cover; }
+.kd-lanes-clip-name {
+  position: absolute;
+  top: 3px;
+  left: 4px;
+  max-width: calc(100% - 8px);
+  overflow: hidden;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--kd-panel) 82%, transparent);
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* A clip held up over the branch lane stays where it is, a little faded: the branch is drawn above. */
+.kd-lanes-clip[data-up] { opacity: 0.6; }
 /* Either end of a clip or a title pulls that end. */
 .kd-lanes-clip::before, .kd-lanes-clip::after, .kd-lanes-title-block::before, .kd-lanes-title-block::after {
   content: "";
@@ -109,6 +126,7 @@
 /* What is being dragged stands a little above the rest and lets the pointer through. */
 [data-dragging] { z-index: 2; opacity: 0.85; cursor: grabbing; }
 .kd-lanes-clip[aria-pressed="true"] { border-color: var(--kd-text); color: var(--kd-text); font-weight: 600; }
+.kd-lanes-clip[aria-pressed="true"] .kd-lanes-clip-name { color: var(--kd-text); }
 .kd-lanes-gap { background: #000; opacity: 0.55; }
 .kd-lanes-song {
   padding: 0 6px;
@@ -130,9 +148,11 @@
   padding: 0;
   border: 1px solid var(--kd-muted);
   background: color-mix(in srgb, var(--kd-text) 18%, transparent);
-  cursor: pointer;
+  cursor: ew-resize;
+  touch-action: none;
 }
 .kd-lanes-branch-block[aria-pressed="true"] { border-color: var(--kd-text); }
+.kd-lanes-branch-block[data-pending] { border-style: dashed; border-color: var(--kd-text); background: transparent; pointer-events: none; }
 .kd-lanes-title-block {
   padding: 0 5px;
   overflow: hidden;
@@ -168,10 +188,10 @@
   position: absolute;
   left: 0;
   width: 100%;
-  top: calc(16px + 4px + 7px);
+  top: calc(16px + 4px + 9px);
   --kd-lanes-titles: 0px;
   transform: translateY(var(--kd-lanes-titles));
-  height: calc(7px + 4px);
+  height: calc(9px + 4px);
   overflow: visible;
   pointer-events: none;
 }
@@ -227,6 +247,9 @@
 .kd-lanes-action { color: var(--kd-text); font-size: var(--kd-size-xs); }
 .kd-lanes-action:disabled { opacity: 0.4; cursor: default; }
 .kd-lanes-panel { min-width: 0; min-height: 1.75rem; padding: 2px 2px 4px; }
+/* The inspector's rows: a quiet word for what they are about, then their controls. */
+.kd-lanes-section { display: grid; grid-template-columns: 2.25rem minmax(0, 1fr); gap: 8px; align-items: start; min-width: 0; }
+.kd-lanes-section-label { padding-top: 5px; color: var(--kd-muted); font-size: var(--kd-size-xs); white-space: nowrap; }
 
 /* The lanes stand quietly even when empty, so the editor reads as one with nothing in it yet. */
 .kd-lanes-lane[data-lane="main"], .kd-lanes-lane[data-lane="song"] { border-radius: 4px; background: color-mix(in srgb, var(--kd-text) 3%, transparent); }

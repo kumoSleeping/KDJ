@@ -9,10 +9,8 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
 import { isImageTrack, isProjectTrack, isVideoTrack } from "../lib/format";
-import { useKdjvLive } from "../lib/kdjvPlay";
+import { refreshPlayingProject } from "../lib/kdjvPlay";
 import { alignedOps, isGap, type AlignPlan, type LaneClip, type LaneDocument, type LaneEdited, type LaneLayout, type LaneOp } from "../lib/lanes";
-import { getPlayerSession } from "../lib/playerSession";
-import { playTrack } from "../lib/playTrack";
 import { useSidePanels } from "../lib/sidePanels";
 import type { Track } from "../types";
 
@@ -41,6 +39,8 @@ export interface LaneProject {
   grid: LaneGrid | null;
   /** A song's full analysis is still under way; the grid shown is the library's quicker one meanwhile. */
   analysing: boolean;
+  /** How long each file the document names is, by its name there (from the last check). */
+  lengths: Record<string, number>;
 }
 
 interface LaneEditorState {
@@ -115,6 +115,14 @@ function projectGrid(doc: LaneDocument, layout: LaneLayout, songIds: Array<numbe
   return grid;
 }
 
+/** Edits run one after another: one sent while the last is being saved waits for it. */
+let chain: Promise<unknown> = Promise.resolve();
+function inTurn<T>(task: () => Promise<T>): Promise<T> {
+  const run = chain.then(task, task);
+  chain = run.catch(() => undefined);
+  return run;
+}
+
 /** Songs' grids already read this run, by library row. */
 const songGrids = new Map<number, SongGrid>();
 /** Songs whose full analysis is being waited for. */
@@ -165,38 +173,30 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
   /** What came back from the server becomes that project's state. */
   const adopt = (edited: LaneEdited) => {
     const songIds = edited.song_track_ids ?? (edited.song_track_id === null ? [] : [edited.song_track_id]);
+    const kept = get().projects.find(p => p.path === edited.path)?.lengths ?? {};
     const project: LaneProject = {
       path: edited.path, trackId: edited.track_id, songIds, doc: edited.document, layout: edited.layout,
       grid: projectGrid(edited.document, edited.layout, songIds),
       analysing: songIds.some(id => id !== null && waiting.has(id)),
+      lengths: { ...kept, ...(edited.lengths ?? {}) },
     };
     set(state => {
       const known = state.projects.some(p => p.path === project.path);
-      const selected = state.active === project.path && state.selected
-        && edited.document.main.some(item => "id" in item && item.id === state.selected) ? state.selected : null;
+      // What was chosen stays chosen while it is still there: a clip, a title or a song.
+      const doc = edited.document;
+      const still = (id: string) => id.startsWith("title:") ? (doc.titles ?? []).some(t => `title:${t.id}` === id)
+        : id.startsWith("song:") ? Number(id.slice(5)) < songsOf(doc).length
+          : doc.main.some(item => "id" in item && item.id === id);
+      const selected = state.active === project.path && state.selected && still(state.selected) ? state.selected : null;
       return {
-        open: true, busy: false, error: null, active: project.path, selected,
+        open: true, busy: false, error: edited.problem ? `这个工程现在放不了：${edited.problem}` : null, active: project.path, selected,
         projects: known ? state.projects.map(p => (p.path === project.path ? project : p)) : [...state.projects, project],
       };
     });
     for (const id of songIds) if (id !== null) void loadSongGrid(id);
-    void refreshPlaying(edited);
+    if (edited.track_id !== null) void refreshPlayingProject(edited.track_id);
   };
 
-  /** The project playing now shows the edit: a VJ's picture is swapped under its songs; any other
-   *  project is played again from where it was, its sound being mixed anew. */
-  const refreshPlaying = async (edited: LaneEdited) => {
-    const id = edited.track_id;
-    const session = getPlayerSession();
-    if (id === null || session.trackId !== id) return;
-    if (songsOf(edited.document).length === 1) {
-      const preview = await api.previewKdjv(id).catch(() => null);
-      if (preview && !preview.render) useKdjvLive.setState(({ live }) => ({ live: { ...live, [id]: preview.project } }));
-      return;
-    }
-    const track = await api.track(id).catch(() => null);
-    if (track) playTrack(track, session.playing, undefined, session.position);
-  };
 
   /** Keeps `before` for undo: an edit clears what was undone; an undo keeps it for redo, and back. */
   const remember = (path: string, before: LaneDocument, how: "edit" | "undo" | "redo") => set(state => {
@@ -294,22 +294,24 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
         return { projects, active, selected: null, error: null };
       });
     },
-    async edit(ops) {
-      const { active, busy } = get();
-      if (!active || busy) return false;
-      const before = get().projects.find(p => p.path === active)?.doc;
-      set({ busy: true, error: null });
-      try {
-        adopt(await api.editKdjv({ path: active, ops }));
-        if (before) remember(active, before, "edit");
-        return true;
-      } catch (error) {
-        set({ busy: false, error: message(error) });
-        return false;
-      }
+    edit(ops) {
+      const active = get().active;
+      if (!active || ops.length === 0) return Promise.resolve(false);
+      return inTurn(async () => {
+        const before = get().projects.find(p => p.path === active)?.doc;
+        set({ busy: true, error: null });
+        try {
+          adopt(await api.editKdjv({ path: active, ops }));
+          if (before) remember(active, before, "edit");
+          return true;
+        } catch (error) {
+          set({ busy: false, error: message(error) });
+          return false;
+        }
+      });
     },
-    undo: () => turnBack("past"),
-    redo: () => turnBack("future"),
+    undo: () => inTurn(() => turnBack("past")),
+    redo: () => inTurn(() => turnBack("future")),
     select: id => set({ selected: id }),
     close: () => set({ open: false, selected: null, error: null }),
     async calibrate(clipId, auto = false) {

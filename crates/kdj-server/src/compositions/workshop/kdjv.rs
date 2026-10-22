@@ -559,7 +559,8 @@ enum Made {
 
 /// What each project file plays from, as last made. The window asks for it (POST
 /// /api/kdjv/preview|render) before it plays a project; the library's media routes only look here.
-static MADE: std::sync::OnceLock<Mutex<HashMap<(PathBuf, Made), PathBuf>>> = std::sync::OnceLock::new();
+/// Each with the project's mtime when it was made: an edit since makes it stale.
+static MADE: std::sync::OnceLock<Mutex<HashMap<(PathBuf, Made), (u64, PathBuf)>>> = std::sync::OnceLock::new();
 /// Where that is remembered across restarts (`<cache>/kdjv-index`): one small file per project
 /// and kind, named by the project's path, holding the project's mtime and the file made. Set by
 /// Workshop::new.
@@ -586,14 +587,17 @@ fn remember(file: &Path, made: Made, output: &Path) {
         let _ = std::fs::create_dir_all(index.parent().unwrap_or(Path::new(".")));
         let _ = std::fs::write(index, format!("{}\n{}", mtime(&file), output.display()));
     }
-    MADE.get_or_init(Default::default).lock().unwrap().insert((file, made), output.to_path_buf());
+    let stamp = mtime(&file);
+    MADE.get_or_init(Default::default).lock().unwrap().insert((file, made), (stamp, output.to_path_buf()));
 }
 
 /// What a project file last got of this kind, while it is still in the cache — remembered across
 /// restarts as long as the project file has not changed since.
 fn made(file: &Path, made: Made) -> Option<PathBuf> {
     let file = std::fs::canonicalize(file).ok()?;
-    let known = MADE.get_or_init(Default::default).lock().unwrap().get(&(file.clone(), made)).filter(|path| path.is_file()).cloned();
+    let stamp = mtime(&file);
+    let known = MADE.get_or_init(Default::default).lock().unwrap().get(&(file.clone(), made))
+        .filter(|(at, path)| *at == stamp && path.is_file()).map(|(_, path)| path.clone());
     known.or_else(|| {
         let text = std::fs::read_to_string(index_file(&file, made)?).ok()?;
         let (stamp, output) = text.split_once('\n')?;
@@ -617,6 +621,15 @@ pub fn sounded(file: &Path) -> Option<PathBuf> {
 pub fn source(file: &Path, n: usize) -> Option<PathBuf> {
     let doc = parse(&std::fs::read_to_string(file).ok()?).ok()?;
     doc.sources(file.parent().unwrap_or(Path::new("."))).into_iter().nth(n)
+}
+
+/// The file a project names as `src` (as its document writes it), when it is one of its sources:
+/// what the editor may ask a frame of, and nothing else.
+pub fn named_source(file: &Path, src: &str) -> Option<PathBuf> {
+    let doc = parse(&std::fs::read_to_string(file).ok()?).ok()?;
+    let base = file.parent().unwrap_or(Path::new("."));
+    let path = source_path(base, src);
+    doc.sources(base).contains(&path).then_some(path)
 }
 
 /// A project as its live preview draws it: the canvas and each picture clip, its source by number
@@ -846,19 +859,47 @@ impl Workshop {
         if before.get("kdjv").and_then(|v| v.as_u64()) != Some(LANES) {
             bail!("只有格式 2 的工程（编辑器的两条线）能用剪辑操作改；这个是格式 {}", before.get("kdjv").map_or("?".into(), |v| v.to_string()))
         }
+        // Opening a project (no operations) only reads it: the file is not written, and one that does
+        // not play as it is still opens, saying why, so that it can be put right here.
+        let opening = ops.is_empty() && !create;
         let after = super::lanes::apply(&before, ops)?;
         let text = serde_json::to_string_pretty(&after)?;
         let base = file.parent().filter(|dir| dir.is_dir()).with_context(|| format!("文件夹不存在：{}", file.display()))?;
         // A draft with nothing in it yet is kept as it is; anything else has to play.
         let songs = super::lanes::songs_of(&after);
         let empty = after["main"].as_array().is_none_or(|main| main.is_empty()) && songs.is_empty();
-        let duration = if empty { 0. } else { Self::kdjv_project_text(&text, base, cancel).await?.duration() / 1000. };
-        let temporary = file.with_extension(format!("{EXTENSION}.{}.tmp", std::process::id()));
-        tokio::fs::write(&temporary, format!("{text}\n")).await?;
-        tokio::fs::rename(&temporary, file).await?;
+        let (project, problem) = if empty {
+            (None, None)
+        } else {
+            match Self::kdjv_project_text(&text, base, cancel).await {
+                Ok(project) => (Some(project), None),
+                Err(error) if opening => (None, Some(format!("{error:#}"))),
+                Err(error) => return Err(error),
+            }
+        };
+        let duration = project.as_ref().map_or(0., |p| p.duration() / 1000.);
+        // How long each file the document names is, by its name there: how far a clip can reach.
+        let lengths: serde_json::Map<String, serde_json::Value> = project.as_ref().map(|p| {
+            let named = after["main"].as_array().into_iter().flatten().chain(songs.iter())
+                .filter_map(|item| item["src"].as_str());
+            named.filter_map(|src| {
+                let path = source_path(base, src);
+                let source = p.sources.iter().find(|s| Path::new(&s.path) == path)?;
+                Some((src.to_string(), serde_json::json!(source.duration_ms / 1000.)))
+            }).collect()
+        }).unwrap_or_default();
+        if !opening {
+            let temporary = file.with_extension(format!("{EXTENSION}.{}.tmp", std::process::id()));
+            tokio::fs::write(&temporary, format!("{text}\n")).await?;
+            tokio::fs::rename(&temporary, file).await?;
+        }
         // The row is there at once (a new project) and reads its new length and title (an edit),
         // without waiting for the folder watcher.
-        let track_id = self.state.library.upsert_file(file, "local", "").ok();
+        let track_id = if opening {
+            self.state.library.get_by_path(file).ok().flatten().map(|track| track.id)
+        } else {
+            self.state.library.upsert_file(file, "local", "").ok()
+        };
         // Each song's own row, where the editor reads its bar lines.
         let song_track_ids: Vec<Option<i64>> = songs.iter()
             .map(|song| song["src"].as_str()
@@ -869,6 +910,7 @@ impl Workshop {
             "path": file, "track_id": track_id,
             "song_track_id": song_track_ids.first().copied().flatten(), "song_track_ids": song_track_ids,
             "document": after, "layout": super::lanes::layout(&after), "duration": duration,
+            "lengths": lengths, "problem": problem,
         }))
     }
 
