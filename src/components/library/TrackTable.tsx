@@ -21,7 +21,9 @@ import {
   Trash2,
   Video,
   Image as ImageIcon,
+  Clapperboard,
 } from "lucide-react";
+import { useLaneEditor } from "../../stores/laneEditorStore";
 import { libraryDemand, restoreLibraryAnchor } from "../../lib/libraryViewport";
 import { listScrollsItself, rowListPadding, useRowList, useScrollMotion } from "../common/rowList";
 import { scrollTopTo } from "../../lib/wheelScroll";
@@ -2748,6 +2750,19 @@ export const TrackTable = memo(function TrackTable({
               setRowMenu(null);
               exportProject(track);
             }}><Download size={12} />导出 MP4</button>
+          )}
+          {menuIds.length === 1 && !isImageTrack(rowMenu.track.format) && (
+            <button type="button" onClick={() => {
+              const track = rowMenu.track;
+              setRowMenu(null);
+              // A project opens in the editor; a video is cut; a song is the base of a VJ.
+              if (isProjectTrack(track.format)) { void useLaneEditor.getState().openTrack(track); return; }
+              void api.track(track.id).then(full => isVideoTrack(full.format)
+                ? useLaneEditor.getState().startVideo(full)
+                : useLaneEditor.getState().startVj(full)).catch(() => undefined);
+            }}><Clapperboard size={12} />
+              {isProjectTrack(rowMenu.track.format) ? "编辑工程" : isVideoTrack(rowMenu.track.format) ? "剪辑这个视频" : "用这首歌做 VJ"}
+            </button>
           )}
           <button type="button" disabled={menuIds.length !== 1 || !canVisualizeTrack(rowMenu.track)} onClick={event => {
             const track = rowMenu.track;

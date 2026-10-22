@@ -18,6 +18,8 @@ import { VisualizerDock } from "../composition/VisualizerDock";
 import { SlidePages } from "../drawer/SlidePages";
 import type { DrawerEntry, DrawerSpec } from "../drawer/drawerSchema";
 import { AiDrawer, AiDrawerTools } from "../ai/AiDrawer";
+import { LaneEditor } from "../editor/LaneEditor";
+import { LANE_EDITOR_APP, useLaneEditor } from "../../stores/laneEditorStore";
 import { TrackMetaEditorDrawer } from "../library/TrackMetaEditor";
 import { DrawerLyrics } from "../player/SidePanels";
 import { SongColorBackdrop } from "../player/SongColorBackdrop";
@@ -57,6 +59,7 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
   const visualizerTrack = useVisualizerStudioStore(state => state.track);
   const metaId = useTrackMetaEditor(state => state.trackId);
   const ai = useAiDrawer(state => state.open);
+  const laneEditor = useLaneEditor(state => state.open);
   // How tall the lyrics are is the listener's choice (the menu on the panel, lyricsExtent.ts).
   // Full screen needs a song: the playing song's bubble is the other half of that window.
   const lyricsExtent = shownLyricsExtent(useLyricsExtent(state => state.extent), useLyricsExtentShape());
@@ -113,6 +116,13 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
     tools: <AiDrawerTools />,
     body: <AiDrawer />,
     close: () => useAiDrawer.getState().close(),
+  });
+  if (laneEditor) apps.push({
+    id: LANE_EDITOR_APP,
+    title: "剪辑",
+    extent: "at-least-half",
+    body: <LaneEditor />,
+    close: () => useLaneEditor.getState().close(),
   });
   if (metaId !== null) apps.push({
     id: "meta",

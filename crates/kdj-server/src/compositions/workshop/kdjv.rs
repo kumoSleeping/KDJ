@@ -722,9 +722,13 @@ impl Workshop {
 
     /// The editor's and the AI's edits of a format 2 project (lanes.rs): the operations applied in
     /// order, the result opened as playing it would (every source checked) and only then written,
-    /// whole, in place of the file. `create` starts a file that is not there yet. Answers the
+    /// whole, in place of the file. `create` starts a file that must not be there yet. Answers the
     /// document and where everything in it is.
     pub async fn kdjv_edit(&self, file: &Path, ops: &[super::lanes::Op], create: bool, cancel: &CancellationToken) -> Result<serde_json::Value> {
+        // A new project never takes the place of one that is there.
+        if create && file.exists() {
+            bail!("已经有这个文件：{}", file.display())
+        }
         let before: serde_json::Value = match tokio::fs::read_to_string(file).await {
             Ok(text) => serde_json::from_str(&text).context("工程不是有效的 JSON")?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => serde_json::json!({ "kdjv": LANES }),
@@ -745,8 +749,13 @@ impl Workshop {
         // The row is there at once (a new project) and reads its new length and title (an edit),
         // without waiting for the folder watcher.
         let track_id = self.state.library.upsert_file(file, "local", "").ok();
+        // The song's own row, where the editor reads its bar lines.
+        let song_track_id = after["song"]["src"].as_str()
+            .and_then(|src| self.state.library.get_by_path(&source_path(base, src)).ok().flatten())
+            .map(|track| track.id);
         Ok(serde_json::json!({
-            "path": file, "track_id": track_id, "document": after, "layout": super::lanes::layout(&after), "duration": duration,
+            "path": file, "track_id": track_id, "song_track_id": song_track_id,
+            "document": after, "layout": super::lanes::layout(&after), "duration": duration,
         }))
     }
 

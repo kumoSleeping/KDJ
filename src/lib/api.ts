@@ -947,6 +947,13 @@ export const api = {
   kdjvSourceUrl: (trackId: number, n: number) => authenticatedGetUrl(`${bridge().baseUrl}/api/kdjv/source/${trackId}/${n}`),
   /** A `.kdjv` project's render (docs/kdjv.md): found in the cache, or made now (can take minutes). */
   renderKdjv: (trackId: number) => post<{ path: string; track_id: number | null }>("/kdjv/render", { track_id: trackId }),
+  /** A track's beat grid (kdj-analysis rhythm): bar lines, beats and tempo stretches in seconds, or null before it is analysed. */
+  rhythm: (trackId: number) => request<{ analysis: { downbeats: number[]; beats: number[]; segments: Array<{ start_seconds: number; end_seconds: number; bpm: number }> } | null }>(`/library/rhythm/${trackId}`),
+  /** Analyse a track's beat grid now (`precise`: the whole song, every tempo change); null job when it already has one. */
+  startRhythm: (trackId: number, precise = true) => post<{ job_id: string | null; queued: number }>(`/library/rhythm/${trackId}`, { precise }),
+  /** Operations on a `.kdjv` 2 project (src/lib/lanes.ts), applied in order and saved only when the result plays. */
+  editKdjv: (body: { path?: string; track_id?: number; ops: import("./lanes").LaneOp[]; create?: boolean }) =>
+    post<import("./lanes").LaneEdited>("/kdjv/edit", body),
   /** A `.kdjv` project written out as one MP4 beside it, never over an existing file. */
   exportKdjv: (trackId: number) => post<{ path: string; track_id: number | null }>("/kdjv/export", { track_id: trackId }),
   downloads: () => request<DownloadTask[]>("/downloads"),

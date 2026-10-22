@@ -1,0 +1,151 @@
+/* The editor of a `.kdjv` 2 project (LaneEditor.tsx). Like the rest of KDJ nothing is tinted: the
+   chosen clip is written in full ink, the main lane's clips are quiet blocks, black is black, and
+   the branch lane above holds only the branches, joined to the main lane by a slanted line like
+   railway points. */
+.kd-lanes { display: grid; grid-auto-rows: max-content; align-content: start; gap: 8px; min-width: 0; max-height: 100%; overflow-y: auto; padding: 4px 12px 12px; color: var(--kd-text); font-size: var(--kd-size-sm); }
+
+.kd-lanes-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.kd-lanes-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--kd-text);
+  font: inherit;
+  font-weight: 600;
+}
+.kd-lanes-title:hover, .kd-lanes-title:focus { border-color: var(--kd-line); outline: none; }
+.kd-lanes-key {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+.kd-lanes-key:hover:not(:disabled) { background: var(--kd-hover); color: var(--kd-text); }
+.kd-lanes-key:disabled { opacity: 0.4; cursor: default; }
+.kd-lanes-time { flex: none; color: var(--kd-muted); font-size: var(--kd-size-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* One line that is always there, so a message never moves what is under it. */
+.kd-lanes-status {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 1.2rem;
+  margin: 0;
+  overflow: hidden;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-lanes-status[data-error] { color: var(--kd-danger, var(--kd-text)); }
+
+.kd-lanes-scroll { overflow-x: auto; overflow-y: hidden; min-width: 0; }
+.kd-lanes-board { position: relative; display: grid; gap: 4px; min-width: 100%; padding-bottom: 4px; }
+.kd-lanes-ruler { position: relative; height: 16px; border-bottom: 1px solid var(--kd-line); cursor: pointer; }
+.kd-lanes-mark {
+  position: absolute;
+  top: 0;
+  height: 15px;
+  padding-left: 3px;
+  border-left: 1px solid var(--kd-line);
+  color: var(--kd-muted);
+  font-size: 10px;
+  line-height: 13px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.kd-lanes-beat { position: absolute; bottom: 0; height: 5px; border-left: 1px solid var(--kd-line); pointer-events: none; }
+.kd-lanes-lane { position: relative; height: 26px; }
+.kd-lanes-lane[data-lane="aux"] { height: 14px; }
+.kd-lanes-lane[data-lane="song"] { height: 18px; }
+.kd-lanes-clip, .kd-lanes-gap, .kd-lanes-song, .kd-lanes-branch-block {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  min-width: 2px;
+  border-radius: 4px;
+}
+.kd-lanes-clip {
+  padding: 0 6px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--kd-text) 12%, transparent);
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: 11px;
+  line-height: 24px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.kd-lanes-clip:hover { color: var(--kd-text); }
+.kd-lanes-clip[aria-pressed="true"] { border-color: var(--kd-text); color: var(--kd-text); font-weight: 600; }
+.kd-lanes-gap { background: #000; opacity: 0.55; }
+.kd-lanes-song {
+  padding: 0 6px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--kd-text) 5%, transparent);
+  color: var(--kd-muted);
+  font-size: 10px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-lanes-branch-block {
+  padding: 0;
+  border: 1px solid var(--kd-muted);
+  background: color-mix(in srgb, var(--kd-text) 18%, transparent);
+  cursor: pointer;
+}
+.kd-lanes-branch-block[aria-pressed="true"] { border-color: var(--kd-text); }
+/* The points: under the branch lane, over the top of the main lane. */
+.kd-lanes-switches {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  top: calc(16px + 4px + 7px);
+  height: calc(7px + 4px);
+  overflow: visible;
+  pointer-events: none;
+}
+.kd-lanes-switches path { fill: none; stroke: var(--kd-muted); stroke-width: 1.5; }
+.kd-lanes-playhead, .kd-lanes-drop {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--kd-text);
+  pointer-events: none;
+}
+.kd-lanes-drop { background: transparent; border-left: 2px dashed var(--kd-text); }
+
+.kd-lanes-inspector { display: grid; gap: 8px; min-width: 0; padding-top: 4px; border-top: 1px solid var(--kd-line); }
+.kd-lanes-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; }
+.kd-lanes-name { flex: 1 1 8rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kd-lanes-field { display: inline-flex; align-items: center; gap: 4px; color: var(--kd-muted); font-size: var(--kd-size-xs); }
+.kd-lanes-field input[type="number"], .kd-lanes-field select {
+  width: 4.5rem;
+  padding: 2px 4px;
+  border: 1px solid var(--kd-line);
+  border-radius: 6px;
+  background: var(--kd-panel);
+  color: var(--kd-text);
+  font: inherit;
+}
+.kd-lanes-field input[type="range"] { width: 6rem; }
+.kd-lanes-check { display: inline-flex; align-items: center; gap: 4px; color: var(--kd-muted); font-size: var(--kd-size-xs); cursor: pointer; }
+.kd-lanes-branch { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.kd-lanes-branch[data-on] > .kd-lanes-check:first-child { color: var(--kd-text); }
