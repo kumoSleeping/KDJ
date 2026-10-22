@@ -64,6 +64,7 @@ import {
   type AudioFocusDetail,
 } from "../../lib/audioFocus";
 import { formatDuration, isProjectTrack, isVideoTrack, thumbUrl } from "../../lib/format";
+import { needsRender } from "../../lib/kdjvPlay";
 import {
   MEDIA_SYNC_EVENT,
   broadcastMediaSync,
@@ -1474,6 +1475,10 @@ export function PlayerBar() {
     (next: Track, from: Track): boolean => {
       // 移动端的播放 owner 是系统媒体服务，不让实时 DJ 再开第二条输出链。
       if (mobileNative) return false;
+      // A `.kdjv` row is not sound until playTrack has made its mix (kdjvPlay.ts); handed to a
+      // Deck as it is, it failed, fell back to a hard load and moved the video window onto it,
+      // over and over. The caller plays it instead, which comes back here with its sound.
+      if (isProjectTrack(next.format) && needsRender(next)) return false;
       const { enabled, transitions, effects, bars, vocalCut, applyInOutPoints, autoBeatSync } =
         useDjConfig.getState();
       if (!enabled) return false;
@@ -3596,6 +3601,17 @@ export function PlayerBar() {
         void remoteNextRef.current();
       } else if (command.type === "previous") {
         void remotePreviousRef.current();
+      } else if (command.type === "resound") {
+        // Same row, new file: loaded again in place at the same position, playing on if it was.
+        // Not a play request, so the video window and the DJ transition are left alone.
+        const current = trackRef.current;
+        if (!current || current.id !== command.trackId || current.path === command.path) return;
+        const next = { ...current, path: command.path };
+        nativeLoadGenerationRef.current += 1;
+        restoredPositionRef.current = { trackId: current.id, position: positionRef.current };
+        trackRef.current = next;
+        setTrack(next);
+        setSourceLoadEpoch((epoch) => epoch + 1);
       } else if (command.type === "seek") {
         const current = trackRef.current;
         if (!current) return;
@@ -4645,8 +4661,11 @@ export function PlayerBar() {
 
     resetPerformanceControlsForManagerLoad();
     const applyAutomaticCue = autoInOutCueRef.current === next.id;
-    const initialPosition =
-      applyAutomaticCue && next.cue_ms != null ? Math.max(0, next.cue_ms / 1_000) : 0;
+    // A position asked for with the play (the editor's ruler, a project played on from where it was).
+    const asked = restoredPositionRef.current?.trackId === next.id ? restoredPositionRef.current.position : null;
+    if (asked !== null) restoredPositionRef.current = null;
+    const initialPosition = asked ??
+      (applyAutomaticCue && next.cue_ms != null ? Math.max(0, next.cue_ms / 1_000) : 0);
     autoInOutCueRef.current = null;
     const loadGeneration = ++nativeLoadGenerationRef.current;
     nativeLoadInFlightRef.current = true;

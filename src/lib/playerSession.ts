@@ -100,7 +100,9 @@ export type PlayerCommand =
   | { type: "toggle" }
   | { type: "next" }
   | { type: "previous" }
-  | { type: "seek"; position: number };
+  | { type: "seek"; position: number }
+  /** The row playing now plays from another file, from where it is: an edited project's new sound. */
+  | { type: "resound"; trackId: number; path: string };
 
 export function requestPlayerCommand(command: PlayerCommand): void {
   window.dispatchEvent(new CustomEvent<PlayerCommand>(PLAYER_COMMAND_EVENT, { detail: command }));

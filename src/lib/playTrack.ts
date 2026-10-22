@@ -94,6 +94,6 @@ export function parsePlayRequest(detail: unknown): PlayRequest | null {
     intentId,
     receivedAt: req.receivedAt,
     purpose: req.purpose === "composition" ? "composition" : undefined,
-    position: req.purpose === "composition" && Number.isFinite(req.position) ? Math.max(0, req.position!) : undefined,
+    position: Number.isFinite(req.position) ? Math.max(0, req.position!) : undefined,
   };
 }

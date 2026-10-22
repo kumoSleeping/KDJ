@@ -12,6 +12,7 @@
 import { create } from "zustand";
 import { api } from "./api";
 import { dismissTask, showTask } from "../components/tasks/taskBubbleStore";
+import { getPlayerSession, requestPlayerCommand } from "./playerSession";
 import type { KdjvLive, KdjvProgress, PlayableTrack } from "../types";
 import type { ExportOptions } from "./lanes";
 
@@ -70,6 +71,27 @@ export function playProject(track: PlayableTrack, play: Play, autoPlay = true, p
         tone: "error",
       });
     });
+}
+
+/**
+ * A project edited while it plays shows the edit where it is: its picture is drawn from the new
+ * document, and its sound (mixed again when the edit changed it) is swapped under the playing row
+ * at the same position. Nothing is played anew, so the video window stays as it is.
+ */
+let refreshes = 0;
+export async function refreshPlayingProject(trackId: number): Promise<void> {
+  if (getPlayerSession().trackId !== trackId) return;
+  // Only the last edit's answer is shown: an earlier one coming back late is not.
+  const turn = ++refreshes;
+  const preview = await api.previewKdjv(trackId).catch(() => null);
+  if (!preview || turn !== refreshes || getPlayerSession().trackId !== trackId) return;
+  useKdjvLive.setState(({ live }) => {
+    const next = { ...live };
+    if (preview.render) delete next[trackId];
+    else next[trackId] = preview.project;
+    return { live: next };
+  });
+  requestPlayerCommand({ type: "resound", trackId, path: preview.render ?? preview.sound });
 }
 
 const exportId = (trackId: number) => `kdjv-export:${trackId}`;
