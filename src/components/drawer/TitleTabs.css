@@ -115,3 +115,32 @@
   background: var(--kd-hover);
   border-radius: 10px;
 }
+/* Pages that close (the editor's open projects): a long word ends in an ellipsis, and each has its
+   own small × beside it — the page in view always, the others while the row is pointed at. */
+.kd-title-tabs-list[data-closable] { gap: 0.2rem; }
+.kd-title-tabs-list[data-closable] > button[role="tab"] { margin-left: 0.55rem; }
+.kd-title-tabs-list[data-closable] > button[role="tab"]:first-child { margin-left: 0; }
+.kd-title-tabs-list[data-closable] > button[role="tab"] > span {
+  max-width: 7rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.kd-title-tabs-list[data-closable] > button[aria-selected="true"] > span { max-width: 11rem; }
+.kd-title-tabs-list > button.kd-title-tab-close {
+  display: inline-grid;
+  place-items: center;
+  align-self: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  color: var(--kd-muted);
+  font-size: inherit;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+.kd-title-tabs-list > button.kd-title-tab-close[data-selected],
+.kd-title-tabs-list:hover > button.kd-title-tab-close,
+.kd-title-tabs-list:focus-within > button.kd-title-tab-close { opacity: 1; }
+.kd-title-tabs-list > button.kd-title-tab-close:hover { background: var(--kd-hover); color: var(--kd-text); }

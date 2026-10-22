@@ -1,5 +1,5 @@
 import { useLayoutEffect, useMemo, useRef } from "react";
-import { Download, Settings, Sparkles, TextQuote, X } from "lucide-react";
+import { Download, Settings, Sparkles, TextQuote } from "lucide-react";
 import { AI_DRAWER_APP, aiDrawerPages, useAiDrawer, type AiDrawerPage } from "../../lib/aiDrawer";
 import { shownLyricsExtent, useLyricsExtent, useLyricsExtentShape } from "../../lib/lyricsExtent";
 import type { PlayingLyrics } from "../../lib/playingLyrics";
@@ -16,7 +16,10 @@ import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import { useVisualizerStudioStore, VISUALIZER_DOCK_APP } from "../../stores/visualizerStudioStore";
 import { VisualizerDock } from "../composition/VisualizerDock";
 import { SlidePages } from "../drawer/SlidePages";
-import type { DrawerEntry, DrawerSpec } from "../drawer/drawerSchema";
+import type { DrawerEntry, DrawerSpec, TitleDrop } from "../drawer/drawerSchema";
+import { downloadIntoEditor } from "../../lib/editorDownloads";
+import { isProjectTrack } from "../../lib/format";
+import { useLibraryStore } from "../../stores/libraryStore";
 import { AiDrawer, AiDrawerTools } from "../ai/AiDrawer";
 import { LaneEditor } from "../editor/LaneEditor";
 import { LANE_EDITOR_APP, useLaneEditor } from "../../stores/laneEditorStore";
@@ -47,12 +50,23 @@ const useStudioTabInView = () => useStudioTab(state => state.tab);
 const useAiPageInView = () => useAiDrawer(state => state.page);
 const useProjectInView = () => useLaneEditor(state => state.active ?? "");
 
-/** Songs or videos dropped on the editor's title start another project, another page. */
-const NEW_PROJECT_DROP = {
+/**
+ * On the editor's title: songs or videos (from the library, or online ones, downloaded first)
+ * start another project, another page; a project opens as its page, or is shown when it is open.
+ */
+const NEW_PROJECT_DROP: TitleDrop = {
   label: "新建一个工程",
-  drop(ids: readonly number[]) {
+  labelFor(ids) {
+    const byId = useLibraryStore.getState().summaryById;
+    return ids.length > 0 && ids.every(id => isProjectTrack(byId.get(id)?.format ?? "")) ? "打开工程" : "新建一个工程";
+  },
+  drop(ids) {
     void Promise.all(ids.map(id => api.track(id).catch(() => null)))
-      .then(tracks => useLaneEditor.getState().createFrom(tracks.filter((t): t is Track => Boolean(t))));
+      .then(tracks => useLaneEditor.getState().placeTracks(null, tracks.filter((t): t is Track => Boolean(t)), 0));
+  },
+  dropSearch: payload => {
+    useLaneEditor.getState().show();
+    void downloadIntoEditor(payload, null, 0);
   },
 };
 
@@ -73,7 +87,7 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
   const ai = useAiDrawer(state => state.open);
   const laneEditor = useLaneEditor(state => state.open);
   const laneProjects = useLaneEditor(state => state.projects);
-  const projectPages = useMemo(() => laneProjects.map(p => ({ id: p.path, label: p.doc.title || "未命名", title: p.path })), [laneProjects]);
+  const projectPages = useMemo(() => laneProjects.map(p => ({ id: p.path, label: p.doc.title || "未命名", title: `${p.doc.title || "未命名"} · ${p.path}` })), [laneProjects]);
   // How tall the lyrics are is the listener's choice (the menu on the panel, lyricsExtent.ts).
   // Full screen needs a song: the playing song's bubble is the other half of that window.
   const lyricsExtent = shownLyricsExtent(useLyricsExtent(state => state.extent), useLyricsExtentShape());
@@ -139,9 +153,9 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
     pages: projectPages.length ? projectPages : undefined,
     usePage: projectPages.length ? useProjectInView : undefined,
     onPage: id => useLaneEditor.getState().activate(id),
+    // Each project closes by its own ×; what it is is already saved, edit by edit, in its file.
+    closePage: path => useLaneEditor.getState().closeProject(path),
     titleDrop: NEW_PROJECT_DROP,
-    tools: projectPages.length ? <button type="button" className="kd-title-tabs-tool" aria-label="关闭这个工程" title="关闭这个工程（文件留着）"
-      onClick={() => { const { active, closeProject } = useLaneEditor.getState(); if (active) closeProject(active); }}><X size={15} /></button> : undefined,
     body: <LaneEditor />,
     close: () => useLaneEditor.getState().close(),
   });

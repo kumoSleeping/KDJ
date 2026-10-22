@@ -207,6 +207,24 @@
   pointer-events: none;
 }
 .kd-lanes-drop { background: transparent; border-left: 2px dashed var(--kd-text); }
+/* An online song or video on its way: where it will go, dashed, with how far its download is. */
+.kd-lanes-pending {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  max-width: 9rem;
+  padding: 0 6px;
+  overflow: hidden;
+  border: 1px dashed var(--kd-muted);
+  border-radius: 4px;
+  color: var(--kd-muted);
+  font-size: 10px;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
 /* In the song lane the mark stands only by that lane: songs go between songs. */
 .kd-lanes-drop[data-lane="song"] { top: auto; height: 22px; }
 

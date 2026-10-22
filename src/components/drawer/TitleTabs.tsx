@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
-import { usePointerTrackDrop } from "../../lib/pointerTrackDrop";
+import { Fragment, useEffect, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
+import { X } from "lucide-react";
+import { usePointerSearchDrop, usePointerTrackDrop } from "../../lib/pointerTrackDrop";
+import { finishSearchDrop, isSearchDownloadDrag, readSearchDrop } from "../../lib/searchDrag";
 import { activeTrackDragIds, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
 import type { TitleDrop } from "./drawerSchema";
 import "./TitleTabs.css";
@@ -16,7 +18,7 @@ export interface TitleTab<T extends string = string> {
  * the others wait beside it, smaller and quieter. With no tabs it is a plain title. Nothing
  * else is written on the title's line: the title row names the app, not what it is about.
  */
-export function TitleTabs<T extends string>({ label, title, tabs, value, onChange, panelId, drop, children }: {
+export function TitleTabs<T extends string>({ label, title, tabs, value, onChange, panelId, drop, onClose, children }: {
   /** Names the group for assistive technology. */
   label: string;
   /** Shown when there are no tabs. */
@@ -28,6 +30,8 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
   panelId?: string;
   /** What the row takes when something is dragged onto it (drawerSchema.ts `titleDrop`). */
   drop?: TitleDrop;
+  /** Each page closes by its own small × (drawerSchema.ts `closePage`). */
+  onClose?(id: T): void;
   /** Actions at the right end of the row. */
   children?: ReactNode;
 }) {
@@ -64,12 +68,24 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
   const [hot, setHot] = useState(false);
   const row = useRef<HTMLElement>(null);
   usePointerTrackDrop(row, drop ? {
-    over: () => { setHot(true); return drop.label; },
+    over: ids => { setHot(true); return drop.labelFor?.(ids) ?? drop.label; },
     leave: () => setHot(false),
     drop: ids => { setHot(false); drop.drop(ids); },
   } : null);
-  const takes = (event: DragEvent<HTMLElement>) => Boolean(drop) && isTrackDrag(event);
+  const search = drop?.dropSearch;
+  usePointerSearchDrop(row, drop && search ? {
+    over: () => { setHot(true); return drop.label; },
+    leave: () => setHot(false),
+    drop: payload => { setHot(false); search(payload); },
+  } : null);
+  const takes = (event: DragEvent<HTMLElement>) => Boolean(drop) && (isTrackDrag(event) || (Boolean(search) && isSearchDownloadDrag(event)));
   const dropped = (event: DragEvent<HTMLElement>) => {
+    if (!isTrackDrag(event) && search) {
+      const payload = readSearchDrop(event.dataTransfer);
+      finishSearchDrop();
+      if (payload) search(payload);
+      return;
+    }
     const ids = readTrackDragIds(event.dataTransfer);
     drop?.drop(ids.length ? ids : [...activeTrackDragIds()]);
   };
@@ -92,16 +108,25 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
     <div ref={view} className="kd-title-tabs-text"
       data-fade={carry.left && carry.right ? "both" : carry.left ? "left" : carry.right ? "right" : undefined}>
       {tabs?.length ? <div ref={list} className="kd-title-tabs-list" role="tablist" aria-label={label} onKeyDown={move}
+        data-closable={onClose ? "" : undefined}
         style={{ "--kd-tabs-carry": `${-carry.x}px` } as CSSProperties}>
-        {tabs.map(tab => <button key={tab.id} type="button" role="tab" data-tab={tab.id}
-          aria-selected={tab.id === value} aria-controls={panelId} aria-label={tab.title} title={tab.title}
-          tabIndex={tab.id === value ? 0 : -1}
-          // A page word answers the press itself, not its release; a finger, the keyboard and
-          // assistive technology arrive as a click.
-          onPointerDown={event => { if (event.button === 0 && event.pointerType !== "touch") pick(tab.id); }}
-          onClick={() => pick(tab.id)}>
-          <span>{tab.label}</span>
-        </button>)}
+        {tabs.map(tab => <Fragment key={tab.id}>
+          <button type="button" role="tab" data-tab={tab.id}
+            aria-selected={tab.id === value} aria-controls={panelId} aria-label={tab.title ?? tab.label} title={tab.title ?? tab.label}
+            tabIndex={tab.id === value ? 0 : -1}
+            // A page word answers the press itself, not its release; a finger, the keyboard and
+            // assistive technology arrive as a click.
+            onPointerDown={event => { if (event.button === 0 && event.pointerType !== "touch") pick(tab.id); }}
+            onClick={() => pick(tab.id)}
+            // A page that closes closes with Delete too.
+            onKeyDown={onClose ? event => { if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); onClose(tab.id); } } : undefined}>
+            <span>{tab.label}</span>
+          </button>
+          {onClose && <button type="button" className="kd-title-tab-close" tabIndex={-1} data-selected={tab.id === value || undefined}
+            aria-label={`关闭 ${tab.label}`} title={`关闭 ${tab.label}`} onClick={() => onClose(tab.id)}>
+            <X size={12} aria-hidden="true" />
+          </button>}
+        </Fragment>)}
       </div> : <h2 className="kd-title-tabs-title">{title ?? label}</h2>}
     </div>
     {children ? <div className="kd-title-tabs-tools">{children}</div> : null}

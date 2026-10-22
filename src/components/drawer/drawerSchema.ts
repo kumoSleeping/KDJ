@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { ActiveSearchDrag } from "../../lib/searchDrag";
 
 /**
  * How tall the drawer's panel is over the list.
@@ -21,9 +22,15 @@ import type { ReactNode } from "react";
  */
 export type DrawerExtent = "fit" | "at-least-half" | "two-thirds" | "full";
 
-/** Library rows dragged onto the title row of an app, by the system or by the track table's own pointer drag. */
+/**
+ * What is dragged onto the title row of an app: library rows (by the system or by the track
+ * table's own pointer drag) and, when `dropSearch` is there, search results.
+ */
 export interface TitleDrop {
   drop(ids: readonly number[]): void;
+  dropSearch?(payload: ActiveSearchDrag): void;
+  /** What a drop of these rows does, when it depends on them (else `label`). */
+  labelFor?(ids: readonly number[]): string;
   /** Names what a drop there does, for the tooltip while it is over the row. */
   label: string;
 }
@@ -63,6 +70,11 @@ export interface DrawerSpec {
    */
   usePage?(): string;
   onPage?(id: string): void;
+  /**
+   * Pages that can be closed (the editor's open projects): each word gets its own small ×, and
+   * a long word ends in an ellipsis. The app decides what is in view afterwards.
+   */
+  closePage?(id: string): void;
   /** Compact actions at the right end of the title row, before the close button. */
   tools?: ReactNode;
   /**

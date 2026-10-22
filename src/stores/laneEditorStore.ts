@@ -10,7 +10,7 @@ import { create } from "zustand";
 import { api } from "../lib/api";
 import { isImageTrack, isProjectTrack, isVideoTrack } from "../lib/format";
 import { refreshPlayingProject } from "../lib/kdjvPlay";
-import { alignedOps, isGap, type AlignPlan, type LaneClip, type LaneDocument, type LaneEdited, type LaneLayout, type LaneOp } from "../lib/lanes";
+import { alignedOps, isGap, snapToBar, type AlignPlan, type LaneClip, type LaneDocument, type LaneEdited, type LaneLayout, type LaneOp } from "../lib/lanes";
 import { useSidePanels } from "../lib/sidePanels";
 import type { Track } from "../types";
 
@@ -61,6 +61,8 @@ interface LaneEditorState {
   /** Opens the drawer as it was (the key at the top right). */
   show(): void;
   openTrack(track: Pick<Track, "id" | "path">): Promise<void>;
+  /** Opens the project file at `path` (a page again, if it was closed); false when it cannot be opened. */
+  openPath(path: string): Promise<boolean>;
   startVj(song: Track): Promise<void>;
   startVideo(video: Track): Promise<void>;
   /** A new project from what was dropped: the songs one after another (a VJ), else the videos. */
@@ -68,11 +70,20 @@ interface LaneEditorState {
   activate(path: string): void;
   /** Takes a project out of the editor (the file stays). */
   closeProject(path: string): void;
-  /** Sends the operations to the project in view; false when they were refused (the reason is in `error`). */
-  edit(ops: LaneOp[]): Promise<boolean>;
+  /** Sends the operations to the project in view (or at `path`); false when they were refused (the reason is in `error`). */
+  edit(ops: LaneOp[], path?: string): Promise<boolean>;
+  /**
+   * Library rows dropped at `at` seconds of the project at `path` go where they belong: songs into
+   * the song lane at that slot, pictures there (in a VJ at the bar, over what is there). A project
+   * among them opens as a page of its own. No project (`path` null, or one no longer open): they
+   * start a new one.
+   */
+  placeTracks(path: string | null, tracks: Track[], at: number): Promise<void>;
   undo(): Promise<void>;
   redo(): Promise<void>;
   select(id: string | null): void;
+  /** Says what could not be done, in the editor's status line. */
+  fail(reason: string): void;
   close(): void;
   /** Finds where a clip of the project in view lies in the song under it; `auto` applies a sure plan at once. */
   calibrate(clipId: string, auto?: boolean): Promise<void>;
@@ -260,6 +271,18 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
         set({ busy: false, error: message(error) });
       }
     },
+    async openPath(path) {
+      const known = get().projects.find(p => p.path === path);
+      if (known) { set({ open: true, active: known.path, selected: null }); return true; }
+      set({ open: true, busy: true, error: null, selected: null });
+      try {
+        adopt(await api.editKdjv({ path, ops: [] }));
+        return true;
+      } catch (error) {
+        set({ busy: false, error: message(error) });
+        return false;
+      }
+    },
     startVj: song => get().createFrom([song]),
     startVideo: video => get().createFrom([video]),
     async createFrom(tracks) {
@@ -291,11 +314,12 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
         const at = state.projects.findIndex(p => p.path === path);
         const projects = state.projects.filter(p => p.path !== path);
         const active = state.active !== path ? state.active : (projects[Math.min(at, projects.length - 1)]?.path ?? null);
-        return { projects, active, selected: null, error: null };
+        const { [path]: _gone, ...history } = state.history;
+        return { projects, active, selected: null, error: null, history };
       });
     },
-    edit(ops) {
-      const active = get().active;
+    edit(ops, path) {
+      const active = path ?? get().active;
       if (!active || ops.length === 0) return Promise.resolve(false);
       return inTurn(async () => {
         const before = get().projects.find(p => p.path === active)?.doc;
@@ -310,9 +334,50 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
         }
       });
     },
+    async placeTracks(path, tracks, at) {
+      // A project dropped in is opened, as a page of its own, not put inside another.
+      for (const project of tracks.filter(track => isProjectTrack(track.format))) await get().openTrack(project);
+      const rest = tracks.filter(track => !isProjectTrack(track.format) && (track.duration ?? 0) > 0);
+      if (rest.length === 0) return;
+      const project = path ? get().projects.find(p => p.path === path) : undefined;
+      if (!project) { await get().createFrom(rest); return; }
+      const { doc, layout, grid } = project;
+      const songs = rest.filter(isSongTrack), pictures = rest.filter(isPictureTrack);
+      const ops: LaneOp[] = [];
+      const placed = layout.songs ?? [];
+      let index = placed.filter(s => s.at + s.length / 2 < at).length;
+      for (const song of songs) ops.push({ op: "add_song", song: songOf(song), index: index++ });
+      if (pictures.length) {
+        if (placed.length > 0 || songs.length > 0) {
+          // In a VJ a picture goes in at the bar where it is let go, over whatever is there, as far
+          // as the songs reach.
+          const end = placed.reduce((sum, s) => sum + s.length, 0) + songs.reduce((sum, s) => sum + (s.duration ?? 0), 0);
+          let place = Math.min(snapToBar(grid?.downbeats ?? [], at), Math.max(0, end - 0.1));
+          for (const picture of pictures) {
+            const out = Math.round(Math.min(picture.duration ?? 0, end - place) * 1000) / 1000;
+            if (out <= 0.05) break;
+            ops.push({ op: "add", clip: { ...clipOf(picture, true), out }, at: Math.round(place * 1000) / 1000, over: true });
+            place += out;
+          }
+        } else {
+          let slot = layout.main.filter(item => item.at + item.length / 2 < at).length;
+          for (const picture of pictures) ops.push({ op: "add", clip: clipOf(picture, false), index: slot++ });
+        }
+      }
+      if (ops.length === 0) return;
+      const before = new Set(doc.main.map(item => ("id" in item ? item.id : "")));
+      if (!(await get().edit(ops, project.path)) || !pictures.length) return;
+      // Each video dropped into a VJ is looked for in its song and moved there when it is found for sure.
+      const now = get().projects.find(p => p.path === project.path);
+      if (!now || songsOf(now.doc).length === 0 || get().active !== project.path) return;
+      for (const item of now.doc.main) {
+        if ("id" in item && !before.has(item.id)) void get().calibrate(item.id, true);
+      }
+    },
     undo: () => inTurn(() => turnBack("past")),
     redo: () => inTurn(() => turnBack("future")),
     select: id => set({ selected: id }),
+    fail: reason => set({ error: reason }),
     close: () => set({ open: false, selected: null, error: null }),
     async calibrate(clipId, auto = false) {
       const project = get().projects.find(p => p.path === get().active);

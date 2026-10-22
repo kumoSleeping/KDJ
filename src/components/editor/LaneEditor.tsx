@@ -11,11 +11,12 @@
 import { useState, useSyncExternalStore, type KeyboardEvent } from "react";
 import { Download, LoaderCircle, MapPin, Pause, Play, Redo2, Type, Undo2, ZoomIn, ZoomOut } from "lucide-react";
 import { api } from "../../lib/api";
-import { isGap, laneClock, snapToBar, type LaneClip, type LaneOp } from "../../lib/lanes";
+import { downloadIntoEditor } from "../../lib/editorDownloads";
+import { isGap, laneClock, type LaneClip, type LaneOp } from "../../lib/lanes";
 import { getPlayerSession, requestPlayerCommand, subscribePlayerSession } from "../../lib/playerSession";
 import { playTrack } from "../../lib/playTrack";
 import { requestLocalVideo, useVideoPip } from "../../lib/videoPip";
-import { clipOf, isPictureTrack, isSongTrack, songOf, songsOf, useActiveProject, useLaneEditor, type LaneProject } from "../../stores/laneEditorStore";
+import { useActiveProject, useLaneEditor, type LaneProject } from "../../stores/laneEditorStore";
 import type { Track } from "../../types";
 import { LaneBoard, ZOOMS } from "./LaneBoard";
 import { ToolPanel, type Tool } from "./LanePanels";
@@ -44,7 +45,8 @@ async function droppedTracks(ids: readonly number[]): Promise<Track[]> {
 
 export function LaneEditor() {
   const active = useActiveProject();
-  const { selected, busy, error, edit, select, createFrom, undo, redo } = useLaneEditor();
+  const { selected, busy, error, select, placeTracks, undo, redo } = useLaneEditor();
+  const edit = useLaneEditor(state => state.edit);
   const history = useLaneEditor(state => (active ? state.history[active.path] : undefined));
   const aligning = useLaneEditor(state => state.aligning.length);
   const project = active ?? NOTHING;
@@ -57,42 +59,10 @@ export function LaneEditor() {
   const { doc, layout, grid, trackId } = project;
   const span = Math.max(1, layout.duration);
 
-  /** What was dropped goes where it belongs: songs into the song lane at the slot, pictures at `at`. */
+  /** What was dropped goes where it belongs (laneEditorStore `placeTracks`). */
   const dropInto = async (ids: readonly number[], at: number) => {
     const tracks = await droppedTracks(ids);
-    if (tracks.length === 0) return;
-    if (!active) { await createFrom(tracks); return; }
-    const songs = tracks.filter(isSongTrack), pictures = tracks.filter(isPictureTrack);
-    const ops: LaneOp[] = [];
-    const placed = layout.songs ?? [];
-    let index = placed.filter(s => s.at + s.length / 2 < at).length;
-    for (const song of songs) ops.push({ op: "add_song", song: songOf(song), index: index++ });
-    if (pictures.length) {
-      if (placed.length > 0 || songs.length > 0) {
-        // In a VJ a picture goes in at the bar where it is let go, over whatever is there, as far
-        // as the songs reach.
-        const end = placed.reduce((sum, s) => sum + s.length, 0) + songs.reduce((sum, s) => sum + (s.duration ?? 0), 0);
-        let place = Math.min(snapToBar(grid?.downbeats ?? [], at), Math.max(0, end - 0.1));
-        for (const picture of pictures) {
-          const out = Math.round(Math.min(picture.duration ?? 0, end - place) * 1000) / 1000;
-          if (out <= 0.05) break;
-          ops.push({ op: "add", clip: { ...clipOf(picture, true), out }, at: Math.round(place * 1000) / 1000, over: true });
-          place += out;
-        }
-      } else {
-        let slot = layout.main.filter(item => item.at + item.length / 2 < at).length;
-        for (const picture of pictures) ops.push({ op: "add", clip: clipOf(picture, false), index: slot++ });
-      }
-    }
-    if (ops.length === 0) return;
-    const before = new Set(doc.main.map(item => ("id" in item ? item.id : "")));
-    if (!(await edit(ops)) || !pictures.length) return;
-    // Each video dropped into a VJ is looked for in its song and moved there when it is found for sure.
-    const now = useLaneEditor.getState().projects.find(p => p.path === active.path);
-    if (!now || songsOf(now.doc).length === 0) return;
-    for (const item of now.doc.main) {
-      if ("id" in item && !before.has(item.id)) void useLaneEditor.getState().calibrate(item.id, true);
-    }
+    if (tracks.length) await placeTracks(active?.path ?? null, tracks, at);
   };
 
   /** One beat at `t` (the song's own beat there, through any tempo change), else half a second. */
@@ -171,7 +141,8 @@ export function LaneEditor() {
     {status && <p className="kd-lanes-status" role={error ? "alert" : undefined} data-error={error ? "" : undefined} title={error ?? undefined}>{status}</p>}
 
     <LaneBoard project={project} zoom={zoom} selected={selected} select={id => { select(id); setTool(null); }} playhead={playhead.position}
-      seek={seek} beatNear={beatNear} edit={send} onDropped={(ids, at) => void dropInto(ids, at)} />
+      seek={seek} beatNear={beatNear} edit={send} onDropped={(ids, at) => void dropInto(ids, at)}
+      onSearchDropped={(payload, at) => void downloadIntoEditor(payload, active?.path ?? null, at)} />
 
     <div className="kd-lanes-tools" role="toolbar" aria-label="剪辑工具">
       <span className="kd-lanes-grow" />

@@ -14,10 +14,13 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { api } from "../../lib/api";
 import { rulerStep } from "../../lib/aiTimeline";
-import { isImageTrack } from "../../lib/format";
+import { isImageTrack, isProjectTrack } from "../../lib/format";
 import { branchOps, fileLabel, isGap, laneClock, snapToBar, type BranchSide, type LaneClip, type LaneOp } from "../../lib/lanes";
 import { activeTrackDragIds, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
-import { usePointerTrackDrop } from "../../lib/pointerTrackDrop";
+import { usePointerSearchDrop, usePointerTrackDrop } from "../../lib/pointerTrackDrop";
+import { activeSearchDrag, finishSearchDrop, isSearchDownloadDrag, readSearchDrop, type ActiveSearchDrag } from "../../lib/searchDrag";
+import { useEditorDownloads } from "../../lib/editorDownloads";
+import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
 import { isSongTrack, songsOf, type LaneProject } from "../../stores/laneEditorStore";
 
@@ -56,6 +59,12 @@ function frameStep(seconds: number): number {
   return 120;
 }
 
+/** Whether a library drag holds nothing but projects. */
+function onlyProjects(ids: readonly number[]): boolean {
+  const byId = useLibraryStore.getState().summaryById;
+  return ids.length > 0 && ids.every(id => isProjectTrack(byId.get(id)?.format ?? ""));
+}
+
 /** What a library drag holds, read while it is still over the lanes: songs, or pictures. */
 function draggedKind(ids: readonly number[]): "song" | "picture" | null {
   const byId = useLibraryStore.getState().summaryById;
@@ -82,7 +91,22 @@ function ClipFrames({ trackId, clip, width }: { trackId: number; clip: LaneClip;
   </span>;
 }
 
-export function LaneBoard({ project, zoom, selected, select, playhead, seek, beatNear, edit, onDropped }: {
+/** Where an online song or video dropped on the lanes will go once downloaded, and how far along it is. */
+function PendingDownloads({ path, lane, span }: { path: string | null; lane: "song" | "main"; span: number }) {
+  const all = useEditorDownloads(state => state.pending);
+  const tasks = useDownloadStore(state => state.tasks);
+  const pending = all.filter(item => item.path === path && item.lane === lane);
+  return <>{pending.map(item => {
+    const task = tasks.get(item.task);
+    const progress = task ? Math.round(Math.min(1, Math.max(0, task.progress)) * 100) : 0;
+    return <span key={item.task} className="kd-lanes-pending"
+      style={{ left: pct(Math.min(item.at, span), span) }} title={`${item.title} · 下载好就放在这里`}>
+      {item.title}{task?.state === "done" ? "" : ` · ${progress}%`}
+    </span>;
+  })}</>;
+}
+
+export function LaneBoard({ project, zoom, selected, select, playhead, seek, beatNear, edit, onDropped, onSearchDropped }: {
   project: LaneProject; zoom: number; selected: string | null; select(id: string | null): void;
   /** Where the project is playing, or null when it is not the one loaded. */
   playhead: number | null; seek(t: number): void;
@@ -90,6 +114,8 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, bea
   beatNear(t: number): number;
   edit(ops: LaneOp[]): void;
   onDropped(ids: readonly number[], at: number): void;
+  /** An online song or video let go at `at`: downloaded, then put there. */
+  onSearchDropped(payload: ActiveSearchDrag, at: number): void;
 }) {
   const { doc, layout, grid } = project;
   const board = useRef<HTMLDivElement>(null);
@@ -317,25 +343,42 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, bea
     seek(timeAt(event.clientX));
   };
 
-  /** Where rows let go at `x` land: songs at a slot of the song lane, pictures at a time. */
-  const landing = (ids: readonly number[], x: number): { lane: "song" | "main"; at: number } => {
+  /** Where what is let go at `x` lands: songs at a slot of the song lane, pictures at a time. */
+  const landing = (ids: readonly number[], x: number, kind = draggedKind(ids)): { lane: "song" | "main"; at: number } => {
     const t = timeAt(x);
-    if (draggedKind(ids) === "song") {
+    if (kind === "song") {
       const index = songs.filter(s => s.at + s.length / 2 < t).length;
       const end = songs.length ? songs[songs.length - 1].at + songs[songs.length - 1].length : 0;
       return { lane: "song", at: songs[index]?.at ?? end };
     }
     return { lane: "main", at: vj ? snapToBar(downbeats, t) : t };
   };
-  const hoverRows = (ids: readonly number[], x: number) => setDrop(landing(ids, x));
+  const hoverRows = (ids: readonly number[], x: number) => setDrop(onlyProjects(ids) ? null : landing(ids, x));
   const dropRows = (ids: readonly number[], x: number) => {
     setDrop(null);
     if (ids.length) onDropped(ids, landing(ids, x).at);
   };
   usePointerTrackDrop(board, {
-    over: (ids, x) => { hoverRows(ids, x); return null; },
+    over: (ids, x) => {
+      // Projects open as pages of their own; they do not go into this one.
+      if (onlyProjects(ids)) { setDrop(null); return "打开工程"; }
+      hoverRows(ids, x);
+      return null;
+    },
     leave: () => setDrop(null),
     drop: (ids, x) => dropRows(ids, x),
+  });
+  // Online songs and videos: a song goes to the song lane, a video (its sound alone: a song) to the picture.
+  const searchKind = (payload: ActiveSearchDrag) => (payload.kind === "audio" || payload.request.audio_only ? "song" : "picture");
+  const dropSearch = (payload: ActiveSearchDrag, x: number) => {
+    setDrop(null);
+    const kind = searchKind(payload);
+    onSearchDropped(payload, landing([], x, kind).at);
+  };
+  usePointerSearchDrop(board, {
+    over: (payload, x) => { setDrop(landing([], x, searchKind(payload))); return "下载后放在这里"; },
+    leave: () => setDrop(null),
+    drop: (payload, x) => dropSearch(payload, x),
   });
 
   // The branch a drag is making or changing, drawn in the branch lane meanwhile.
@@ -365,18 +408,34 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, bea
       onPointerDown={scrubDown} onPointerMove={scrubMove} onPointerUp={scrubUp}
       onPointerCancel={() => { scrubRef.current = null; setScrub(null); }}
       onDragOver={event => {
-        if (!isTrackDrag(event)) return;
+        if (isTrackDrag(event)) {
+          event.preventDefault();
+          event.stopPropagation();
+          hoverRows(activeTrackDragIds(), event.clientX);
+          return;
+        }
+        if (!isSearchDownloadDrag(event)) return;
         event.preventDefault();
         event.stopPropagation();
-        hoverRows(activeTrackDragIds(), event.clientX);
+        const payload = activeSearchDrag();
+        setDrop(landing([], event.clientX, payload ? searchKind(payload) : "picture"));
       }}
       onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDrop(null); }}
       onDrop={event => {
-        if (!isTrackDrag(event)) return;
+        if (isTrackDrag(event)) {
+          event.preventDefault();
+          event.stopPropagation();
+          const ids = readTrackDragIds(event.dataTransfer);
+          dropRows(ids.length ? ids : activeTrackDragIds(), event.clientX);
+          return;
+        }
+        if (!isSearchDownloadDrag(event)) return;
         event.preventDefault();
         event.stopPropagation();
-        const ids = readTrackDragIds(event.dataTransfer);
-        dropRows(ids.length ? ids : activeTrackDragIds(), event.clientX);
+        const payload = readSearchDrop(event.dataTransfer);
+        finishSearchDrop();
+        if (payload) dropSearch(payload, event.clientX);
+        else setDrop(null);
       }}>
       <div className="kd-lanes-ruler">
         {beatTicks.map(at => <span key={`b${at}`} className="kd-lanes-beat" style={{ left: pct(at, span) }} />)}
@@ -434,6 +493,7 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, bea
             <span className="kd-lanes-clip-name">{fileLabel(item.src ?? "")}</span>
           </button>;
         })}
+        <PendingDownloads path={project.path || null} lane="main" span={span} />
       </div>
       <div className="kd-lanes-lane" data-lane="song" aria-label="歌" data-drop={drop?.lane === "song" || undefined}>
         {songs.map(song => {
@@ -445,6 +505,7 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, bea
             {fileLabel(song.src)}
           </button>;
         })}
+        <PendingDownloads path={project.path || null} lane="song" span={span} />
       </div>
       {head !== null && <span className="kd-lanes-playhead" style={{ left: pct(head, span) }} />}
       {drop && <span className="kd-lanes-drop" data-lane={drop.lane} style={{ left: pct(drop.at, span) }} />}

@@ -28,6 +28,7 @@ import {
 import type { SongSource, VideoDownloadRequest } from "../types";
 import { dragPreviewFromBlob, vinylDragPreview } from "./dragPreview";
 import { pointerAccepts } from "./dragRefusal";
+import { pointerSearchDropAt, type PointerSearchDrop } from "./pointerTrackDrop";
 import { firstSourceShareLink, formatShareText, writeShareLinkDrag } from "./shareLink";
 import { useSharePrefs } from "./sharePrefs";
 import { pointerDragGhost, setDragGhost, type PointerDragGhost } from "../components/common/dragGhost";
@@ -268,6 +269,8 @@ export function beginAudioPointerDrag(
     : Promise.resolve("");
   let dragging = false;
   let ghost: PointerDragGhost | null = null;
+  // A place of the app's own that takes search results (the editor), told when the pointer leaves it.
+  let place: PointerSearchDrop | null = null;
   const clearTargets = () => {
     document
       .querySelectorAll<HTMLElement>("[data-kd-pointer-search-over]")
@@ -288,8 +291,15 @@ export function beginAudioPointerDrag(
   };
   const paintTarget = (x: number, y: number) => {
     clearTargets();
+    const under = aiDropElementAt(x, y) ? null : pointerSearchDropAt(x, y);
+    if (place !== under) place?.leave();
+    place = under;
     if (paintAiOver(x, y)) {
       ghost?.hint("交给 AI");
+      return;
+    }
+    if (place) {
+      ghost?.hint(place.over(payload, x, y));
       return;
     }
     const deck = deckElementAt(x, y);
@@ -320,6 +330,8 @@ export function beginAudioPointerDrag(
     window.removeEventListener("pointerup", onUp, true);
     window.removeEventListener("pointercancel", onCancel, true);
     clearTargets();
+    place?.leave();
+    place = null;
     ghost?.remove();
     ghost = null;
     delete document.body.dataset.kdSearchPointerDragging;
@@ -372,12 +384,17 @@ export function beginAudioPointerDrag(
     const queue = searchQueueDropElementAt(up.clientX, up.clientY);
     const dest = searchDropPathAt(up.clientX, up.clientY);
     const ai = aiDropElementAt(up.clientX, up.clientY);
+    const taker = ai ? null : pointerSearchDropAt(up.clientX, up.clientY);
     cleanup();
     if (!dragging) return;
     up.preventDefault();
     finishSearchDrop();
     if (ai) {
       useAiStore.getState().attach(fromSearchDrag(payload));
+      return;
+    }
+    if (taker) {
+      taker.drop(payload, up.clientX, up.clientY);
       return;
     }
     if (deckSide !== null) {
@@ -420,6 +437,7 @@ export function beginVideoPointerDrag(
   const { pointerId, clientX: startX, clientY: startY } = down;
   let dragging = false;
   let ghost: PointerDragGhost | null = null;
+  let place: PointerSearchDrop | null = null;
   const payload: Extract<ActiveSearchDrag, { kind: "video" }> = {
     kind: "video",
     request,
@@ -435,8 +453,15 @@ export function beginVideoPointerDrag(
   };
   const paintTarget = (x: number, y: number) => {
     clearTargets();
+    const under = aiDropElementAt(x, y) ? null : pointerSearchDropAt(x, y);
+    if (place !== under) place?.leave();
+    place = under;
     if (paintAiOver(x, y)) {
       ghost?.hint("交给 AI");
+      return;
+    }
+    if (place) {
+      ghost?.hint(place.over(payload, x, y));
       return;
     }
     const queue = searchQueueDropElementAt(x, y);
@@ -454,6 +479,8 @@ export function beginVideoPointerDrag(
     window.removeEventListener("pointerup", onUp, true);
     window.removeEventListener("pointercancel", onCancel, true);
     clearTargets();
+    place?.leave();
+    place = null;
     ghost?.remove();
     ghost = null;
     delete document.body.dataset.kdSearchPointerDragging;
@@ -485,12 +512,17 @@ export function beginVideoPointerDrag(
     const queue = searchQueueDropElementAt(up.clientX, up.clientY);
     const dest = searchDropPathAt(up.clientX, up.clientY);
     const ai = aiDropElementAt(up.clientX, up.clientY);
+    const taker = ai ? null : pointerSearchDropAt(up.clientX, up.clientY);
     cleanup();
     if (!dragging) return;
     up.preventDefault();
     finishSearchDrop();
     if (ai) {
       useAiStore.getState().attach(fromSearchDrag(payload));
+      return;
+    }
+    if (taker) {
+      taker.drop(payload, up.clientX, up.clientY);
       return;
     }
     const action = queue
