@@ -76,6 +76,8 @@ pub enum Op {
     RemoveSong { index: usize },
     /// The song at `from` to the place `to` in the order of the song lane.
     MoveSong { from: usize, to: usize },
+    /// A song's other fields: volume.
+    SetSong { index: usize, fields: Map<String, Value> },
 }
 
 /// The songs of the song lane in order: `songs`, or the one `song` a project of one song has.
@@ -220,6 +222,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::AddSong { .. } => "add_song",
         Op::RemoveSong { .. } => "remove_song",
         Op::MoveSong { .. } => "move_song",
+        Op::SetSong { .. } => "set_song",
     }
 }
 
@@ -446,6 +449,21 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
             songs.insert(*to, song);
             put_songs(doc, songs)?;
         }
+        Op::SetSong { index, fields } => {
+            let mut songs = songs_of(doc);
+            let song = songs.get_mut(*index)
+                .with_context(|| format!("歌曲行没有第 {} 首", index + 1))?;
+            for (key, value) in fields {
+                if key != "volume" {
+                    bail!("歌只能改 volume，不能改「{key}」")
+                }
+                if !value.as_f64().is_some_and(|v| (0. ..=2.).contains(&v)) {
+                    bail!("volume 要在 0–2 之间")
+                }
+                song[key] = value.clone();
+            }
+            put_songs(doc, songs)?;
+        }
     }
     Ok(())
 }
@@ -574,6 +592,9 @@ mod tests {
         assert_eq!(placed["songs"][2]["at"], json!(90.));
         let moved = apply(&doc, &ops(r#"[{"op":"move_song","from":2,"to":0}]"#)).unwrap();
         assert_eq!(moved["songs"][0]["src"], json!("/t.flac"));
+        let louder = apply(&doc, &ops(r#"[{"op":"set_song","index":1,"fields":{"volume":1.5}}]"#)).unwrap();
+        assert_eq!(louder["songs"][1]["volume"], json!(1.5));
+        assert!(apply(&doc, &ops(r#"[{"op":"set_song","index":1,"fields":{"src":"/x.flac"}}]"#)).is_err());
         let one = apply(&doc, &ops(r#"[{"op":"remove_song","index":0},{"op":"remove_song","index":1}]"#)).unwrap();
         assert!(one.get("songs").is_none(), "{one}");
         assert_eq!(one["song"]["src"], json!("/s.flac"), "one song is written as before");
