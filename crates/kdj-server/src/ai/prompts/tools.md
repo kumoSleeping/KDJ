@@ -21,13 +21,13 @@ KDJ 的状态：各平台登录状态与登录方式、本机浏览器、账号�
 
 ## kdj_download
 
-立即下载 kdj_search 给出的 ref（或链接），用户能在下载栏看到，全部结束才返回路径和 track_id。视频默认按 1080p 下载（height 可改）；没有 1080p 时自动取最接近的较低画质（通常 720p），返回里每个视频带 height，画质低于要的会有 note：照常使用，在给用户的报告里写明。
+立即下载 kdj_search 给出的 ref（或链接），用户能在下载栏看到，全部结束才返回路径和 track_id。用户未指定音质或分辨率时，先读 kdj_status 的 download.quality 和 download.video_max_height，显式传入对应的 quality 或 height，使用用户设置的默认值；没有目标画质时自动取最接近的较低画质，返回里每个视频带 height，画质低于要的会有 note：照常使用，在给用户的报告里写明。
 
 ### 参数
 
 - `to`：目标文件夹的绝对路径，须在曲库根目录内；默认下载文件夹
 - `as`：视频只要音轨（audio）或保留画面（video，默认）
-- `height`：视频最高画面高度，默认 1080
+- `height`：视频最高画面高度；用户未指定时传入 kdj_status 的 download.video_max_height（省略参数的工具兜底是 1080，不代表用户设置）
 
 ## kdj_folders
 

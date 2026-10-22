@@ -29,7 +29,9 @@ import type { Platform } from "../../types";
 import { VinylPlaceholder } from "../common/VinylPlaceholder";
 import { PLATFORM_LABEL } from "../download/MergedGroupRow";
 import { PlatformMark } from "../download/PlatformMark";
-import { dismissTask, showTask } from "../tasks/taskBubbleStore";
+import { dismissTask, showTask, updateTask } from "../tasks/taskBubbleStore";
+import { emptyTrace, reduceAiTrace } from "../../lib/aiTrace";
+import { AiTaskTrace } from "./AiTaskTrace";
 import { useAiStore, type AiRun } from "../../stores/aiStore";
 import { PlanBody, PlanText, type PlanMedia } from "./AiMarkup";
 import "./AiAsk.css";
@@ -423,6 +425,7 @@ function closingReply(text: string) {
   const reply = text.trim();
   if (!reply) return;
   updateRun(run => ({ ...run, reply }));
+  if (mainTask) return;
   const short = reply.length <= SHORT_MESSAGE && !reply.includes("\n") && !/[*`#|>\[~]/.test(reply);
   showTask({
     id: "ai-reply",
@@ -474,6 +477,8 @@ function drawMain() {
     icon: task.working ? <LoaderCircle size={16} className="kd-spin" aria-hidden="true" /> : AI_MARK,
     stay: 0,
     controls: <TaskText task={task} />,
+    body: <AiTaskTrace />,
+    resizable: true,
     // The task stays in sight until it ends: it cannot be put away, only stopped with its key.
     held: true,
     actions: [{
@@ -481,8 +486,11 @@ function drawMain() {
       label: task.working ? "停止任务" : "撤销",
       icon: task.working ? <Square size={13} aria-hidden="true" /> : <Undo2 size={14} aria-hidden="true" />,
       onSelect: () => {
-        dismissTask(`ai-task:${task.id}`, "caller");
-        stopTask();
+        if (task.working) void useAiStore.getState().abort();
+        else {
+          dismissTask(`ai-task:${task.id}`, "caller");
+          stopTask();
+        }
       },
     }],
   });
@@ -507,7 +515,7 @@ function updateRun(change: (run: AiRun) => AiRun) {
   if (run) useAiStore.setState({ run: change(run) });
 }
 function startRun(line: UserLine, supplements: string[] = [], resumed?: string) {
-  useAiStore.setState({ run: { request: line.text, attached: line.attached, supplements, steps: [], resumed } });
+  useAiStore.setState({ run: { request: line.text, attached: line.attached, supplements, steps: [], trace: emptyTrace(), resumed } });
 }
 
 /** The listener sent a request: a task of its own, or a supplement to the one under way. */
@@ -560,8 +568,20 @@ function userText(message: Fields): string {
   return Array.isArray(content) ? content.map(block => fields(block).type === "text" ? str(fields(block).text) : "").join("") : "";
 }
 
+function finishMain(title: string) {
+  if (!mainTask) return;
+  updateTask(`ai-task:${mainTask.id}`, {
+    title, held: false, actions: [], icon: AI_MARK,
+    body: <AiTaskTrace snapshot={useAiStore.getState().run?.trace ?? emptyTrace()} />,
+  });
+}
+
 /** Everything the window does for one line of pi's stream. */
 export function handlePiEvent(event: PiEvent) {
+  updateRun(run => {
+    const trace = reduceAiTrace(run.trace ?? emptyTrace(), event);
+    return trace === run.trace ? run : { ...run, trace };
+  });
   switch (event.type) {
     case "agent_start":
       if (!mainTask?.working) {
@@ -663,8 +683,9 @@ export function handlePiEvent(event: PiEvent) {
       calls.clear();
       askDialogs.clear();
       askEarly.clear();
-      // The task is done, and leaves. A line still waiting becomes the next task.
-      if (mainTask) dismissTask(`ai-task:${mainTask.id}`, "caller");
+      closingReply(lastReply);
+      finishMain(lastReply ? "已完成" : "已结束");
+      lastReply = "";
       mainTask = null;
       if (waiting.length > 0) {
         const [first, ...rest] = waiting;
@@ -676,8 +697,6 @@ export function handlePiEvent(event: PiEvent) {
       } else {
         // Nothing follows: the AI's closing words come up, and the window goes back to where the
         // listener was, if they left it be.
-        closingReply(lastReply);
-        lastReply = "";
         aiTaskEnded();
       }
       return;
@@ -687,7 +706,7 @@ export function handlePiEvent(event: PiEvent) {
       calls.clear();
       askDialogs.clear();
       askEarly.clear();
-      if (mainTask) dismissTask(`ai-task:${mainTask.id}`, "caller");
+      finishMain("任务中断");
       for (const line of waiting) dismissTask(`ai-task:${line.id}`, "caller");
       mainTask = null;
       waiting = [];
