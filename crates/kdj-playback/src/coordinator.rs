@@ -653,6 +653,7 @@ impl TransportWaveformObserver {
 
 pub struct PlaybackCoordinator {
     sender: Sender<Request>,
+    pulse: Arc<ActorPulse>,
     next_command_id: AtomicU64,
     waveform_cache: Mutex<Option<CachedPlaybackWaveform>>,
 }
@@ -686,16 +687,25 @@ impl PlaybackCoordinator {
         let (sender, receiver) = mpsc::channel();
         let actor_sender = sender.clone();
         let emitter: StateEmitter = Arc::new(emit);
+        let pulse = Arc::new(ActorPulse::new());
+        let actor_pulse = pulse.clone();
         std::thread::Builder::new()
             .name("kdj-playback-coordinator".into())
             .spawn(move || {
                 let mut actor = Actor::new(actor_sender, receiver, emitter, output_factory);
                 actor.output_allowed = allowed;
+                actor.pulse = actor_pulse;
                 actor.run();
             })
             .map_err(|error| format!("启动播放协调器失败：{error}"))?;
+        let watched = Arc::downgrade(&pulse);
+        // The watcher only reads the pulse; without it the coordinator plays the same.
+        let _ = std::thread::Builder::new()
+            .name("kdj-playback-watch".into())
+            .spawn(move || watch_actor(watched));
         Ok(Self {
             sender,
+            pulse,
             next_command_id: AtomicU64::new(1),
             waveform_cache: Mutex::new(None),
         })
@@ -739,7 +749,7 @@ impl PlaybackCoordinator {
             .map_err(|_| "播放协调器已经退出".to_string())?;
         response
             .recv_timeout(ACK_TIMEOUT)
-            .map_err(|_| "播放协调器没有及时确认命令".to_string())?
+            .map_err(|_| self.pulse.describe("播放协调器没有及时确认命令"))?
     }
 
     /// Platform media keys are an independent command source. They must not consume or collide
@@ -751,7 +761,7 @@ impl PlaybackCoordinator {
             .map_err(|_| "播放协调器已经退出".to_string())?;
         response
             .recv_timeout(ACK_TIMEOUT)
-            .map_err(|_| "播放协调器没有及时确认系统媒体命令".to_string())?
+            .map_err(|_| self.pulse.describe("播放协调器没有及时确认系统媒体命令"))?
     }
 
     /// High-frequency UI controls acknowledge only ordering. State already travels on the bounded
@@ -763,7 +773,7 @@ impl PlaybackCoordinator {
             .map_err(|_| "播放协调器已经退出".to_string())?;
         response
             .recv_timeout(ACK_TIMEOUT)
-            .map_err(|_| "播放协调器没有及时确认实时控制".to_string())?
+            .map_err(|_| self.pulse.describe("播放协调器没有及时确认实时控制"))?
     }
 
     /// 订阅高频轻量电平事件（~30Hz），供表桥直接驱动电平表，绕开全量快照的 10Hz 节奏。
@@ -783,7 +793,7 @@ impl PlaybackCoordinator {
             .map_err(|_| "播放协调器已经退出".to_string())?;
         response
             .recv_timeout(ACK_TIMEOUT)
-            .map_err(|_| "播放协调器没有及时返回状态".to_string())
+            .map_err(|_| self.pulse.describe("播放协调器没有及时返回状态"))
     }
 
     /// Build the Manager's local detail rail from PCM that the playback scratch cache has already
@@ -805,7 +815,7 @@ impl PlaybackCoordinator {
             .map_err(|_| "播放协调器已经退出".to_string())?;
         let Some(source) = response
             .recv_timeout(ACK_TIMEOUT)
-            .map_err(|_| "播放协调器没有及时返回局部波形来源".to_string())?
+            .map_err(|_| self.pulse.describe("播放协调器没有及时返回局部波形来源"))?
         else {
             return Ok(None);
         };
@@ -1036,6 +1046,113 @@ impl PlaybackCoordinator {
 impl Drop for PlaybackCoordinator {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// What the actor is doing, for the watcher thread and for a caller whose reply is late: the
+/// step, the command it is handling, and when that began. Atomics only on the hot path; the
+/// command's name is written once per command, never its contents (a source can carry a path).
+struct ActorPulse {
+    epoch: Instant,
+    /// Milliseconds since `epoch` at which the current step began, plus one; 0 while waiting.
+    since: AtomicU64,
+    step: AtomicUsize,
+    command: Mutex<String>,
+}
+
+/// A step that takes longer than this is reported once, with what it was, and again when it ends.
+const STALL_REPORT_AFTER: Duration = Duration::from_secs(1);
+const STALL_WATCH_EVERY: Duration = Duration::from_millis(250);
+
+const PULSE_STEPS: [&str; 22] = [
+    "等待请求", "处理命令", "处理系统媒体命令", "处理实时控制", "返回状态", "提供局部波形来源",
+    "接收解码结束", "处理设备错误", "处理输出许可", "订阅", "退出", "释放微调", "激活待播流",
+    "释放空闲分轨", "读取音频回调", "交接搓碟", "更新同步", "发布电平", "发布时钟",
+    "发布音频压力", "保护分轨", "发布状态",
+];
+
+impl ActorPulse {
+    fn new() -> Self {
+        Self { epoch: Instant::now(), since: AtomicU64::new(0), step: AtomicUsize::new(0), command: Mutex::new(String::new()) }
+    }
+
+    fn begin(&self, step: usize) {
+        self.step.store(step, Ordering::Relaxed);
+        self.since.store(self.epoch.elapsed().as_millis() as u64 + 1, Ordering::Release);
+    }
+
+    fn idle(&self) {
+        self.since.store(0, Ordering::Release);
+    }
+
+    fn begin_command(&self, step: usize, command: &PlaybackCommand) {
+        if let Ok(mut name) = self.command.try_lock() {
+            name.clear();
+            let _ = std::fmt::write(&mut VariantName(&mut name), format_args!("{command:?}"));
+        }
+        self.begin(step);
+    }
+
+    /// `(since, what, elapsed)` while a step is under way.
+    fn current(&self) -> Option<(u64, String, Duration)> {
+        let since = self.since.load(Ordering::Acquire);
+        if since == 0 {
+            return None;
+        }
+        let step = self.step.load(Ordering::Relaxed);
+        let mut what = PULSE_STEPS.get(step).copied().unwrap_or("未知步骤").to_string();
+        if (1..=3).contains(&step) {
+            if let Ok(name) = self.command.try_lock() {
+                what = format!("{what} {name}");
+            }
+        }
+        let elapsed = self.epoch.elapsed().saturating_sub(Duration::from_millis(since - 1));
+        Some((since, what, elapsed))
+    }
+
+    /// For a reply that came too late: what the actor was busy with.
+    fn describe(&self, late: &str) -> String {
+        match self.current() {
+            Some((_, what, elapsed)) => format!("{late}（正在{what}，已 {} ms）", elapsed.as_millis()),
+            None => late.to_string(),
+        }
+    }
+}
+
+/// Keeps only the enum variant's name out of a command's `Debug` text, and stops it there.
+struct VariantName<'a>(&'a mut String);
+impl std::fmt::Write for VariantName<'_> {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        for c in text.chars() {
+            if !(c.is_ascii_alphanumeric() || c == '_') || self.0.len() >= 40 {
+                return Err(std::fmt::Error);
+            }
+            self.0.push(c);
+        }
+        Ok(())
+    }
+}
+
+/// Reports a step of the actor that runs past `STALL_REPORT_AFTER`, once, and when it ends.
+fn watch_actor(pulse: Weak<ActorPulse>) {
+    let mut reported: Option<(u64, String)> = None;
+    loop {
+        std::thread::sleep(STALL_WATCH_EVERY);
+        let Some(pulse) = pulse.upgrade() else { return };
+        let current = pulse.current();
+        if let Some((since, what)) = &reported {
+            if current.as_ref().is_none_or(|(now, _, _)| now != since) {
+                let took = pulse.epoch.elapsed().saturating_sub(Duration::from_millis(since - 1));
+                tracing::warn!(step = %what, took_ms = took.as_millis() as u64, "播放协调器的一步结束，前后约 {} ms", took.as_millis());
+                reported = None;
+            }
+        }
+        if let Some((since, what, elapsed)) = current {
+            if elapsed >= STALL_REPORT_AFTER && reported.is_none() {
+                tracing::warn!(step = %what, elapsed_ms = elapsed.as_millis() as u64, "播放协调器的一步已超过 1 秒还没结束");
+                reported = Some((since, what));
+            }
+        }
     }
 }
 
@@ -1312,6 +1429,7 @@ struct PendingAudioHandoff {
 struct Actor {
     sender: Sender<Request>,
     receiver: Receiver<Request>,
+    pulse: Arc<ActorPulse>,
     emit: StateEmitter,
     output_factory: Arc<dyn PlaybackOutputFactory>,
     player: Option<Box<dyn PlaybackOutput>>,
@@ -1382,6 +1500,7 @@ impl Actor {
         let mut actor = Self {
             sender,
             receiver,
+            pulse: Arc::new(ActorPulse::new()),
             emit,
             output_factory,
             player: None,
@@ -1445,24 +1564,51 @@ impl Actor {
             } else {
                 ACTOR_TICK
             };
+            self.pulse.idle();
             match self.receiver.recv_timeout(tick) {
-                Ok(request) => self.handle(request),
+                Ok(request) => {
+                    match &request {
+                        Request::Command { command, .. } => self.pulse.begin_command(1, command),
+                        Request::PlatformCommand { command, .. } => self.pulse.begin_command(2, command),
+                        Request::ControlCommand { command, .. } => self.pulse.begin_command(3, command),
+                        Request::State { .. } => self.pulse.begin(4),
+                        Request::WaveformSource { .. } => self.pulse.begin(5),
+                        Request::WorkerFinished { .. } => self.pulse.begin(6),
+                        Request::DeviceError(_) => self.pulse.begin(7),
+                        Request::OutputPermission { .. } => self.pulse.begin(8),
+                        Request::SubscribeLevels(_) | Request::SubscribeClock(_) => self.pulse.begin(9),
+                        Request::Shutdown => self.pulse.begin(10),
+                    }
+                    self.handle(request);
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
+            self.pulse.begin(11);
             self.release_expired_jog_nudges();
+            self.pulse.begin(12);
             self.promote_ready_streams();
+            self.pulse.begin(13);
             self.release_stem_pool_if_idle();
+            self.pulse.begin(14);
             self.refresh_from_audio();
+            self.pulse.begin(15);
             self.handoff_settled_scratch_coasts();
+            self.pulse.begin(16);
             self.update_sync_snapshot();
+            self.pulse.begin(17);
             self.publish_levels();
+            self.pulse.begin(18);
             self.publish_clock();
+            self.pulse.begin(19);
             self.publish_audio_pressure();
+            self.pulse.begin(20);
             self.protect_audio_from_stem_underrun();
             self.retry_interrupted_stems();
+            self.pulse.begin(21);
             self.publish(false);
         }
+        self.pulse.idle();
         self.invalidate(DeckId::A);
         self.invalidate(DeckId::B);
         self.player.take();
@@ -11163,5 +11309,28 @@ mod tests {
             .expect("后续前端命令");
         assert_eq!(frontend.snapshot.last_command_id, 8);
         assert!((frontend.snapshot.volume - 0.9).abs() < 0.001);
+    }
+}
+
+#[cfg(test)]
+mod pulse_tests {
+    use super::*;
+
+    #[test]
+    fn a_late_reply_names_the_step_and_the_command_but_never_its_contents() {
+        let pulse = ActorPulse::new();
+        assert_eq!(pulse.describe("播放协调器没有及时返回状态"), "播放协调器没有及时返回状态");
+        let source: PlaybackSource = serde_json::from_value(serde_json::json!({
+            "trackId": 7, "path": "/Users/someone/Music/private.flac",
+        }))
+        .expect("a source");
+        pulse.begin_command(1, &PlaybackCommand::Load { source, master_volume: None });
+        let late = pulse.describe("播放协调器没有及时返回状态");
+        assert!(late.starts_with("播放协调器没有及时返回状态（正在处理命令 Load，已 "), "{late}");
+        assert!(!late.contains("private"), "{late}");
+        pulse.begin(12);
+        assert!(pulse.describe("x").starts_with("x（正在激活待播流，已 "));
+        pulse.idle();
+        assert!(pulse.current().is_none());
     }
 }
