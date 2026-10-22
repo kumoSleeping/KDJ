@@ -17,7 +17,7 @@ test("the pointer demos play every scene, survive a change of scene mid-loop, an
   const { SearchTipsPanel } = await import("../src/components/download/SearchTipsPanel");
   const { useTipsPage, tipsPages } = await import("../src/lib/tipsPages");
   const root = createRoot(document.getElementById("root")!);
-  const scenes = ["search", "pick-range", "pick-toggle", "drag-in", "viz-tune", "pip", "player-keys", "menu-toss", "multi-copy", "add-folder", "analyze", "platforms", "kind-switch", "sidebar-online", "viz-export", "mini-player"] as const;
+  const scenes = ["search", "pick-range", "pick-toggle", "drag-in", "viz-tune", "pip", "player-keys", "menu-toss", "multi-copy", "add-folder", "analyze", "platforms", "kind-switch", "sidebar-online", "viz-export", "mini-player", "login", "cookie-export"] as const;
   try {
     // The same element changes scene while it is deep in the longest scene's beats: the place it
     // was at does not exist in a shorter scene (this crashed the tips drawer once).
@@ -35,10 +35,28 @@ test("the pointer demos play every scene, survive a change of scene mid-loop, an
       await act(async () => useTipsPage.getState().setPage(page.id));
       await act(async () => root.render(createElement(SearchTipsPanel)));
       assert.ok(document.querySelector(".kd-tips-panel"), `${page.id} page`);
-      assert.ok(document.querySelector("svg.kd-demo"), `${page.id} has a picture`);
+      // The AI page is steps to follow, not pictures.
+      if (page.id !== "ai") assert.ok(document.querySelector("svg.kd-demo"), `${page.id} has a picture`);
     }
     await act(async () => root.render(createElement(SearchTipsPanel, { stacked: true })));
     assert.equal(document.querySelectorAll(".kd-tips-panel section").length, tipsPages.length);
+    // Under reduced motion each picture is its still beat, from the first frame: a still beat
+    // past the scene's last one took the whole window down from the 曲库 tips page once.
+    const still = dom.window.matchMedia;
+    dom.window.matchMedia = ((query: string) => ({ matches: query.includes("reduce"), media: query })) as typeof still;
+    try {
+      for (const scene of scenes) {
+        await act(async () => root.render(createElement("div", { key: scene }, createElement(PointerDemo, { scene, label: scene }))));
+        assert.ok(document.querySelector(`svg.kd-demo[data-scene="${scene}"]`), `${scene} draws still`);
+      }
+      for (const page of tipsPages) {
+        await act(async () => useTipsPage.getState().setPage(page.id));
+        await act(async () => root.render(createElement("div", { key: `still-${page.id}` }, createElement(SearchTipsPanel))));
+        assert.ok(document.querySelector(".kd-tips-panel"), `${page.id} page draws still`);
+      }
+    } finally {
+      dom.window.matchMedia = still;
+    }
   } finally {
     await act(async () => root.unmount());
     dom.window.close();

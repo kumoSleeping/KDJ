@@ -218,7 +218,7 @@ const SCENES: Record<PointerDemoScene, Scene> = {
     ],
   },
   analyze: {
-    rest: 4,
+    rest: 3,
     beats: [
       { move: 0, stay: 900, cursor: AWAY, analysis: 0 },
       { move: 0, stay: 1100, cursor: AWAY, analysis: 1 },
@@ -384,7 +384,9 @@ export function PointerDemo({ scene, label, tray = "download", onLoop }: {
   const [still] = useState(prefersReducedMotion);
   const loop = useRef(onLoop);
   loop.current = onLoop;
-  const { beats, rest } = SCENES[scene];
+  const { beats } = SCENES[scene];
+  // The still picture is one of the scene's own beats, whatever a scene's `rest` says.
+  const rest = Math.min(SCENES[scene].rest, beats.length - 1);
   const [place, setPlace] = useState({ scene, at: still ? rest : 0 });
   // A scene has its own number of beats: a place that belongs to another scene starts over.
   const at = place.scene === scene && place.at < beats.length ? place.at : still ? rest : 0;
