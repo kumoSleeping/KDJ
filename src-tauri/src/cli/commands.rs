@@ -108,6 +108,10 @@ fn run_inner(cli: Cli) -> Result<()> {
         Commands::Project { command } => match command {
             ProjectCmd::Check { path } => http.post_json_long("/api/kdjv/check", &json!({ "path": absolute(&path) }))?,
             ProjectCmd::Render { path } => project_render(&http, &path)?,
+            ProjectCmd::Edit { path, ops, create } => {
+                let ops: Value = serde_json::from_str(&ops).map_err(|error| CliError::new("usage", format!("--ops 不是有效的 JSON：{error}")))?;
+                http.post_json_long("/api/kdjv/edit", &json!({ "path": absolute(&path), "ops": ops, "create": create }))?
+            }
         },
         Commands::Visualizer { command } => match command {
             VisualizerCmd::Render { id, out, width, height } => http.post_json_long(
@@ -722,6 +726,7 @@ mod tests {
                 "kdj library add <PATH>",
                 "kdj project check <PATH>",
                 "kdj project render <PATH>",
+                "kdj project edit <PATH>",
                 "kdj visualizer render <ID>",
             ]
         );

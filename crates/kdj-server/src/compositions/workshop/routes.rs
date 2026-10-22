@@ -13,6 +13,7 @@ use serde::Deserialize;
 pub fn router(manager: Arc<Workshop>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/kdjv/check", post(kdjv_check))
+        .route("/api/kdjv/edit", post(kdjv_edit))
         .route("/api/kdjv/preview", post(kdjv_preview))
         .route("/api/kdjv/source/{track_id}/{n}", get(kdjv_source))
         .route("/api/kdjv/render", post(kdjv_render))
@@ -41,6 +42,23 @@ fn kdjv_file(m: &Workshop, target: &KdjvTarget) -> Result<(std::path::PathBuf, O
         bail!("不是 .kdjv 工程：{}", path.display())
     }
     Ok((path, track_id))
+}
+/// Edits of a format 2 project (lanes.rs), by its path or library row.
+#[derive(Deserialize)]
+struct KdjvEdit {
+    #[serde(flatten)]
+    target: KdjvTarget,
+    ops: Vec<super::lanes::Op>,
+    #[serde(default)]
+    create: bool,
+}
+async fn kdjv_edit(
+    Extension(m): Extension<Arc<Workshop>>,
+    Json(edit): Json<KdjvEdit>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (file, _) = kdjv_file(&m, &edit.target)?;
+    let cancel = CancellationToken::new();
+    Ok(Json(m.kdjv_edit(&file, &edit.ops, edit.create, &cancel).await?))
 }
 async fn kdjv_check(
     Extension(m): Extension<Arc<Workshop>>,

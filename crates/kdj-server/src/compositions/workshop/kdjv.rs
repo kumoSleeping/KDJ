@@ -705,8 +705,12 @@ impl Workshop {
     /// The project a `.kdjv` file describes, with every source opened and checked.
     async fn kdjv_project(&self, file: &Path, cancel: &CancellationToken) -> Result<CompositionProject> {
         let text = tokio::fs::read_to_string(file).await.with_context(|| format!("无法读取工程：{}", file.display()))?;
-        let doc = parse(&text)?;
-        let base = file.parent().unwrap_or(Path::new("."));
+        Self::kdjv_project_text(&text, file.parent().unwrap_or(Path::new(".")), cancel).await
+    }
+
+    /// The project a document describes as if saved in `base`, with every source opened and checked.
+    async fn kdjv_project_text(text: &str, base: &Path, cancel: &CancellationToken) -> Result<CompositionProject> {
+        let doc = parse(text)?;
         let mut probed = HashMap::new();
         for path in doc.sources(base) {
             check(cancel)?;
@@ -714,6 +718,36 @@ impl Workshop {
             probed.insert(path, found);
         }
         project(&doc, base, &probed)
+    }
+
+    /// The editor's and the AI's edits of a format 2 project (lanes.rs): the operations applied in
+    /// order, the result opened as playing it would (every source checked) and only then written,
+    /// whole, in place of the file. `create` starts a file that is not there yet. Answers the
+    /// document and where everything in it is.
+    pub async fn kdjv_edit(&self, file: &Path, ops: &[super::lanes::Op], create: bool, cancel: &CancellationToken) -> Result<serde_json::Value> {
+        let before: serde_json::Value = match tokio::fs::read_to_string(file).await {
+            Ok(text) => serde_json::from_str(&text).context("工程不是有效的 JSON")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => serde_json::json!({ "kdjv": LANES }),
+            Err(error) => return Err(error).with_context(|| format!("无法读取工程：{}", file.display())),
+        };
+        if before.get("kdjv").and_then(|v| v.as_u64()) != Some(LANES) {
+            bail!("只有格式 2 的工程（编辑器的两条线）能用剪辑操作改；这个是格式 {}", before.get("kdjv").map_or("?".into(), |v| v.to_string()))
+        }
+        let after = super::lanes::apply(&before, ops)?;
+        let text = serde_json::to_string_pretty(&after)?;
+        let base = file.parent().filter(|dir| dir.is_dir()).with_context(|| format!("文件夹不存在：{}", file.display()))?;
+        // A draft with nothing in it yet is kept as it is; anything else has to play.
+        let empty = after["main"].as_array().is_none_or(|main| main.is_empty()) && after.get("song").is_none_or(|song| song.is_null());
+        let duration = if empty { 0. } else { Self::kdjv_project_text(&text, base, cancel).await?.duration() / 1000. };
+        let temporary = file.with_extension(format!("{EXTENSION}.{}.tmp", std::process::id()));
+        tokio::fs::write(&temporary, format!("{text}\n")).await?;
+        tokio::fs::rename(&temporary, file).await?;
+        // The row is there at once (a new project) and reads its new length and title (an edit),
+        // without waiting for the folder watcher.
+        let track_id = self.state.library.upsert_file(file, "local", "").ok();
+        Ok(serde_json::json!({
+            "path": file, "track_id": track_id, "document": after, "layout": super::lanes::layout(&after), "duration": duration,
+        }))
     }
 
     /// The project's sound alone, keyed like its render but by what is heard only.

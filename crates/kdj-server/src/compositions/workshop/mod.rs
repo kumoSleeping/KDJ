@@ -3,6 +3,7 @@
 //! file, and the cache can be thrown away.
 mod frames;
 pub mod kdjv;
+pub mod lanes;
 mod render;
 pub mod routes;
 use super::media;
