@@ -1,5 +1,5 @@
 /**
- * The part of the playing song the listener marked: Shift + drag on the player's waveform
+ * The part of the playing song the listener marked: ⌘ / Ctrl + drag on the player's waveform
  * (Waveform.tsx). While it is set, playing stays inside it — at its end the player goes back to
  * its start (PlayerBar), and the video follows through the shared seek path. It is also what a
  * song dragged into Agent Mode carries as its time ("1:23–1:41").

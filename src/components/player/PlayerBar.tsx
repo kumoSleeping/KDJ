@@ -484,7 +484,7 @@ const showEqNotice = (text: string) => {
 
 /** A cover that is already loaded when its record appears (fetched during the exit) arrives with it. */
 /**
- * Shift + drag on the waveform holds playing in a range (playRange.ts): when the position the
+ * ⌘ / Ctrl + drag on the waveform holds playing in a range (playRange.ts): when the position the
  * player reports has reached its end, playing goes back to its start through the ordinary seek
  * (so the video follows). One wrap at a time: the next waits until the position is back inside.
  */

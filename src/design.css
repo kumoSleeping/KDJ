@@ -3625,7 +3625,7 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-wave-cue-loop[data-active="true"] {
   background: color-mix(in srgb, var(--kd-cue-color) 38%, transparent);
 }
-/* The range playing is held in (Shift + drag on the waveform, src/lib/playRange.ts): a wash of
+/* The range playing is held in (⌘ / Ctrl + drag on the waveform, src/lib/playRange.ts): a wash of
    ink over the bars, lighter while it is still being drawn. */
 .kd-wave-range {
   position: absolute;

@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { getBridge } from "../../lib/bridge";
 import type { CuePoint, Track, Waveform as WaveformData } from "../../types";
 import {
   PERFORMANCE_WAVEFORM_BAKE_SCREENS,
@@ -352,7 +353,7 @@ export function Waveform({
   } | null>(null);
   const customSeekRef = useRef(onSeek);
   const draggingRef = useRef(false);
-  // Shift + drag: where the range began, the range while it is drawn, and the range held (playRange.ts).
+  // ⌘ (Ctrl off the Mac) + drag: where the range began, the range while it is drawn, and the range held (playRange.ts).
   const rangeAnchorRef = useRef<number | null>(null);
   const [rangeDraft, setRangeDraft] = useState<{ start: number; end: number } | null>(null);
   const heldRange = usePlayRange((state) => (state.range?.trackId === trackId ? state.range : null));
@@ -1542,7 +1543,7 @@ export function Waveform({
         loopLength={overlay.loopLength}
       />
 
-      {/* The range playing is held in (Shift + drag, playRange.ts): a band of ink. */}
+      {/* The range playing is held in (⌘ / Ctrl + drag, playRange.ts): a band of ink. */}
       {shownRange && overlay.total > 0 && (
         <span
           className="kd-wave-range"
@@ -1670,8 +1671,9 @@ export function Waveform({
               event.preventDefault();
               return;
             }
-            // Shift + drag marks a range to play in (playRange.ts) instead of moving the playhead.
-            if (event.shiftKey) {
+            // ⌘ + drag (Ctrl + drag off the Mac, where Ctrl + click is a right click) marks a range to
+            // play in (playRange.ts) instead of moving the playhead.
+            if (getBridge().platform === "darwin" ? event.metaKey : event.ctrlKey) {
               event.preventDefault();
               try {
                 event.currentTarget.setPointerCapture(event.pointerId);
