@@ -60,7 +60,11 @@ export function heldClips(project: KdjvLive, t: number, showing: (n: number) => 
 export function clipBox(project: KdjvLive, c: LiveClip) {
   const s = project.sources[c.source];
   const W = project.width, H = project.height;
-  const fw = Math.max(1, s?.width || W), fh = Math.max(1, s?.height || H);
+  // A crop: what is left is placed as the whole picture would be (render.rs, keep_position off);
+  // the element stays the whole frame, larger than that box and clipped to it.
+  const [l, t, r, b] = c.crop ?? [0, 0, 0, 0];
+  const keepX = Math.max(0.01, 1 - l - r), keepY = Math.max(0.01, 1 - t - b);
+  const fw = Math.max(1, s?.width || W) * keepX, fh = Math.max(1, s?.height || H) * keepY;
   const fit = c.fill ? Math.max(W, H * fw / fh) : Math.min(W, H * fw / fh);
   const w = fit * c.scale, h = w * fh / fw;
   const axis = (center: number, canvas: number, size: number) => {
@@ -69,7 +73,13 @@ export function clipBox(project: KdjvLive, c: LiveClip) {
       ? Math.max(Math.min(0, canvas - size), Math.min(Math.max(0, canvas - size), at))
       : Math.max(0, Math.min(canvas - size, at));
   };
-  return { left: axis(c.x, W, w) / W * 100, top: axis(c.y, H, h) / H * 100, width: w / W * 100, height: h / H * 100 };
+  const left = axis(c.x, W, w), top = axis(c.y, H, h);
+  const full = { width: w / keepX, height: h / keepY };
+  return {
+    left: (left - l * full.width) / W * 100, top: (top - t * full.height) / H * 100,
+    width: full.width / W * 100, height: full.height / H * 100,
+    ...(l || t || r || b ? { clip: `inset(${t * 100}% ${r * 100}% ${b * 100}% ${l * 100}%)` } : {}),
+  } as { left: number; top: number; width: number; height: number; clip?: string };
 }
 
 /** Opacity at `local` seconds into the clip: its own, under smoothstep fades. */

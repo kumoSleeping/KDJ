@@ -20,10 +20,12 @@ test("the editor shows a project's three lanes, and each tool unfolds its own co
   };
   const button = (text: string) => [...document.querySelectorAll("button")].find(node => node.textContent?.includes(text));
   try {
-    // Nothing open: a place to drop into, with nothing written in it.
+    // Nothing open: the editor stands empty — its lanes and tools, nothing written in the lanes.
     await act(async () => root.render(createElement(LaneEditor)));
-    assert.ok(document.querySelector(".kd-lanes-empty"));
-    assert.equal(document.querySelector(".kd-lanes-empty")?.textContent, "");
+    assert.ok(document.querySelector(".kd-lanes[data-empty]"));
+    assert.equal(document.querySelectorAll(".kd-lanes-lane").length, 3, "branches, picture, songs");
+    assert.equal([...document.querySelectorAll(".kd-lanes-lane")].map(lane => lane.textContent).join(""), "");
+    assert.equal((button("剪切") as HTMLButtonElement).disabled, true);
 
     const doc = {
       kdjv: 2 as const, title: "Set",
@@ -63,6 +65,14 @@ test("the editor shows a project's three lanes, and each tool unfolds its own co
     // The same tool again folds it away.
     await click(button("剪切"));
     assert.equal(document.querySelector(".kd-lanes-panel"), null);
+
+    // 字幕 offers a new title at the playhead; 导出 its settings; nothing to undo yet.
+    await click(button("字幕"));
+    assert.ok(document.querySelector('.kd-lanes-panel textarea[aria-label="字幕的字"]'));
+    await click(button("导出"));
+    assert.ok(document.querySelector('.kd-lanes-panel [role="radiogroup"][aria-label="尺寸"]'));
+    assert.ok(button("导出 MP4"));
+    assert.equal((document.querySelector('[aria-label="撤销"]') as HTMLButtonElement).disabled, true);
   } finally {
     await act(async () => root.unmount());
     dom.window.close();

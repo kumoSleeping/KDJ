@@ -24,6 +24,9 @@ export interface LaneGrid { downbeats: number[]; beats: number[] }
 /** One song's own grid, in seconds of the song; `precise` once the full analysis has answered. */
 interface SongGrid { downbeats: number[]; beats: number[]; precise: boolean }
 
+/** How many edits back undo reaches. */
+const HISTORY = 100;
+
 /** How often a song's full analysis is asked about, and for how long at most. */
 const GRID_POLL_MS = 1_500;
 const GRID_WAIT_MS = 15 * 60_000;
@@ -53,6 +56,8 @@ interface LaneEditorState {
   aligning: string[];
   /** What 校准 found for a clip: its plans, best first, or none that fit. */
   plans: Record<string, AlignPlan[]>;
+  /** Each project's documents before its edits (undo) and after the ones undone (redo), by path. */
+  history: Record<string, { past: LaneDocument[]; future: LaneDocument[] }>;
   /** Opens the drawer as it was (the key at the top right). */
   show(): void;
   openTrack(track: Pick<Track, "id" | "path">): Promise<void>;
@@ -65,6 +70,8 @@ interface LaneEditorState {
   closeProject(path: string): void;
   /** Sends the operations to the project in view; false when they were refused (the reason is in `error`). */
   edit(ops: LaneOp[]): Promise<boolean>;
+  undo(): Promise<void>;
+  redo(): Promise<void>;
   select(id: string | null): void;
   close(): void;
   /** Finds where a clip of the project in view lies in the song under it; `auto` applies a sure plan at once. */
@@ -191,6 +198,33 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
     if (track) playTrack(track, session.playing, undefined, session.position);
   };
 
+  /** Keeps `before` for undo: an edit clears what was undone; an undo keeps it for redo, and back. */
+  const remember = (path: string, before: LaneDocument, how: "edit" | "undo" | "redo") => set(state => {
+    const kept = state.history[path] ?? { past: [], future: [] };
+    const cap = (list: LaneDocument[]) => list.slice(-HISTORY);
+    const next = how === "edit" ? { past: cap([...kept.past, before]), future: [] }
+      : how === "undo" ? { past: kept.past, future: cap([...kept.future, before]) }
+        : { past: cap([...kept.past, before]), future: kept.future };
+    return { history: { ...state.history, [path]: next } };
+  });
+
+  /** Puts the last document of `from` back with `restore`; the one it replaces goes to the other side. */
+  const turnBack = async (from: "past" | "future") => {
+    const { active, busy, history } = get();
+    const kept = active ? history[active] : undefined;
+    const now = get().projects.find(p => p.path === active)?.doc;
+    if (!active || busy || !kept || !now || kept[from].length === 0) return;
+    const document = kept[from][kept[from].length - 1];
+    set(state => ({ busy: true, error: null, history: { ...state.history, [active]: { ...kept, [from]: kept[from].slice(0, -1) } } }));
+    try {
+      adopt(await api.editKdjv({ path: active, ops: [{ op: "restore", document }] }));
+      remember(active, now, from === "past" ? "undo" : "redo");
+    } catch (error) {
+      // Not restorable (a source gone): it stays where it was.
+      set(state => ({ busy: false, error: message(error), history: { ...state.history, [active]: kept } }));
+    }
+  };
+
   /** A new project beside `beside`, named after it; a name already taken gets a number. */
   const create = async (beside: string, name: string, ops: LaneOp[]) => {
     set({ busy: true, error: null, open: true });
@@ -211,7 +245,7 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
   };
 
   return {
-    open: false, projects: [], active: null, selected: null, busy: false, error: null, aligning: [], plans: {},
+    open: false, projects: [], active: null, selected: null, busy: false, error: null, aligning: [], plans: {}, history: {},
     show() {
       set({ open: true });
       useSidePanels.getState().raise(LANE_EDITOR_APP);
@@ -263,15 +297,19 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
     async edit(ops) {
       const { active, busy } = get();
       if (!active || busy) return false;
+      const before = get().projects.find(p => p.path === active)?.doc;
       set({ busy: true, error: null });
       try {
         adopt(await api.editKdjv({ path: active, ops }));
+        if (before) remember(active, before, "edit");
         return true;
       } catch (error) {
         set({ busy: false, error: message(error) });
         return false;
       }
     },
+    undo: () => turnBack("past"),
+    redo: () => turnBack("future"),
     select: id => set({ selected: id }),
     close: () => set({ open: false, selected: null, error: null }),
     async calibrate(clipId, auto = false) {

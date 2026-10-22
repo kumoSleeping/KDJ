@@ -243,7 +243,7 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
           const c = project.clips[n];
           const at = clipBox(project, c);
           const style = {
-            left: `${at.left}%`, top: `${at.top}%`, width: `${at.width}%`, height: `${at.height}%`,
+            left: `${at.left}%`, top: `${at.top}%`, width: `${at.width}%`, height: `${at.height}%`, clipPath: at.clip,
             zIndex: (tracks - c.track) * 10_000 + n, opacity: 0,
           };
           const src = api.kdjvSourceUrl(trackId, c.source);

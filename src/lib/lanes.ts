@@ -18,9 +18,21 @@ export interface LaneClip {
   scale?: number;
   opacity?: number;
   fill?: boolean;
+  /** Fractions taken off: left, top, right, bottom. */
+  crop?: [number, number, number, number];
 }
 export type LaneItem = LaneClip | { gap: number };
 export type BranchSide = "out" | "in";
+export interface LaneMarker { at: number; name?: string }
+/** A title (字幕): its text, drawn as a picture (`src`), over the project from `at` for `length`. */
+export interface LaneTitle {
+  id: string; text: string; src: string; at: number; length: number;
+  size?: number; color?: string; outline?: boolean; y?: number;
+}
+/** How an export differs from the render made for playing (kdjv.rs `RenderOptions`). */
+export interface ExportOptions {
+  width?: number; height?: number; fps?: number; quality?: number; from?: number; to?: number; audio_only?: boolean;
+}
 export interface LaneBranch { clip: string; side: BranchSide; length: number; opacity?: number; fade?: boolean }
 export interface LaneSong { src: string; in?: number; out: number; volume?: number }
 export interface LaneDocument {
@@ -31,6 +43,8 @@ export interface LaneDocument {
   songs?: LaneSong[];
   main: LaneItem[];
   branches?: LaneBranch[];
+  markers?: LaneMarker[];
+  titles?: LaneTitle[];
   [key: string]: unknown;
 }
 
@@ -65,7 +79,13 @@ export type LaneOp =
   | { op: "move"; id: string; index: number }
   | { op: "trim"; id: string; in?: number; out?: number }
   | { op: "split"; id: string; at: number }
-  | { op: "set"; id: string; fields: Partial<Pick<LaneClip, "speed" | "volume" | "muted" | "x" | "y" | "scale" | "opacity" | "fill">> }
+  | { op: "set"; id: string; fields: Partial<Pick<LaneClip, "speed" | "volume" | "muted" | "x" | "y" | "scale" | "opacity" | "fill" | "crop">> }
+  | { op: "move_to"; id: string; at: number }
+  | { op: "restore"; document: LaneDocument }
+  | { op: "markers"; markers: LaneMarker[] }
+  | { op: "add_title"; title: Omit<LaneTitle, "id"> }
+  | { op: "set_title"; id: string; fields: Partial<Omit<LaneTitle, "id">> }
+  | { op: "remove_title"; id: string }
   | { op: "gap"; index: number; length: number }
   | { op: "branch"; clip: string; side: BranchSide; length: number; opacity?: number; fade?: boolean }
   | { op: "unbranch"; clip: string; side: BranchSide }

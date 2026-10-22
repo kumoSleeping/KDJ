@@ -13,6 +13,7 @@ import { create } from "zustand";
 import { api } from "./api";
 import { dismissTask, showTask } from "../components/tasks/taskBubbleStore";
 import type { KdjvLive, KdjvProgress, PlayableTrack } from "../types";
+import type { ExportOptions } from "./lanes";
 
 type Play = (track: PlayableTrack, autoPlay?: boolean, purpose?: "composition", position?: number) => number;
 
@@ -79,13 +80,13 @@ const exporting = new Map<number, string>();
  * The library's 导出 MP4 for a project row: the render (the same one playing uses), copied
  * beside the project as an MP4, with the work shown as an export bubble.
  */
-export function exportProject(track: { id: number; title: string; filename: string }): void {
+export function exportProject(track: { id: number; title: string; filename: string }, options?: ExportOptions): void {
   if (exporting.has(track.id)) return;
   const title = track.title || track.filename;
   exporting.set(track.id, title);
-  showTask({ id: exportId(track.id), kind: "export", title, detail: "导出 MP4", progress: 0, stay: 0 });
+  showTask({ id: exportId(track.id), kind: "export", title, detail: options?.audio_only ? "导出声音" : "导出 MP4", progress: 0, stay: 0 });
   void api
-    .exportKdjv(track.id)
+    .exportKdjv(track.id, options)
     .then(({ path }) => {
       showTask({ id: exportId(track.id), kind: "export", title, detail: `已导出 ${path.split(/[\\/]/).pop() ?? path}`, progress: null, tone: "success" });
     })

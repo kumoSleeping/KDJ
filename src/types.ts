@@ -967,6 +967,8 @@ export interface KdjvLive {
   clips: Array<{
     source: number; track: number; at: number; in: number; out: number; length: number;
     x: number; y: number; scale: number; opacity: number; fill: boolean; fade_in: number; fade_out: number;
+    /** Fractions taken off: left, top, right, bottom (absent from older servers). */
+    crop?: [number, number, number, number];
   }>;
 }
 

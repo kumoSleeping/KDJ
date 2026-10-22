@@ -34,6 +34,10 @@ test("a clip sits where the render puts it: fitted, filled, scaled and kept on t
   assert.ok(Math.abs(fill.top - -38.888888) < 1e-4, "a filled square overflows top and bottom evenly");
   const corner = clipBox(project([]), clip({ scale: 0.5, x: 0, y: 0 }));
   assert.deepEqual(corner, { left: 0, top: 0, width: 50, height: 50 }, "a small picture never leaves the canvas");
+  // A quarter off either side of a square: the half left is fitted to the height and centred; the
+  // element is the whole frame around it, clipped to it.
+  const cropped = clipBox(project([], square), clip({ crop: [0.25, 0, 0.25, 0] }));
+  assert.deepEqual(cropped, { ...fit, clip: "inset(0% 25% 0% 25%)" });
 });
 
 test("fades are smoothstep on the clip's own opacity, and a clip is invisible outside itself", () => {

@@ -68,9 +68,10 @@
 .kd-lanes-lane { position: relative; height: 26px; }
 .kd-lanes-lane[data-lane="aux"] { height: 14px; }
 .kd-lanes-lane[data-lane="song"] { height: 22px; }
+.kd-lanes-lane[data-lane="title"] { height: 16px; }
 /* A lane that something dragged over it would land in lifts a tone. */
 .kd-lanes-lane[data-drop] { border-radius: 4px; background: var(--kd-hover); }
-.kd-lanes-clip, .kd-lanes-gap, .kd-lanes-song, .kd-lanes-branch-block {
+.kd-lanes-clip, .kd-lanes-gap, .kd-lanes-song, .kd-lanes-branch-block, .kd-lanes-title-block {
   position: absolute;
   top: 0;
   bottom: 0;
@@ -93,6 +94,20 @@
   cursor: pointer;
 }
 .kd-lanes-clip:hover { color: var(--kd-text); }
+/* Either end of a clip or a title pulls that end. */
+.kd-lanes-clip::before, .kd-lanes-clip::after, .kd-lanes-title-block::before, .kd-lanes-title-block::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: ew-resize;
+}
+.kd-lanes-clip::before, .kd-lanes-title-block::before { left: 0; }
+.kd-lanes-clip::after, .kd-lanes-title-block::after { right: 0; }
+.kd-lanes-clip, .kd-lanes-song, .kd-lanes-title-block { touch-action: none; }
+/* What is being dragged stands a little above the rest and lets the pointer through. */
+[data-dragging] { z-index: 2; opacity: 0.85; cursor: grabbing; }
 .kd-lanes-clip[aria-pressed="true"] { border-color: var(--kd-text); color: var(--kd-text); font-weight: 600; }
 .kd-lanes-gap { background: #000; opacity: 0.55; }
 .kd-lanes-song {
@@ -118,16 +133,49 @@
   cursor: pointer;
 }
 .kd-lanes-branch-block[aria-pressed="true"] { border-color: var(--kd-text); }
+.kd-lanes-title-block {
+  padding: 0 5px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--kd-text) 9%, transparent);
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: 10px;
+  line-height: 14px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.kd-lanes-title-block:hover { color: var(--kd-text); }
+.kd-lanes-title-block[aria-pressed="true"] { border-color: var(--kd-text); color: var(--kd-text); font-weight: 600; }
+/* A marker: a small ink flag hanging from the top of the ruler. */
+.kd-lanes-marker {
+  position: absolute;
+  top: 0;
+  width: 9px;
+  height: 9px;
+  margin-left: -4.5px;
+  padding: 0;
+  border: 0;
+  background: var(--kd-text);
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  cursor: pointer;
+}
+.kd-lanes-marker:focus-visible { outline: 1px solid var(--kd-text); outline-offset: 2px; }
 /* The points: under the branch lane, over the top of the main lane. */
 .kd-lanes-switches {
   position: absolute;
   left: 0;
   width: 100%;
   top: calc(16px + 4px + 7px);
+  --kd-lanes-titles: 0px;
+  transform: translateY(var(--kd-lanes-titles));
   height: calc(7px + 4px);
   overflow: visible;
   pointer-events: none;
 }
+.kd-lanes-switches[data-titles] { --kd-lanes-titles: calc(16px + 4px); }
 .kd-lanes-switches path { fill: none; stroke: var(--kd-muted); stroke-width: 1.5; }
 .kd-lanes-playhead, .kd-lanes-drop {
   position: absolute;
@@ -180,7 +228,51 @@
 .kd-lanes-action:disabled { opacity: 0.4; cursor: default; }
 .kd-lanes-panel { min-width: 0; min-height: 1.75rem; padding: 2px 2px 4px; }
 
-/* Nothing open: the whole body is where songs and videos are dropped to start a project. */
-.kd-lanes-empty { min-height: 12rem; border-radius: 10px; }
-.kd-lanes-empty[data-drop] { background: var(--kd-hover); }
+/* The lanes stand quietly even when empty, so the editor reads as one with nothing in it yet. */
+.kd-lanes-lane[data-lane="main"], .kd-lanes-lane[data-lane="song"] { border-radius: 4px; background: color-mix(in srgb, var(--kd-text) 3%, transparent); }
+.kd-lanes-lane[data-lane="main"][data-drop], .kd-lanes-lane[data-lane="song"][data-drop] { background: var(--kd-hover); }
+.kd-lanes-grow { flex: 1 1 auto; min-width: 0; }
+
+/* The crop: a small frame of the picture, the kept part marked inside it, each side pulled. */
+.kd-crop { display: inline-flex; align-items: center; gap: 8px; }
+.kd-crop-frame {
+  position: relative;
+  width: 112px;
+  height: 63px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--kd-text) 10%, transparent);
+}
+.kd-crop-keep { position: absolute; border: 1px solid var(--kd-text); border-radius: 2px; background: color-mix(in srgb, var(--kd-text) 18%, transparent); }
+.kd-crop-edge { position: absolute; touch-action: none; }
+.kd-crop-edge[data-side="0"], .kd-crop-edge[data-side="2"] { top: 0; bottom: 0; width: 10px; cursor: ew-resize; }
+.kd-crop-edge[data-side="1"], .kd-crop-edge[data-side="3"] { left: 0; right: 0; height: 10px; cursor: ns-resize; }
+.kd-crop-edge[data-side="0"] { left: -5px; }
+.kd-crop-edge[data-side="2"] { right: -5px; }
+.kd-crop-edge[data-side="1"] { top: -5px; }
+.kd-crop-edge[data-side="3"] { bottom: -5px; }
+.kd-crop-edge:focus-visible { outline: 1px solid var(--kd-text); outline-offset: -3px; border-radius: 3px; }
+
+/* A title's words and colours. */
+.kd-lanes-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--kd-line);
+  border-radius: 6px;
+  background: var(--kd-panel);
+  color: var(--kd-text);
+  font: inherit;
+  resize: vertical;
+}
+.kd-lanes-swatches { display: inline-flex; gap: 6px; }
+.kd-lanes-swatch {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--kd-line);
+  border-radius: 50%;
+  cursor: pointer;
+}
+/* The chosen colour: its own outline, a ring a step out. */
+.kd-lanes-swatch[aria-checked="true"] { outline: 1.5px solid var(--kd-text); outline-offset: 2px; }
 .kd-lanes-note { color: var(--kd-muted); font-size: var(--kd-size-xs); }

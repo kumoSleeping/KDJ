@@ -962,7 +962,10 @@ export const api = {
   editKdjv: (body: { path?: string; track_id?: number; ops: import("./lanes").LaneOp[]; create?: boolean }) =>
     post<import("./lanes").LaneEdited>("/kdjv/edit", body),
   /** A `.kdjv` project written out as one MP4 beside it, never over an existing file. */
-  exportKdjv: (trackId: number) => post<{ path: string; track_id: number | null }>("/kdjv/export", { track_id: trackId }),
+  exportKdjv: (trackId: number, options?: import("./lanes").ExportOptions) =>
+    post<{ path: string; track_id: number | null }>("/kdjv/export", options ? { track_id: trackId, options } : { track_id: trackId }),
+  /** A title's text drawn as a PNG (base64), kept by the server; answers where. */
+  saveTitleImage: (png: string) => post<{ src: string }>("/kdjv/title-image", { png }),
   downloads: () => request<DownloadTask[]>("/downloads"),
   enqueue: async (body: DownloadRequest) => {
     // 目录选择先乐观更新 UI、再异步落盘。入队若抢在落盘前，后端会冻结上一个目录。
