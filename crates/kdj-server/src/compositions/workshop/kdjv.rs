@@ -71,6 +71,9 @@ struct DocClip {
     /// Cover the whole canvas instead of fitting inside it.
     #[serde(default)]
     fill: bool,
+    /// Fractions of the picture taken off: left, top, right, bottom. What is left is fitted or filled.
+    #[serde(default)]
+    crop: [f64; 4],
     #[serde(default)]
     fade_in: f64,
     #[serde(default)]
@@ -91,7 +94,7 @@ impl DocClip {
     fn new(src: &str, at: f64, from: f64, out: f64) -> Self {
         DocClip {
             src: src.to_string(), at, from, out, speed: 1., volume: 1., muted: false, x: 0.5, y: 0.5, scale: 1.,
-            opacity: 1., fill: false, fade_in: 0., fade_out: 0., audio_fade_in: None, audio_fade_out: None,
+            opacity: 1., fill: false, crop: [0.; 4], fade_in: 0., fade_out: 0., audio_fade_in: None, audio_fade_out: None,
             name: None, whole_fade: false,
         }
     }
@@ -118,6 +121,15 @@ struct Lanes {
     main: Vec<LaneItem>,
     #[serde(default)]
     branches: Vec<Branch>,
+    /// Titles (字幕): each its text drawn as a picture, over everything from `at` for `length`.
+    #[serde(default)]
+    titles: Vec<LaneTitle>,
+}
+#[derive(Debug, Deserialize)]
+struct LaneTitle {
+    src: String,
+    at: f64,
+    length: f64,
 }
 #[derive(Debug, Deserialize)]
 struct LaneSong {
@@ -159,6 +171,8 @@ struct LaneClip {
     opacity: f64,
     #[serde(default)]
     fill: bool,
+    #[serde(default)]
+    crop: [f64; 4],
 }
 #[derive(Debug, Deserialize)]
 struct Branch {
@@ -202,7 +216,7 @@ impl Lanes {
                     clip.speed = c.speed;
                     clip.volume = c.volume;
                     clip.muted = c.muted;
-                    (clip.x, clip.y, clip.scale, clip.opacity, clip.fill) = (c.x, c.y, c.scale, c.opacity, c.fill);
+                    (clip.x, clip.y, clip.scale, clip.opacity, clip.fill, clip.crop) = (c.x, c.y, c.scale, c.opacity, c.fill, c.crop);
                     clip.name = Some(format!("main[{n}]（主线第 {} 段，{}）", n + 1, file_name(&c.src)));
                     at += (c.out - c.from) / c.speed;
                     main.push(clip);
@@ -236,7 +250,7 @@ impl Lanes {
             clip.volume = c.volume;
             // The branch is picture over the seam; the sound stays the main lane's.
             clip.muted = true;
-            (clip.x, clip.y, clip.scale, clip.fill) = (c.x, c.y, c.scale, c.fill);
+            (clip.x, clip.y, clip.scale, clip.fill, clip.crop) = (c.x, c.y, c.scale, c.fill, c.crop);
             clip.opacity = b.opacity;
             if b.fade {
                 if b.side == "in" { clip.fade_in = b.length } else { clip.fade_out = b.length }
@@ -249,7 +263,23 @@ impl Lanes {
             aux.push(clip);
         }
         aux.sort_by(|a, b| a.at.total_cmp(&b.at));
-        let mut tracks = vec![DocTrack { clips: aux }, DocTrack { clips: main }];
+        let mut tracks = vec![];
+        if !self.titles.is_empty() {
+            // The titles over everything else.
+            let mut clips = vec![];
+            for (n, t) in self.titles.iter().enumerate() {
+                if !(t.at >= 0. && t.length > 0.) {
+                    bail!("titles[{n}]：at 要 ≥ 0，length 要 > 0")
+                }
+                let mut clip = DocClip::new(&t.src, t.at, 0., t.length);
+                clip.muted = true;
+                clip.name = Some(format!("titles[{n}]（字幕）"));
+                clips.push(clip);
+            }
+            clips.sort_by(|a, b| a.at.total_cmp(&b.at));
+            tracks.push(DocTrack { clips });
+        }
+        tracks.extend([DocTrack { clips: aux }, DocTrack { clips: main }]);
         let songs: Vec<&LaneSong> = if self.songs.is_empty() { self.song.iter().collect() } else { self.songs.iter().collect() };
         if !songs.is_empty() {
             // The songs one after another on one track: together they are the VJ's length.
@@ -441,6 +471,9 @@ pub fn project(doc: &Doc, base: &Path, probed: &HashMap<PathBuf, Probed>) -> Res
                     scale: c.scale,
                     opacity: c.opacity,
                     crop_auto_fit: c.fill,
+                    crop: c.crop,
+                    // What is left of a crop is fitted (or filled) as a whole picture.
+                    crop_keep_position: false,
                     ..Picture::default()
                 },
                 sound: Sound { muted: c.muted, gain: c.volume, manual: true },
@@ -621,6 +654,8 @@ pub struct LiveClip {
     pub scale: f64,
     pub opacity: f64,
     pub fill: bool,
+    /// Fractions taken off: left, top, right, bottom.
+    pub crop: [f64; 4],
     pub fade_in: f64,
     pub fade_out: f64,
 }
@@ -647,12 +682,73 @@ pub fn live(p: &CompositionProject) -> Live {
                 scale: c.picture.scale,
                 opacity: c.picture.opacity,
                 fill: c.picture.crop_auto_fit,
+                crop: c.picture.crop,
                 fade_in: c.fades.video_in_ms / 1000.,
                 fade_out: c.fades.video_out_ms / 1000.,
             });
         }
     }
     Live { duration: p.duration() / 1000., width: p.canvas.width, height: p.canvas.height, sources, clips }
+}
+
+/// How an export differs from the render made for playing: none of these set is that render.
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RenderOptions {
+    /// The picture's size in pixels (even numbers); the project's own when not given.
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub fps: Option<f64>,
+    /// The encoder's CRF: 16 high, 20 standard (the default), 26 compact.
+    #[serde(default)]
+    pub quality: Option<u8>,
+    /// Only this stretch of the project, in seconds.
+    #[serde(default)]
+    pub from: Option<f64>,
+    #[serde(default)]
+    pub to: Option<f64>,
+    /// The sound alone, as WAV.
+    #[serde(default)]
+    pub audio_only: bool,
+}
+
+impl RenderOptions {
+    pub fn is_default(&self) -> bool {
+        *self == RenderOptions::default()
+    }
+
+    /// Sets the project's canvas and quality from these, and answers the stretch to render in ms.
+    fn apply(&self, p: &mut CompositionProject) -> Result<(f64, f64)> {
+        if let (Some(width), Some(height)) = (self.width, self.height) {
+            if !(16..=7680).contains(&width) || !(16..=4320).contains(&height) {
+                bail!("画面尺寸 {width}×{height} 不在 16–7680 × 16–4320 之内")
+            }
+            p.canvas.width = width / 2 * 2;
+            p.canvas.height = height / 2 * 2;
+        }
+        if let Some(fps) = self.fps {
+            if !(1. ..=120.).contains(&fps) {
+                bail!("帧率 {fps} 不在 1–120 之内")
+            }
+            p.canvas.fps = fps;
+        }
+        if let Some(quality) = self.quality {
+            if !(10..=40).contains(&quality) {
+                bail!("画质 {quality} 不在 10–40 之内")
+            }
+            p.output.quality = quality;
+        }
+        let end = p.duration();
+        let lo = (self.from.unwrap_or(0.) * 1000.).clamp(0., end);
+        let hi = self.to.map_or(end, |to| (to * 1000.).clamp(0., end));
+        if hi - lo < 100. {
+            bail!("导出的区间太短（{:.1}–{:.1} 秒）", lo / 1000., hi / 1000.)
+        }
+        Ok((lo, hi))
+    }
 }
 
 /// What playing a project starts from: the sound to hear, its render when there is one, and what
@@ -825,6 +921,17 @@ impl Workshop {
         Ok(Preview { sound: cached, render, project: live(&p) })
     }
 
+    /// Where a render with these options is kept: the playing render's own place for none, else
+    /// a place of its own, keyed by them too.
+    fn kdjv_cache_with(&self, p: &CompositionProject, options: &RenderOptions) -> Result<(String, PathBuf)> {
+        if options.is_default() {
+            return self.kdjv_cache(p);
+        }
+        let name = format!("kdjv-x-{}", key(&(&p.sources, &p.layers, &p.canvas, p.output.quality, options))?);
+        let path = self.cache.join(format!("{name}.{}", if options.audio_only { "wav" } else { "mp4" }));
+        Ok((name, path))
+    }
+
     fn kdjv_cache(&self, p: &CompositionProject) -> Result<(String, PathBuf)> {
         let name = format!("kdjv-{}", key(&(&p.sources, &p.layers, &p.canvas))?);
         let path = self.cache.join(format!("{name}.mp4"));
@@ -854,16 +961,20 @@ impl Workshop {
     pub async fn kdjv_render(
         &self,
         file: &Path,
+        options: &RenderOptions,
         cancel: &CancellationToken,
         progress: &(dyn Fn(f64, &str) + Sync),
     ) -> Result<PathBuf> {
         progress(0., "读取工程");
-        let p = self.kdjv_project(file, cancel).await?;
-        let (name, cached) = self.kdjv_cache(&p)?;
+        let mut p = self.kdjv_project(file, cancel).await?;
+        let (lo, hi) = options.apply(&mut p)?;
+        let (name, cached) = self.kdjv_cache_with(&p, options)?;
         let lock = self.cache_lock(&name).await;
         let _guard = lock.lock().await;
         if cached.is_file() {
-            remember(file, Made::Render, &cached);
+            if options.is_default() {
+                remember(file, Made::Render, &cached);
+            }
             return Ok(cached);
         }
         let _slot = tokio::select! {_ = cancel.cancelled() => bail!("渲染已取消"), s = self.export_slots.acquire() => s?};
@@ -871,21 +982,27 @@ impl Workshop {
         let stage = self.cache.join(format!(".{name}-{}", id()));
         std::fs::create_dir(&stage)?;
         let _scratch = Scratch(stage.clone());
-        let hi = p.duration();
-        let report = |step: Step, lo: f64, span: f64| -> Result<()> {
+        let report = |step: Step, at: f64, span: f64| -> Result<()> {
             match step {
-                Step::Progress(v) => progress(lo + span * v, ""),
-                Step::Detail(detail) => progress(lo, &detail),
+                Step::Progress(v) => progress(at + span * v, ""),
+                Step::Detail(detail) => progress(at, &detail),
             }
             Ok(())
         };
         progress(0., "混合声音");
-        let audio = self.mix_file(&p, &stage, 0., hi, cancel, &|step| report(step, 0., 0.2)).await?;
-        let output = stage.join("render.mp4");
-        progress(0.2, "合成画面");
-        self.picture_file(&p, &stage, &audio, &output, 0., hi, cancel, &|step| report(step, 0.2, 0.8)).await?;
-        std::fs::rename(&output, &cached)?;
-        remember(file, Made::Render, &cached);
+        let sound_share = if options.audio_only { 1. } else { 0.2 };
+        let audio = self.mix_file(&p, &stage, lo, hi, cancel, &|step| report(step, 0., sound_share)).await?;
+        if options.audio_only {
+            std::fs::rename(&audio, &cached)?;
+        } else {
+            let output = stage.join("render.mp4");
+            progress(0.2, "合成画面");
+            self.picture_file(&p, &stage, &audio, &output, lo, hi, cancel, &|step| report(step, 0.2, 0.8)).await?;
+            std::fs::rename(&output, &cached)?;
+        }
+        if options.is_default() {
+            remember(file, Made::Render, &cached);
+        }
         self.trim_cache();
         progress(1., "");
         Ok(cached)

@@ -18,6 +18,7 @@ pub fn router(manager: Arc<Workshop>) -> Router<Arc<AppState>> {
         .route("/api/kdjv/source/{track_id}/{n}", get(kdjv_source))
         .route("/api/kdjv/render", post(kdjv_render))
         .route("/api/kdjv/export", post(kdjv_export))
+        .route("/api/kdjv/title-image", post(kdjv_title_image).layer(axum::extract::DefaultBodyLimit::max(TITLE_IMAGE_BYTES * 2)))
         .layer(Extension(manager))
 }
 /// A `.kdjv` project (kdjv.rs), by its library row or its path.
@@ -133,6 +134,7 @@ fn spawn_render(
     m: &Arc<Workshop>,
     file: std::path::PathBuf,
     track_id: Option<i64>,
+    options: kdjv::RenderOptions,
 ) -> (tokio::task::JoinHandle<Result<std::path::PathBuf>>, tokio::sync::watch::Receiver<(u32, String)>) {
     let worker = m.clone();
     let shown = file.to_string_lossy().into_owned();
@@ -148,7 +150,7 @@ fn spawn_render(
         let last = Mutex::new((u32::MAX, String::new()));
         let cancel = CancellationToken::new();
         let rendered = worker
-            .kdjv_render(&file, &cancel, &|progress, detail| {
+            .kdjv_render(&file, &options, &cancel, &|progress, detail| {
                 let step = (progress * 100.) as u32;
                 let mut seen = last.lock().unwrap();
                 if step == seen.0 && (detail.is_empty() || detail == seen.1) {
@@ -177,7 +179,7 @@ async fn kdjv_render(
     Json(target): Json<KdjvTarget>,
 ) -> ApiResult<Response> {
     let (file, track_id) = kdjv_file(&m, &target)?;
-    let (job, watch) = spawn_render(&m, file, track_id);
+    let (job, watch) = spawn_render(&m, file, track_id, kdjv::RenderOptions::default());
     if !target.stream {
         let result = job.await.map_err(|error| anyhow::anyhow!("渲染中断：{error}"))??;
         return Ok(Json(serde_json::json!({"path": result, "track_id": track_id})).into_response());
@@ -206,20 +208,32 @@ async fn kdjv_render(
         .body(Body::from_stream(stream))
         .map_err(|error| anyhow::anyhow!(error.to_string()))?)
 }
-/// The project written out as one MP4 beside it (the library's 导出): rendered as for playing,
-/// then copied to `<project>.mp4`, or `<project> 2.mp4`… — an existing file is never replaced.
+/// An export: the project and, optionally, how it differs from the render made for playing.
+#[derive(Deserialize)]
+struct KdjvExport {
+    #[serde(flatten)]
+    target: KdjvTarget,
+    #[serde(default)]
+    options: kdjv::RenderOptions,
+}
+
+/// The project written out as one file beside it (the library's 导出, the editor's 导出): rendered
+/// as for playing, or with the options given (size, frame rate, quality, a stretch, the sound
+/// alone), then copied to `<project>.mp4` (`.wav`), or `<project> 2.mp4`… — an existing file is
+/// never replaced.
 async fn kdjv_export(
     Extension(m): Extension<Arc<Workshop>>,
-    Json(target): Json<KdjvTarget>,
+    Json(export): Json<KdjvExport>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let (file, track_id) = kdjv_file(&m, &target)?;
-    let (job, _) = spawn_render(&m, file.clone(), track_id);
+    let (file, track_id) = kdjv_file(&m, &export.target)?;
+    let extension = if export.options.audio_only { "wav" } else { "mp4" };
+    let (job, _) = spawn_render(&m, file.clone(), track_id, export.options);
     let render = job.await.map_err(|error| anyhow::anyhow!("渲染中断：{error}"))??;
     let exported = tokio::task::spawn_blocking(move || -> Result<std::path::PathBuf> {
         let folder = file.parent().context("工程没有所在的文件夹")?;
         let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "工程".into());
         for n in 1..1000 {
-            let name = if n == 1 { format!("{stem}.mp4") } else { format!("{stem} {n}.mp4") };
+            let name = if n == 1 { format!("{stem}.{extension}") } else { format!("{stem} {n}.{extension}") };
             let path = folder.join(name);
             // create_new: two exports at once never take the same name.
             let Ok(mut out) = std::fs::OpenOptions::new().write(true).create_new(true).open(&path) else { continue };
@@ -231,9 +245,49 @@ async fn kdjv_export(
             }
             return Ok(path);
         }
-        bail!("{} 旁边已经有太多同名的 MP4", file.display())
+        bail!("{} 旁边已经有太多同名的导出", file.display())
     })
     .await
     .map_err(|error| anyhow::anyhow!("导出中断：{error}"))??;
     Ok(Json(serde_json::json!({"path": exported, "track_id": track_id})))
 }
+
+/// The most a title's picture may weigh.
+const TITLE_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Deserialize)]
+struct TitleImage {
+    /// The PNG, base64.
+    png: String,
+}
+
+/// A title's text drawn as a picture by the editor, kept in KDJ's data folder (not beside the
+/// project, where the library would take it for an image of its own), named by what it holds.
+async fn kdjv_title_image(
+    Extension(m): Extension<Arc<Workshop>>,
+    Json(image): Json<TitleImage>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let path = save_title_image(&m.state.config.data_dir, &image.png)?;
+    Ok(Json(serde_json::json!({"src": path})))
+}
+
+fn save_title_image(data_dir: &std::path::Path, png: &str) -> Result<std::path::PathBuf> {
+    use base64::Engine;
+    use sha2::Digest;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(png.as_bytes()).context("不是 base64")?;
+    if bytes.len() > TITLE_IMAGE_BYTES || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        bail!("字幕图要是 4 MB 以内的 PNG")
+    }
+    let digest = sha2::Sha256::digest(&bytes);
+    let name: String = digest.iter().take(10).map(|b| format!("{b:02x}")).collect();
+    let folder = data_dir.join("kdjv-titles");
+    std::fs::create_dir_all(&folder)?;
+    let path = folder.join(format!("{name}.png"));
+    if !path.is_file() {
+        let temporary = path.with_extension(format!("png.{}.tmp", std::process::id()));
+        std::fs::write(&temporary, &bytes)?;
+        std::fs::rename(&temporary, &path)?;
+    }
+    Ok(path)
+}
+

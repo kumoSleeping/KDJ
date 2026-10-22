@@ -78,6 +78,38 @@ pub enum Op {
     MoveSong { from: usize, to: usize },
     /// A song's other fields: volume.
     SetSong { index: usize, fields: Map<String, Value> },
+    /// A clip of a VJ to start at `at`, into the black there; it keeps its id and branches.
+    MoveTo { id: String, at: f64 },
+    /// The whole document as it was (undo and redo): checked like any other result.
+    Restore { document: Value },
+    /// The markers of the ruler, all of them: `{"at": seconds, "name"?: text}`.
+    Markers { markers: Vec<Value> },
+    /// A title (字幕): its text drawn as a picture (`src`) over the project from `at` for `length`.
+    AddTitle { title: Map<String, Value> },
+    /// A title's other fields: text, src, at, length, size, color, outline, y.
+    SetTitle { id: String, fields: Map<String, Value> },
+    RemoveTitle { id: String },
+}
+
+const TITLE_FIELDS: &[&str] = &["text", "src", "at", "length", "size", "color", "outline", "y"];
+
+fn titles_of(doc: &mut Value) -> Result<&mut Vec<Value>> {
+    let object = doc.as_object_mut().context("工程不是 JSON 对象")?;
+    object.entry("titles").or_insert_with(|| json!([])).as_array_mut().context("titles 不是数组")
+}
+
+/// A title's fields must make sense: some text, a picture of it, a place in the project.
+fn check_title(title: &Value) -> Result<()> {
+    if title.get("text").and_then(Value::as_str).is_none_or(|text| text.trim().is_empty()) {
+        bail!("字幕要有文字")
+    }
+    if title.get("src").and_then(Value::as_str).is_none() {
+        bail!("字幕要有画好的图（src）")
+    }
+    if !num(title, "at").is_some_and(|at| at >= 0.) || !num(title, "length").is_some_and(|length| length > EPS) {
+        bail!("字幕要有 at（≥ 0）和 length（> 0）")
+    }
+    Ok(())
 }
 
 /// The songs of the song lane in order: `songs`, or the one `song` a project of one song has.
@@ -108,7 +140,16 @@ fn song_length(song: &Value) -> f64 {
     (num(song, "out").unwrap_or(0.) - num(song, "in").unwrap_or(0.)).max(0.)
 }
 
-const SETTABLE: &[&str] = &["speed", "volume", "muted", "x", "y", "scale", "opacity", "fill"];
+const SETTABLE: &[&str] = &["speed", "volume", "muted", "x", "y", "scale", "opacity", "fill", "crop"];
+
+/// A crop is the fractions taken off left, top, right and bottom; some picture has to stay.
+fn check_crop(value: &Value) -> Result<()> {
+    let sides: Vec<f64> = value.as_array().map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
+    if sides.len() != 4 || sides.iter().any(|v| !(0. ..=0.9).contains(v)) || sides[0] + sides[2] > 0.9 || sides[1] + sides[3] > 0.9 {
+        bail!("crop 是 [左, 上, 右, 下] 四个 0–0.9 的比例，左右、上下各加起来不超过 0.9")
+    }
+    Ok(())
+}
 
 fn num(value: &Value, key: &str) -> Option<f64> {
     value.get(key).and_then(Value::as_f64)
@@ -194,6 +235,39 @@ fn hold_after(main: &mut Vec<Value>, i: usize, delta: f64) -> Result<()> {
     Ok(())
 }
 
+/// `item` into the main lane starting at `at`: into the black there, or after the end.
+fn place_at(main: &mut Vec<Value>, item: Value, at: f64) -> Result<()> {
+    let span = length(&item);
+    let begins = starts(main);
+    let end = begins.last().map_or(0., |s| s + length(main.last().unwrap()));
+    if at >= end - EPS {
+        if at - end > EPS {
+            main.push(json!({ "gap": round(at - end) }));
+        }
+        main.push(item);
+        return Ok(());
+    }
+    let k = (0..main.len()).find(|&k| begins[k] <= at + EPS && at < begins[k] + length(&main[k]) - EPS)
+        .context("放的位置不在成片里")?;
+    if !is_gap(&main[k]) {
+        bail!("{at:.3} 秒处是 main[{k}]，只能放进黑的地方")
+    }
+    let (from, gap) = (begins[k], length(&main[k]));
+    if at + span > from + gap + EPS {
+        bail!("放在 {at:.3} 秒长 {span:.3} 秒，会盖住 main[{}]（这里的黑只到 {:.3} 秒）", k + 1, from + gap)
+    }
+    let mut stretch = vec![];
+    if at - from > EPS {
+        stretch.push(json!({ "gap": round(at - from) }));
+    }
+    stretch.push(item);
+    if from + gap - at - span > EPS {
+        stretch.push(json!({ "gap": round(from + gap - at - span) }));
+    }
+    main.splice(k..k + 1, stretch);
+    Ok(())
+}
+
 /// The document with `ops` applied in order; the first that cannot apply says why, and nothing of
 /// the list is kept.
 pub fn apply(document: &Value, ops: &[Op]) -> Result<Value> {
@@ -223,6 +297,12 @@ fn op_name(op: &Op) -> &'static str {
         Op::RemoveSong { .. } => "remove_song",
         Op::MoveSong { .. } => "move_song",
         Op::SetSong { .. } => "set_song",
+        Op::MoveTo { .. } => "move_to",
+        Op::Restore { .. } => "restore",
+        Op::Markers { .. } => "markers",
+        Op::AddTitle { .. } => "add_title",
+        Op::SetTitle { .. } => "set_title",
+        Op::RemoveTitle { .. } => "remove_title",
     }
 }
 
@@ -265,36 +345,7 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
                 bail!("片段长度要大于 0（out 要大于 in）")
             }
             match (at, index) {
-                (Some(at), _) => {
-                    let at = *at;
-                    let begins = starts(main);
-                    let end = begins.last().map_or(0., |s| s + length(main.last().unwrap()));
-                    if at >= end - EPS {
-                        if at - end > EPS {
-                            main.push(json!({ "gap": round(at - end) }));
-                        }
-                        main.push(item);
-                    } else {
-                        let k = (0..main.len()).find(|&k| begins[k] <= at + EPS && at < begins[k] + length(&main[k]) - EPS)
-                            .context("放的位置不在成片里")?;
-                        if !is_gap(&main[k]) {
-                            bail!("{at:.3} 秒处是 main[{k}]，只能放进黑的地方")
-                        }
-                        let (from, gap) = (begins[k], length(&main[k]));
-                        if at + span > from + gap + EPS {
-                            bail!("放在 {at:.3} 秒长 {span:.3} 秒，会盖住 main[{}]（这里的黑只到 {:.3} 秒）", k + 1, from + gap)
-                        }
-                        let mut stretch = vec![];
-                        if at - from > EPS {
-                            stretch.push(json!({ "gap": round(at - from) }));
-                        }
-                        stretch.push(item);
-                        if from + gap - at - span > EPS {
-                            stretch.push(json!({ "gap": round(from + gap - at - span) }));
-                        }
-                        main.splice(k..k + 1, stretch);
-                    }
-                }
+                (Some(at), _) => place_at(main, item, *at)?,
                 (None, Some(index)) => {
                     if *index > main.len() {
                         bail!("index {index} 超出主线（共 {} 段）", main.len())
@@ -369,6 +420,9 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
         Op::Set { id, fields } => {
             if let Some(key) = fields.keys().find(|key| !SETTABLE.contains(&key.as_str())) {
                 bail!("不能这样改「{key}」：可以改的是 {}", SETTABLE.join("、"))
+            }
+            if let Some(crop) = fields.get("crop") {
+                check_crop(crop)?;
             }
             let main = main_of(doc)?;
             let i = index_of(main, id)?;
@@ -463,6 +517,70 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
                 song[key] = value.clone();
             }
             put_songs(doc, songs)?;
+        }
+        Op::MoveTo { id, at } => {
+            if !vj {
+                bail!("没有歌的工程按顺序排，用 move 换位置")
+            }
+            let main = main_of(doc)?;
+            let i = index_of(main, id)?;
+            let item = main[i].clone();
+            main[i] = json!({ "gap": round(length(&item)) });
+            tidy(main);
+            place_at(main, item, at.max(0.))?;
+        }
+        Op::Restore { document } => {
+            if document.get("kdjv").and_then(Value::as_u64) != Some(2) || !document["main"].is_array() {
+                bail!("要还原的不是格式 2 的工程")
+            }
+            *doc = document.clone();
+        }
+        Op::Markers { markers } => {
+            let mut list = vec![];
+            for marker in markers {
+                let at = num(marker, "at").filter(|at| *at >= 0.).context("标记要有 at（≥ 0 秒）")?;
+                let mut kept = marker.clone();
+                kept["at"] = json!(round(at));
+                list.push(kept);
+            }
+            list.sort_by(|a, b| num(a, "at").unwrap_or(0.).total_cmp(&num(b, "at").unwrap_or(0.)));
+            if list.is_empty() {
+                if let Some(object) = doc.as_object_mut() { object.remove("markers"); }
+            } else {
+                doc["markers"] = Value::Array(list);
+            }
+        }
+        Op::AddTitle { title } => {
+            let mut title = Value::Object(title.clone());
+            check_title(&title)?;
+            let titles = titles_of(doc)?;
+            let taken = |id: &str| titles.iter().any(|t| t["id"].as_str() == Some(id));
+            let id = (1..).map(|n| format!("t{n}")).find(|id| !taken(id)).unwrap();
+            title["id"] = json!(id);
+            titles.push(title);
+        }
+        Op::SetTitle { id, fields } => {
+            if let Some(key) = fields.keys().find(|key| !TITLE_FIELDS.contains(&key.as_str())) {
+                bail!("字幕不能这样改「{key}」：可以改的是 {}", TITLE_FIELDS.join("、"))
+            }
+            let titles = titles_of(doc)?;
+            let title = titles.iter_mut().find(|t| t["id"].as_str() == Some(id.as_str()))
+                .with_context(|| format!("没有 id 为「{id}」的字幕"))?;
+            for (key, value) in fields {
+                title[key] = value.clone();
+            }
+            check_title(title)?;
+        }
+        Op::RemoveTitle { id } => {
+            let titles = titles_of(doc)?;
+            let before = titles.len();
+            titles.retain(|t| t["id"].as_str() != Some(id.as_str()));
+            if titles.len() == before {
+                bail!("没有 id 为「{id}」的字幕")
+            }
+            if titles.is_empty() {
+                if let Some(object) = doc.as_object_mut() { object.remove("titles"); }
+            }
         }
     }
     Ok(())
@@ -601,5 +719,40 @@ mod tests {
         let none = apply(&one, &ops(r#"[{"op":"remove_song","index":0}]"#)).unwrap();
         assert!(none.get("song").is_none() && none.get("songs").is_none());
         assert_eq!(layout(&none)["duration"], json!(30.), "without songs the main lane is the length");
+    }
+
+    #[test]
+    fn a_clip_moves_in_time_keeping_its_branches_and_a_restore_takes_the_whole_document_back() {
+        let doc = apply(&vj(), &ops(r#"[{"op":"branch","clip":"c1","side":"out","length":1}]"#)).unwrap();
+        let moved = apply(&doc, &ops(r#"[{"op":"move_to","id":"c1","at":40}]"#)).unwrap();
+        assert_eq!(shape(&moved)[0], ("-".into(), 0., 20.), "{moved}");
+        let placed = layout(&moved);
+        let c1 = placed["main"].as_array().unwrap().iter().find(|m| m["id"] == json!("c1")).unwrap();
+        assert_eq!(c1["at"], json!(40.));
+        assert_eq!(moved["branches"].as_array().unwrap().len(), 1, "the branch went with it");
+        assert!(apply(&doc, &ops(r#"[{"op":"move_to","id":"c1","at":15}]"#)).is_err(), "over the next clip");
+        let back = apply(&moved, &[Op::Restore { document: doc.clone() }]).unwrap();
+        assert_eq!(back, doc);
+    }
+
+    #[test]
+    fn markers_are_kept_in_order_and_titles_need_text_a_picture_and_a_place() {
+        let doc = apply(&vj(), &ops(r#"[{"op":"markers","markers":[{"at":30,"name":"drop"},{"at":5}]}]"#)).unwrap();
+        assert_eq!(doc["markers"], json!([{"at":5.0},{"at":30.0,"name":"drop"}]));
+        let none = apply(&doc, &ops(r#"[{"op":"markers","markers":[]}]"#)).unwrap();
+        assert!(none.get("markers").is_none());
+        let titled = apply(&vj(), &ops(r#"[{"op":"add_title","title":{"text":"Hi","src":"/t/1.png","at":2,"length":3}}]"#)).unwrap();
+        assert_eq!(titled["titles"][0]["id"], json!("t1"));
+        let moved = apply(&titled, &ops(r#"[{"op":"set_title","id":"t1","fields":{"at":10}}]"#)).unwrap();
+        assert_eq!(moved["titles"][0]["at"], json!(10));
+        assert!(apply(&titled, &ops(r#"[{"op":"set_title","id":"t1","fields":{"text":" "}}]"#)).is_err());
+        let gone = apply(&titled, &ops(r#"[{"op":"remove_title","id":"t1"}]"#)).unwrap();
+        assert!(gone.get("titles").is_none());
+    }
+
+    #[test]
+    fn a_crop_leaves_some_picture() {
+        assert!(apply(&vj(), &ops(r#"[{"op":"set","id":"c1","fields":{"crop":[0.1,0,0.1,0.2]}}]"#)).is_ok());
+        assert!(apply(&vj(), &ops(r#"[{"op":"set","id":"c1","fields":{"crop":[0.5,0,0.5,0]}}]"#)).is_err());
     }
 }
