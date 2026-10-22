@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
+import { usePointerTrackDrop } from "../../lib/pointerTrackDrop";
+import { activeTrackDragIds, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
 import type { TitleDrop } from "./drawerSchema";
 import "./TitleTabs.css";
 
@@ -60,7 +62,17 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
   const pick = (id: T) => { if (id !== value) onChange?.(id); };
   // Something taken by the row is over it: the row is lit and names what a drop does.
   const [hot, setHot] = useState(false);
-  const takes = (event: DragEvent<HTMLElement>) => Boolean(drop?.accepts(event.dataTransfer));
+  const row = useRef<HTMLElement>(null);
+  usePointerTrackDrop(row, drop ? {
+    over: () => { setHot(true); return drop.label; },
+    leave: () => setHot(false),
+    drop: ids => { setHot(false); drop.drop(ids); },
+  } : null);
+  const takes = (event: DragEvent<HTMLElement>) => Boolean(drop) && isTrackDrag(event);
+  const dropped = (event: DragEvent<HTMLElement>) => {
+    const ids = readTrackDragIds(event.dataTransfer);
+    drop?.drop(ids.length ? ids : [...activeTrackDragIds()]);
+  };
   const move = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!tabs?.length || event.altKey || event.ctrlKey || event.metaKey) return;
     const at = tabs.findIndex(tab => tab.id === value);
@@ -73,10 +85,10 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
     pick(target.id);
     list.current?.querySelector<HTMLElement>(`[data-tab="${target.id}"]`)?.focus({ preventScroll: true });
   };
-  return <header className="kd-title-tabs" data-drop={hot || undefined} title={hot ? drop?.label : undefined}
+  return <header ref={row} className="kd-title-tabs" data-drop={hot || undefined} title={hot ? drop?.label : undefined}
     onDragOver={drop ? event => { if (!takes(event)) return; event.preventDefault(); event.dataTransfer.dropEffect = "copy"; setHot(true); } : undefined}
     onDragLeave={drop ? event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setHot(false); } : undefined}
-    onDrop={drop ? event => { if (!takes(event)) return; event.preventDefault(); setHot(false); drop.drop(event.dataTransfer); } : undefined}>
+    onDrop={drop ? event => { if (!takes(event)) return; event.preventDefault(); setHot(false); dropped(event); } : undefined}>
     <div ref={view} className="kd-title-tabs-text"
       data-fade={carry.left && carry.right ? "both" : carry.left ? "left" : carry.right ? "right" : undefined}>
       {tabs?.length ? <div ref={list} className="kd-title-tabs-list" role="tablist" aria-label={label} onKeyDown={move}

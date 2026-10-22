@@ -21,7 +21,6 @@ import { AiDrawer, AiDrawerTools } from "../ai/AiDrawer";
 import { LaneEditor } from "../editor/LaneEditor";
 import { LANE_EDITOR_APP, useLaneEditor } from "../../stores/laneEditorStore";
 import { api } from "../../lib/api";
-import { isTrackDrag, readTrackDragIds, activeTrackDragIds } from "../../lib/trackDrag";
 import type { Track } from "../../types";
 import { TrackMetaEditorDrawer } from "../library/TrackMetaEditor";
 import { DrawerLyrics } from "../player/SidePanels";
@@ -51,11 +50,8 @@ const useProjectInView = () => useLaneEditor(state => state.active ?? "");
 /** Songs or videos dropped on the editor's title start another project, another page. */
 const NEW_PROJECT_DROP = {
   label: "新建一个工程",
-  accepts: (transfer: DataTransfer) => isTrackDrag({ dataTransfer: transfer }),
-  drop(transfer: DataTransfer) {
-    const ids = readTrackDragIds(transfer);
-    const list = ids.length ? ids : [...activeTrackDragIds()];
-    void Promise.all(list.map(id => api.track(id).catch(() => null)))
+  drop(ids: readonly number[]) {
+    void Promise.all(ids.map(id => api.track(id).catch(() => null)))
       .then(tracks => useLaneEditor.getState().createFrom(tracks.filter((t): t is Track => Boolean(t))));
   },
 };

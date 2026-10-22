@@ -20,6 +20,7 @@
 
 import { forgetDragCard, isElement, refuseDragGhost } from "../components/common/dragGhost";
 import { folderDropElementAt, searchDropPathAt, searchQueueDropElementAt } from "./folderDrop";
+import { pointerTrackDropAt } from "./pointerTrackDrop";
 import {
   TRACK_COVER_DROP_TARGET_ATTR, TRACK_DECK_DROP_TARGET_ATTR, TRACK_SAMPLER_DROP_TARGET_ATTR, trackDeckDropSideAt,
 } from "./trackDrag";
@@ -51,7 +52,7 @@ export function pointerAccepts(kind: "track" | "search", x: number, y: number): 
   // Both load a deck.
   if (trackDeckDropSideAt(x, y) !== null) return true;
   if (kind === "search") return !!searchQueueDropElementAt(x, y) || !!searchDropPathAt(x, y);
-  if (folderDropElementAt(x, y)) return true;
+  if (folderDropElementAt(x, y) || pointerTrackDropAt(x, y)) return true;
   const hit = document.elementFromPoint(x, y);
   return !!hit?.closest(`[${TRACK_SAMPLER_DROP_TARGET_ATTR}], [data-kd-track-trash-target], [${TRACK_COVER_DROP_TARGET_ATTR}]`);
 }

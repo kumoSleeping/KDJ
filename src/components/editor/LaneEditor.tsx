@@ -13,7 +13,6 @@ import { api } from "../../lib/api";
 import { isGap, laneClock, snapToBar, type LaneClip, type LaneOp } from "../../lib/lanes";
 import { getPlayerSession, requestPlayerCommand, subscribePlayerSession } from "../../lib/playerSession";
 import { playTrack } from "../../lib/playTrack";
-import { activeTrackDragIds, readTrackDragIds } from "../../lib/trackDrag";
 import { requestLocalVideo, useVideoPip } from "../../lib/videoPip";
 import { clipOf, isPictureTrack, isSongTrack, songOf, songsOf, useActiveProject, useLaneEditor, type LaneProject } from "../../stores/laneEditorStore";
 import type { Track } from "../../types";
@@ -44,10 +43,8 @@ function usePlayhead(trackId: number | null) {
 }
 
 /** The library rows of a drop, read whole (their lengths), in the order they were dragged. */
-async function droppedTracks(transfer: DataTransfer): Promise<Track[]> {
-  const ids = readTrackDragIds(transfer);
-  const list = ids.length ? ids : [...activeTrackDragIds()];
-  const tracks = await Promise.all(list.map(id => api.track(id).catch(() => null)));
+async function droppedTracks(ids: readonly number[]): Promise<Track[]> {
+  const tracks = await Promise.all(ids.map(id => api.track(id).catch(() => null)));
   return tracks.filter((track): track is Track => Boolean(track && (track.duration ?? 0) > 0));
 }
 
@@ -67,8 +64,8 @@ export function LaneEditor() {
   const span = Math.max(1, layout.duration);
 
   /** What was dropped goes where it belongs: songs into the song lane at the slot, pictures at `at`. */
-  const dropInto = async (transfer: DataTransfer, at: number) => {
-    const tracks = await droppedTracks(transfer);
+  const dropInto = async (ids: readonly number[], at: number) => {
+    const tracks = await droppedTracks(ids);
     if (tracks.length === 0) return;
     if (!active) { await createFrom(tracks); return; }
     const songs = tracks.filter(isSongTrack), pictures = tracks.filter(isPictureTrack);
@@ -173,7 +170,7 @@ export function LaneEditor() {
     {status && <p className="kd-lanes-status" role={error ? "alert" : undefined} data-error={error ? "" : undefined} title={error ?? undefined}>{status}</p>}
 
     <LaneBoard project={project} zoom={zoom} selected={selected} select={select} playhead={playhead.position}
-      seek={seek} edit={send} onDropped={(transfer, at) => void dropInto(transfer, at)} />
+      seek={seek} edit={send} onDropped={(ids, at) => void dropInto(ids, at)} />
 
     <div className="kd-lanes-tools" role="toolbar" aria-label="剪辑工具">
       {TOOLS.map(({ id, label, icon: Icon }) => <button key={id} type="button" className="kd-lanes-tool" disabled={!open}

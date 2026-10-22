@@ -3,12 +3,14 @@
  * (when there are any), the branches, the picture and the songs, under one clock. Everything on
  * them is handled directly: a press chooses it, a drag moves it, a drag at either end pulls that
  * end; in a VJ what is dragged lands on the song's beats unless Alt is held. Library rows dropped
- * here go where they belong (LaneEditor's `onDropped`).
+ * here go where they belong (LaneEditor's `onDropped`), whether the system carried them (the
+ * harmonic list) or the track table followed the pointer by hand (lib/pointerTrackDrop.ts).
  */
 import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { rulerStep } from "../../lib/aiTimeline";
 import { fileLabel, isGap, laneClock, snapToBar, type LaneClip, type LaneOp } from "../../lib/lanes";
-import { activeTrackDragIds, isTrackDrag } from "../../lib/trackDrag";
+import { activeTrackDragIds, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
+import { usePointerTrackDrop } from "../../lib/pointerTrackDrop";
 import { useLibraryStore } from "../../stores/libraryStore";
 import { isSongTrack, songsOf, type LaneProject } from "../../stores/laneEditorStore";
 
@@ -30,9 +32,9 @@ function secondStep(span: number): number {
 }
 
 /** What a library drag holds, read while it is still over the lanes: songs, or pictures. */
-function draggedKind(): "song" | "picture" | null {
+function draggedKind(ids: readonly number[]): "song" | "picture" | null {
   const byId = useLibraryStore.getState().summaryById;
-  const rows = activeTrackDragIds().map(id => byId.get(id)).filter(Boolean);
+  const rows = ids.map(id => byId.get(id)).filter(Boolean);
   if (rows.length === 0) return null;
   return rows.some(row => isSongTrack(row!)) ? "song" : "picture";
 }
@@ -40,7 +42,7 @@ function draggedKind(): "song" | "picture" | null {
 export function LaneBoard({ project, zoom, selected, select, playhead, seek, edit, onDropped }: {
   project: LaneProject; zoom: number; selected: string | null; select(id: string | null): void;
   playhead: number | null; seek(t: number): void; edit(ops: LaneOp[]): void;
-  onDropped(transfer: DataTransfer, at: number): void;
+  onDropped(ids: readonly number[], at: number): void;
 }) {
   const { doc, layout, grid } = project;
   const board = useRef<HTMLDivElement>(null);
@@ -178,29 +180,42 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, edi
     "data-dragging": drag?.moved && drag.lane === lane && drag.key === key ? "" : undefined,
   });
 
+  /** Where rows let go at `x` land: songs at a slot of the song lane, pictures at a time. */
+  const landing = (ids: readonly number[], x: number): { lane: "song" | "main"; at: number } => {
+    const t = timeAt(x);
+    if (draggedKind(ids) === "song") {
+      const index = songs.filter(s => s.at + s.length / 2 < t).length;
+      const end = songs.length ? songs[songs.length - 1].at + songs[songs.length - 1].length : 0;
+      return { lane: "song", at: songs[index]?.at ?? end };
+    }
+    return { lane: "main", at: vj ? snapToBar(downbeats, t) : t };
+  };
+  const hoverRows = (ids: readonly number[], x: number) => setDrop(landing(ids, x));
+  const dropRows = (ids: readonly number[], x: number) => {
+    setDrop(null);
+    if (ids.length) onDropped(ids, landing(ids, x).at);
+  };
+  usePointerTrackDrop(board, {
+    over: (ids, x) => { hoverRows(ids, x); return null; },
+    leave: () => setDrop(null),
+    drop: (ids, x) => dropRows(ids, x),
+  });
+
   return <div className="kd-lanes-scroll">
     <div ref={board} className="kd-lanes-board" style={{ width: `${ZOOMS[zoom] * 100}%` }}
       onDragOver={event => {
         if (!isTrackDrag(event)) return;
         event.preventDefault();
         event.stopPropagation();
-        const t = timeAt(event.clientX);
-        if (draggedKind() === "song") {
-          const index = songs.filter(s => s.at + s.length / 2 < t).length;
-          const end = songs.length ? songs[songs.length - 1].at + songs[songs.length - 1].length : 0;
-          setDrop({ lane: "song", at: songs[index]?.at ?? end });
-        } else {
-          setDrop({ lane: "main", at: vj ? snapToBar(downbeats, t) : t });
-        }
+        hoverRows(activeTrackDragIds(), event.clientX);
       }}
       onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDrop(null); }}
       onDrop={event => {
         if (!isTrackDrag(event)) return;
         event.preventDefault();
         event.stopPropagation();
-        const at = drop?.at ?? timeAt(event.clientX);
-        setDrop(null);
-        onDropped(event.dataTransfer, at);
+        const ids = readTrackDragIds(event.dataTransfer);
+        dropRows(ids.length ? ids : activeTrackDragIds(), event.clientX);
       }}>
       <div className="kd-lanes-ruler" onPointerDown={event => { if (event.target === event.currentTarget) seek(timeAt(event.clientX)); }}>
         {beatTicks.map(at => <span key={`b${at}`} className="kd-lanes-beat" style={{ left: pct(at, span) }} />)}

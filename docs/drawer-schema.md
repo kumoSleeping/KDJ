@@ -188,7 +188,7 @@ surface:
      usePage: useTaskView,            // a hook: () => useTaskPanelStore(state => state.view)
      onPage: id => setTaskView(id),
      tools: <button …/>,              // optional compact actions before the close button
-     titleDrop: { label, accepts, drop }, // optional: what the title row takes when dragged onto
+     titleDrop: { label, drop },      // optional: library rows dropped on the title row, drop(ids)
                                       // (剪辑: songs dropped there start another project, a page);
                                       // the row lifts a tone while it is over it, no other mark
      body: <DownloadTaskPages />,     // uses <SlidePages page={taskView} order={ids}>

@@ -86,6 +86,7 @@ import {
   FOLDER_DROP_PATH_ATTR,
 } from "../../lib/folderDrop";
 import { pointerAccepts } from "../../lib/dragRefusal";
+import { pointerTrackDropAt, type PointerTrackDrop } from "../../lib/pointerTrackDrop";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
 import { exportProject } from "../../lib/kdjvPlay";
@@ -1289,6 +1290,8 @@ export const TrackTable = memo(function TrackTable({
     let dragging = false;
     let ghost: PointerDragGhost | null = null;
     let unlockScroll: (settleMs?: number) => void = () => undefined;
+    // A place of the app's own that takes the rows (the editor), told when the pointer leaves it.
+    let place: PointerTrackDrop | null = null;
 
     try {
       sourceRow.setPointerCapture(pointerId);
@@ -1313,8 +1316,15 @@ export const TrackTable = memo(function TrackTable({
       clearTargets();
       const ai = aiDropElementAt(x, y);
       ghost?.hint(ai ? "交给 AI" : null);
+      const under = ai ? null : pointerTrackDropAt(x, y);
+      if (place !== under) place?.leave();
+      place = under;
       if (ai) {
         ai.setAttribute("data-kd-pointer-ai-over", "");
+        return;
+      }
+      if (place) {
+        ghost?.hint(place.over(ids, x, y));
         return;
       }
       const folder = folderDropElementAt(x, y);
@@ -1376,6 +1386,8 @@ export const TrackTable = memo(function TrackTable({
       window.removeEventListener("pointercancel", onCancel, true);
       window.removeEventListener("wheel", blockDragScroll, true);
       clearTargets();
+      place?.leave();
+      place = null;
       if (!preserveScrollLock) {
         unlockScroll();
         unlockScroll = () => undefined;
@@ -1489,9 +1501,15 @@ export const TrackTable = memo(function TrackTable({
       const cover = hit?.closest<HTMLElement>(`[${TRACK_COVER_DROP_TARGET_ATTR}]`);
       const coverTrackId = cover ? Number(cover.dataset.kdTrackId) : NaN;
       const ai = aiDropElementAt(up.clientX, up.clientY);
+      const taker = ai ? null : pointerTrackDropAt(up.clientX, up.clientY);
       cleanup();
       if (!dragging) return;
       up.preventDefault();
+      if (taker) {
+        finishTrackDrop();
+        taker.drop(ids, up.clientX, up.clientY);
+        return;
+      }
       // Agent Mode: the songs become cards that go to the AI with the request.
       if (ai) {
         finishTrackDrop();
