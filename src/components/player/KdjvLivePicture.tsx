@@ -7,6 +7,13 @@
  *
  * The sound is the project's mix, played by the player as the row's file (kdjvPlay.ts); this
  * only follows its clock. Gifs animate on their own.
+ *
+ * A clip is shown only once its decoder is truly there: paused, on the frame of now; playing,
+ * frames advancing in step with the clock. WebKit holds a seek's first frame for hundreds of
+ * milliseconds and starts late, so a clip shown at its cut regardless flashed black or a wrong
+ * frame and then jumped. Until a clip is shown it may seek freely (preparing); while it is shown it
+ * is never seeked for a small drift, only for one too large to watch. A clip not yet shown at its
+ * cut leaves the clip before it on its last frame (heldClips): the picture waits, it never jumps.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../../lib/api";
@@ -19,8 +26,16 @@ import {
   type MediaSyncDetail,
 } from "../../lib/mediaSync";
 import { configurePictureVideo, VideoPlaybackEngine } from "../../lib/videoPlaybackEngine";
-import { clipAlpha, clipBox, clipSpeed, preparedClips, sourceTime } from "../../lib/kdjvLive";
+import { clipAlpha, clipBox, clipSpeed, heldClips, preparedClips, sourceTime } from "../../lib/kdjvLive";
+import { tracePlayback } from "../../lib/playbackTrace";
 import type { KdjvLive } from "../../types";
+
+/** A shown clip is seeked while playing only when it is this far off the clock. */
+const VISIBLE_DRIFT_SEC = 0.35;
+/** Playing frames have to advance this many ticks in a row, near the clock, before a clip shows. */
+const SETTLED_TICKS = 6;
+const SETTLED_PLAYING_SEC = 0.12;
+const SETTLED_PAUSED_SEC = 0.05;
 
 export interface LiveTransport {
   position: number;
@@ -80,12 +95,29 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
     const sync = engine.current!;
     const seeks = new WeakMap<HTMLVideoElement, number>();
     const running = new WeakMap<HTMLVideoElement, boolean>();
+    // Whether each element has been shown; once shown it stays shown for as long as it lives.
+    const revealed = new WeakMap<HTMLVideoElement | HTMLImageElement, boolean>();
+    const motion = new WeakMap<HTMLVideoElement, { at: number; ticks: number }>();
+    const targets = new WeakMap<HTMLVideoElement, number>();
     let frame = 0, lastAlign = -Infinity, lastReport = -Infinity, shown = "";
     const seek = (video: HTMLVideoElement, target: number) => { void sync.seek(video, target).catch(() => undefined); };
+    // A shown clip drifting a little is left to run: a seek would freeze and jump it on screen.
+    const alignShown = (video: HTMLVideoElement) => {
+      const target = targets.get(video);
+      if (target !== undefined && Math.abs(target - video.currentTime) > VISIBLE_DRIFT_SEC) {
+        tracePlayback("kdjv-realign", { track: trackId, error: Math.round((target - video.currentTime) * 1000) });
+        seek(video, target);
+      }
+    };
+    const isShown = (n: number) => {
+      const node = nodes.current.get(n);
+      return node ? revealed.get(node) === true : false;
+    };
     const tick = (now: number) => {
       frame = requestAnimationFrame(tick);
       const t = projectTime(trackId, heard);
-      const want = preparedClips(project, t.position, t.playing);
+      const held = heldClips(project, t.position, isShown);
+      const want = [...new Set([...preparedClips(project, t.position, t.playing), ...held])].sort((a, b) => a - b);
       const key = want.join(",");
       if (key !== shown) { shown = key; setPrepared(want); }
       const align = !t.playing || now - lastAlign >= 100;
@@ -94,14 +126,41 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
         const c = project.clips[n];
         if (!c) continue;
         const local = t.position - c.at;
-        node.style.opacity = String(clipAlpha(c, local));
-        if (!(node instanceof HTMLVideoElement)) continue;
+        const holding = held.includes(n) && local >= c.length;
+        if (!(node instanceof HTMLVideoElement)) {
+          if (!revealed.get(node) && node.complete && node.naturalWidth > 0) revealed.set(node, true);
+          node.style.opacity = revealed.get(node) ? String(holding ? c.opacity : clipAlpha(c, local)) : "0";
+          continue;
+        }
+        if (holding) {
+          // The clip before a cut that is still settling: its last frame, still.
+          if (!node.paused) node.pause();
+          if (running.get(node)) sync.releaseClock(node);
+          running.set(node, false);
+          node.style.opacity = revealed.get(node) ? String(c.opacity) : "0";
+          continue;
+        }
         const target = Math.max(0, sourceTime(c, local));
+        targets.set(node, target);
         const speed = clipSpeed(c);
         // Before its cut a clip runs muted and transparent on the same clock, from where its
         // source allows; one that cannot start early waits on its first frame.
         const early = local < 0 && c.in + local * speed >= 0;
         const shouldPlay = t.playing && (local >= 0 || early) && local < c.length;
+        if (!revealed.get(node) && local >= 0 && local < c.length) {
+          const step = motion.get(node) ?? { at: node.currentTime, ticks: 0 };
+          step.ticks = !node.paused && node.currentTime > step.at + 0.002 ? step.ticks + 1 : 0;
+          step.at = node.currentTime;
+          motion.set(node, step);
+          const settled = !node.seeking && node.readyState >= 2 && (shouldPlay
+            ? !node.paused && step.ticks >= SETTLED_TICKS && Math.abs(target - node.currentTime) <= SETTLED_PLAYING_SEC
+            : Math.abs(target - node.currentTime) <= SETTLED_PAUSED_SEC);
+          if (settled) {
+            revealed.set(node, true);
+            if (local > 0.1) tracePlayback("kdjv-reveal", { track: trackId, clip: n, lateMs: Math.round(local * 1000) });
+          }
+        }
+        node.style.opacity = revealed.get(node) ? String(clipAlpha(c, local)) : "0";
         // A stop takes the decoder off the clock once; releasing it every frame would also
         // cancel the seek that shows the paused frame.
         if (!shouldPlay && running.get(node)) sync.releaseClock(node);
@@ -110,7 +169,9 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
         if (!align || node.readyState < 1) continue;
         if (shouldPlay && t.clock) {
           const clock: LocalVideoClock = { ...t.clock, position: target, rate: t.clock.rate * speed };
-          sync.followClock(node, clock, seek, undefined, early && local < -1);
+          // Unseen, it prepares: aligned as soon as it drifts. Shown, only a large drift aligns it.
+          const shownNow = revealed.get(node) === true;
+          sync.followClock(node, clock, seek, shownNow ? alignShown : undefined, !shownNow);
         } else if (shouldPlay) {
           sync.sync(node, target, "heartbeat", t.rate * speed, seek);
         } else {
