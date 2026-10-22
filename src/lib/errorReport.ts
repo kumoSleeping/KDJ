@@ -13,6 +13,12 @@ export const useReportEntry = create<{ ready: boolean; setReady(ready: boolean):
   setReady: ready => set({ ready }),
 }));
 
+/** What the notice said that the report was last asked for from: the report fills it in as the problem. */
+export const useReportProblem = create<{ text: string; set(text: string): void }>(set => ({
+  text: "",
+  set: text => set({ text }),
+}));
+
 /**
  * From the notice of an error to the report (设置 → 系统 → 日志): what the notice said joins the
  * recent errors the report carries, and the settings open with the report unfolded. Nothing is
@@ -20,6 +26,7 @@ export const useReportEntry = create<{ ready: boolean; setReady(ready: boolean):
  */
 export function reportError(message: string): void {
   captureDiagnostic("ui", "notice", message);
+  useReportProblem.getState().set(message);
   useSettingsPage.getState().setPage("system");
   useSettingsFocus.getState().focus("report");
   useAppStore.getState().openSettingsPanel();

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { FolderOpen, Send } from "lucide-react";
 import { getBridge } from "../../lib/bridge";
 import { api } from "../../lib/api";
+import { useReportProblem } from "../../lib/errorReport";
 import { useSettingsFocus } from "../../lib/settingsPages";
 import { Button, InlineNotice, Panel } from "../common";
 import { ErrorReport } from "./ErrorReport";
@@ -17,11 +18,15 @@ export function ActivityLogPanel() {
   const [opening, setOpening] = useState(false);
   // 「上报」 of an error's notice lands here: the report unfolds and is brought into view.
   const asked = useSettingsFocus(state => (state.section === "report" ? state.epoch : 0));
+  // The report asked for from a notice opens with that notice as its problem; opened by hand, blank.
+  const [request, setRequest] = useState({ epoch: 0, problem: "" });
   const anchor = useRef<HTMLDivElement>(null);
   const landing = useRef<number[]>([]);
   useEffect(() => {
     if (!asked) return;
     useSettingsFocus.getState().clear();
+    setRequest({ epoch: asked, problem: useReportProblem.getState().text });
+    useReportProblem.getState().set("");
     setReporting(true);
     const show = () => {
       const node = anchor.current;
@@ -45,11 +50,14 @@ export function ActivityLogPanel() {
           .catch(error => setError(error instanceof Error ? error.message : String(error)))
           .finally(() => setOpening(false));
       }}><FolderOpen size={14}/>打开日志文件夹</Button>
-      <Button variant="ghost" size="sm" aria-expanded={reporting} onClick={() => setReporting(open => !open)}>
+      <Button variant="ghost" size="sm" aria-expanded={reporting} onClick={() => {
+        setRequest(current => ({ epoch: current.epoch, problem: "" }));
+        setReporting(open => !open);
+      }}>
         <Send size={14}/>{reporting ? "收起" : "上报错误"}
       </Button>
     </div>
     <InlineNotice text={error} block onDismiss={() => setError("")}/>
-    {reporting && <ErrorReport />}
+    {reporting && <ErrorReport key={request.epoch} problem={request.problem} />}
   </Panel>;
 }
