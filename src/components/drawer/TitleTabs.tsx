@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
+import type { TitleDrop } from "./drawerSchema";
 import "./TitleTabs.css";
 
 export interface TitleTab<T extends string = string> {
@@ -13,7 +14,7 @@ export interface TitleTab<T extends string = string> {
  * the others wait beside it, smaller and quieter. With no tabs it is a plain title. Nothing
  * else is written on the title's line: the title row names the app, not what it is about.
  */
-export function TitleTabs<T extends string>({ label, title, tabs, value, onChange, panelId, children }: {
+export function TitleTabs<T extends string>({ label, title, tabs, value, onChange, panelId, drop, children }: {
   /** Names the group for assistive technology. */
   label: string;
   /** Shown when there are no tabs. */
@@ -23,6 +24,8 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
   onChange?(id: T): void;
   /** Element the tabs switch. */
   panelId?: string;
+  /** What the row takes when something is dragged onto it (drawerSchema.ts `titleDrop`). */
+  drop?: TitleDrop;
   /** Actions at the right end of the row. */
   children?: ReactNode;
 }) {
@@ -55,6 +58,9 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
     return () => { window.clearTimeout(settle); watch?.disconnect(); };
   }, [value, tabs]);
   const pick = (id: T) => { if (id !== value) onChange?.(id); };
+  // Something taken by the row is over it: the row is lit and names what a drop does.
+  const [hot, setHot] = useState(false);
+  const takes = (event: DragEvent<HTMLElement>) => Boolean(drop?.accepts(event.dataTransfer));
   const move = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!tabs?.length || event.altKey || event.ctrlKey || event.metaKey) return;
     const at = tabs.findIndex(tab => tab.id === value);
@@ -67,7 +73,10 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
     pick(target.id);
     list.current?.querySelector<HTMLElement>(`[data-tab="${target.id}"]`)?.focus({ preventScroll: true });
   };
-  return <header className="kd-title-tabs">
+  return <header className="kd-title-tabs" data-drop={hot || undefined} title={hot ? drop?.label : undefined}
+    onDragOver={drop ? event => { if (!takes(event)) return; event.preventDefault(); event.dataTransfer.dropEffect = "copy"; setHot(true); } : undefined}
+    onDragLeave={drop ? event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setHot(false); } : undefined}
+    onDrop={drop ? event => { if (!takes(event)) return; event.preventDefault(); setHot(false); drop.drop(event.dataTransfer); } : undefined}>
     <div ref={view} className="kd-title-tabs-text"
       data-fade={carry.left && carry.right ? "both" : carry.left ? "left" : carry.right ? "right" : undefined}>
       {tabs?.length ? <div ref={list} className="kd-title-tabs-list" role="tablist" aria-label={label} onKeyDown={move}

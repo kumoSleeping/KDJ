@@ -21,6 +21,14 @@ import type { ReactNode } from "react";
  */
 export type DrawerExtent = "fit" | "at-least-half" | "two-thirds" | "full";
 
+/** What the title row of an app takes when something is dragged onto it. */
+export interface TitleDrop {
+  accepts(transfer: DataTransfer): boolean;
+  drop(transfer: DataTransfer): void;
+  /** Names what a drop there does, for the tooltip while it is over the row. */
+  label: string;
+}
+
 /** One page of a drawer. Its label is a word of the drawer's title. */
 export interface DrawerPage {
   id: string;
@@ -58,6 +66,12 @@ export interface DrawerSpec {
   onPage?(id: string): void;
   /** Compact actions at the right end of the title row, before the close button. */
   tools?: ReactNode;
+  /**
+   * Things dragged onto the title row (the editor: a song dropped there starts another project,
+   * another page). `accepts` sees the drag (WKWebView hides custom types while dragging over, so
+   * ask `isTrackDrag` for library rows); the row is lit while it is over it.
+   */
+  titleDrop?: TitleDrop;
   body: ReactNode;
   /**
    * A layer of the app's own under the whole panel, title row included: the host draws it in

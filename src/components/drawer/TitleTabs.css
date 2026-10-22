@@ -110,3 +110,8 @@
 @media (prefers-reduced-motion: reduce) {
   .kd-title-tabs-list > button, .kd-title-tabs-list { transition: none; }
 }
+/* Something the row takes is dragged over it: the row's surface lifts a tone. */
+.kd-title-tabs[data-drop] {
+  background: var(--kd-hover);
+  border-radius: 10px;
+}
