@@ -500,9 +500,11 @@ async fn lookup_uncached(state: &AppState, req: LyricsRequest) -> ApiResult<Lyri
         .map(|platform| engine_label(*platform))
         .collect::<Vec<_>>()
         .join(" / ");
+    // A song without lyrics anywhere is an answer, not a fault; its title stays out of the log.
     Err(ApiError::not_found(format!(
         "没找到「{title}」的歌词（已查{engine_label}）"
-    )))
+    ))
+    .expected())
 }
 
 #[cfg(test)]

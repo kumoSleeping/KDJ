@@ -16,7 +16,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -36,6 +36,52 @@ const RECENT_BYTES: u64 = 256 * 1024;
 const MEMORY_LIMIT: usize = 300;
 static STORE: OnceLock<Store> = OnceLock::new();
 static DROPPED: AtomicU64 = AtomicU64::new(0);
+/// The same warning or error (numbers aside) is kept this many times a run; after that it is only counted.
+const REPEAT_LIMIT: u32 = 3;
+static REPEATS: OnceLock<Mutex<HashMap<String, (String, u32)>>> = OnceLock::new();
+
+/// Whether this warning or error has been kept often enough this run. Info entries (the startup
+/// line, login steps, the user's actions) are a sequence and always kept.
+fn repeated(level: &str, category: &str, source: &str, message: &str) -> bool {
+    if level.eq_ignore_ascii_case("info") {
+        return false;
+    }
+    let mut shape = String::with_capacity(source.len() + message.len().min(400) + 16);
+    for part in [level, category, source, message] {
+        let mut digits = false;
+        for c in part.chars().take(400) {
+            let digit = c.is_ascii_digit();
+            if !(digit && digits) {
+                shape.push(if digit { '#' } else { c });
+            }
+            digits = digit;
+        }
+        shape.push('\u{1f}');
+    }
+    let Ok(mut seen) = REPEATS.get_or_init(Default::default).lock() else {
+        return false;
+    };
+    if seen.len() > 2_000 && !seen.contains_key(&shape) {
+        return false;
+    }
+    let count = &mut seen.entry(shape).or_insert_with(|| (source.chars().take(120).collect(), 0)).1;
+    *count += 1;
+    *count > REPEAT_LIMIT
+}
+
+/// What was left out as repeats this run, most often first: `(source, times left out)`.
+pub(crate) fn repeats() -> Vec<(String, u32)> {
+    let Some(Ok(seen)) = REPEATS.get().map(Mutex::lock) else {
+        return Vec::new();
+    };
+    let mut left: Vec<(String, u32)> = seen
+        .values()
+        .filter(|(_, count)| *count > REPEAT_LIMIT)
+        .map(|(source, count)| (source.clone(), count - REPEAT_LIMIT))
+        .collect();
+    left.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    left
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -215,6 +261,9 @@ pub fn record(level: &str, category: &str, source: &str, message: &str) {
     let Some(store) = STORE.get() else {
         return;
     };
+    if repeated(level, category, source, message) {
+        return;
+    }
     let entry = Entry {
         timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         session: store.session.clone(),
@@ -303,6 +352,10 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for DiagnosticLayer {
 #[derive(Clone)]
 pub(crate) struct DiagnosticDetail(pub String);
 
+/// Marks a response that answers "not there" as usual (see `ApiError::expected`): not recorded.
+#[derive(Clone)]
+pub(crate) struct DiagnosticExpected;
+
 pub async fn capture_requests(request: Request<axum::body::Body>, next: Next) -> Response {
     // MatchedPath contains the route template, never query strings or user path parameters.
     let route = request
@@ -315,6 +368,7 @@ pub async fn capture_requests(request: Request<axum::body::Body>, next: Next) ->
     let response = next.run(request).await;
     if (response.status().is_client_error() || response.status().is_server_error())
         && !route.starts_with("/api/diagnostics")
+        && response.extensions().get::<DiagnosticExpected>().is_none()
     {
         let detail = response
             .extensions()
@@ -361,4 +415,22 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/diagnostics/prepare", post(reports::prepare))
         .route("/api/diagnostics/submit", post(reports::submit))
         .layer(DefaultBodyLimit::max(512 * 1024))
+}
+
+#[cfg(test)]
+mod repeat_tests {
+    use super::*;
+
+    #[test]
+    fn the_same_warning_is_kept_three_times_a_run_then_counted() {
+        let source = "repeat_tests::the_same_warning";
+        let kept = (0..7)
+            .filter(|n| !repeated("warn", "local", source, &format!("GET status=404 duration_ms={n}")))
+            .count();
+        assert_eq!(kept, 3);
+        assert!(repeats().contains(&(source.to_string(), 4)));
+        // Another message from the same place, and the user's own steps, are their own.
+        assert!(!repeated("warn", "local", source, "曲库根目录离线或不可读"));
+        assert!((0..10).all(|_| !repeated("info", "action", "repeat_tests::play", "播放 local mp3")));
+    }
 }

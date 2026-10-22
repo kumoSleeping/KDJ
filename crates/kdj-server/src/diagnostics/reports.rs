@@ -55,6 +55,30 @@ pub async fn prepare(Json(request): Json<PrepareRequest>) -> ApiResult<Json<serd
             e
         })
         .collect();
+    // The trail of what the user did is the last 50 of their actions; the errors keep their room.
+    let mut surplus = entries.iter().filter(|e| e.category == "action").count().saturating_sub(50);
+    entries.retain(|e| {
+        let drop = surplus > 0 && e.category == "action";
+        surplus -= usize::from(drop);
+        !drop
+    });
+    let left_out = super::repeats();
+    if !left_out.is_empty() {
+        let message = left_out
+            .iter()
+            .take(40)
+            .map(|(source, count)| format!("{source} ×{count}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        entries.push(Entry {
+            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            session: store.session.clone(),
+            level: "info".into(),
+            category: "diagnostics".into(),
+            source: "repeats".into(),
+            message: redact::text(&format!("本次运行里同样的记录超过 3 次后只计数，省略了：\n{message}"), 8_000),
+        });
+    }
     let mut report = serde_json::json!({
         "schema":1, "id":id, "app_version":env!("CARGO_PKG_VERSION"),
         "created_at":chrono::Utc::now().to_rfc3339(),

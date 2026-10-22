@@ -35,9 +35,19 @@ export function captureDiagnostic(category: string, source: string, error: unkno
     schedule();
   } catch { /* Diagnostics must not break the failing operation. */ }
 }
+/**
+ * One step of what the user did, for the report's trail (the report keeps the last 50): a fixed
+ * word and counts or kinds only — never a title, a path, a query or an address.
+ */
+export function noteAction(source: string, what: string): void {
+  captureDiagnostic("action", source, what, "", "info");
+}
+
 function schedule(): void {
   if (timer !== undefined) return;
   timer = setTimeout(() => { timer = undefined; void flushDiagnostics(); }, 1500);
+  // Under Node (the tests) a pending write must not keep the process alive.
+  (timer as { unref?(): void }).unref?.();
 }
 export async function flushDiagnostics(): Promise<void> {
   if (flushing) return flushing;
@@ -87,6 +97,8 @@ export function installDiagnostics(): void {
     if (event.target instanceof HTMLMediaElement) {
       captureDiagnostic("playback", event.target.tagName.toLowerCase(), "MediaError", mediaDiagnostic(event.target));
     } else if (event instanceof ErrorEvent) {
+      // The browser's own note that a resize took two frames to settle: harmless, and in every report.
+      if (/ResizeObserver loop/.test(event.message)) return;
       captureDiagnostic("render", "window.error", event.error ?? event.message, `line=${event.lineno} column=${event.colno}`);
     } else if (event.target instanceof HTMLElement) {
       captureDiagnostic("render", "resource", `Failed ${event.target.tagName}`, "", "warn");
@@ -113,4 +125,5 @@ export function installDiagnostics(): void {
     }
   };
   window.addEventListener("pagehide", () => { void flushDiagnostics(); });
+  noteAction("window", `载入 ${new URLSearchParams(window.location.search).get("window") ?? "main"}`);
 }

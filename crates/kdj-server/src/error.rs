@@ -13,6 +13,9 @@ pub struct ApiError {
     pub code: Option<&'static str>,
     pub stage: Option<&'static str>,
     pub attempt_id: Option<String>,
+    /// An ordinary answer that something is not there (no cover, no local lyrics), not a fault:
+    /// the response says so as usual, but it is not recorded in the diagnostics.
+    pub expected: bool,
 }
 
 impl ApiError {
@@ -20,9 +23,11 @@ impl ApiError {
         ApiError {
             status,
             detail: detail.into(),
-            code: None, stage: None, attempt_id: None,
+            code: None, stage: None, attempt_id: None, expected: false,
         }
     }
+
+    pub fn expected(mut self) -> Self { self.expected = true; self }
 
     pub fn coded(mut self, code: &'static str) -> Self { self.code = Some(code); self }
 
@@ -51,6 +56,9 @@ impl IntoResponse for ApiError {
             "detail": self.detail, "code": self.code, "stage": self.stage, "attempt_id": self.attempt_id,
         }))).into_response();
         response.extensions_mut().insert(crate::diagnostics::DiagnosticDetail(diagnostic));
+        if self.expected {
+            response.extensions_mut().insert(crate::diagnostics::DiagnosticExpected);
+        }
         if let Some(attempt) = self.attempt_id.and_then(|s| s.parse().ok()) {
             response.headers_mut().insert("x-kdj-attempt-id", attempt);
         }

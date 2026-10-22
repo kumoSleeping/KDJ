@@ -293,7 +293,8 @@ export function finishApiActivity(
   // 4xx 通常是资源不存在、状态冲突、限流或用户输入被拒绝，保留为可排查的警告；
   // 只有断网/无响应和 5xx 才表示服务链路本身出错。这样预期的歌词 404、播放中
   // 波形让位 422 不会淹没真正的后端故障。
-  const level: ActivityLogLevel = outcome.ok
+  // A song no platform has lyrics for is an answer, not a failure.
+  const level: ActivityLogLevel = outcome.ok || (descriptor.action === "歌词 API" && outcome.status === 404)
     ? "info"
     : outcome.status === 0 || outcome.status >= 500
       ? "error"

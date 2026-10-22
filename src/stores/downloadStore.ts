@@ -9,6 +9,7 @@
 
 import { create } from "zustand";
 import { api } from "../lib/api";
+import { noteAction } from "../lib/diagnostics";
 import { isSparseDownloadTitle, withDownloadDisplay } from "../lib/downloadDisplay";
 import { forgetQueueDraft, rememberVideoEnqueue } from "../lib/queueTaskDraft";
 import { sortDownloadTasks } from "../lib/downloadOrder";
@@ -240,6 +241,8 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       dest_dir: destDir || undefined,
       follow_default_dir: (destDir && options?.follow_default_dir) || undefined,
     };
+    const platforms = [...new Set(sources.map(source => source.platform))].join(",");
+    noteAction("download", `入队 ${sources.length} 首 ${platforms} 约 ${Math.ceil(JSON.stringify(body).length / 1024)} KB`);
     const tasks = await api.enqueue(body);
     tasks.forEach((task, index) => {
       const source = sources[index];

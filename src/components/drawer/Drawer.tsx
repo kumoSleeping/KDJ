@@ -7,6 +7,7 @@ import { createPortal } from "react-dom";
 import { MOTION_IN_MS, MOTION_OUT_MS, MOTION_REDUCED_MS, prefersReducedMotion } from "../../lib/motion";
 import { SONG_SWAP_IN_EASE, SONG_SWAP_OUT_EASE } from "../../lib/songSwapMotion";
 import { removeLocalStorage } from "../../lib/storageWrite";
+import { noteAction } from "../../lib/diagnostics";
 import { raiseSurface } from "../../lib/surfaceOrder";
 import { useWindowTaken } from "../../lib/windowTaken";
 import type { DrawerEntry, DrawerSpec } from "./drawerSchema";
@@ -172,6 +173,7 @@ function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart }: {
 }) {
   const layer = useRef<HTMLElement>(null);
   const body = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (!leaving) noteAction("drawer", `打开 ${spec.id}`); }, [spec.id]);
   // A `fit` or `at-least-half` app is as tall as what it holds (the limits are the
   // stylesheet's); `fit` is that height in px once it has been measured.
   const [fit, setFit] = useState<number | null>(null);

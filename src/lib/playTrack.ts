@@ -14,6 +14,7 @@ import {
   materializePlayableTrack,
 } from "./playIntent";
 import { loadReleaseOverviewForTrack } from "./waveformCache";
+import { noteAction } from "./diagnostics";
 import type { PlayableTrack } from "../types";
 
 export { isCompleteTrack, materializePlayableTrack } from "./playIntent";
@@ -41,6 +42,7 @@ export function playTrack(track: PlayableTrack, autoPlay = true, purpose?: "comp
     return 0;
   }
   notePlay();
+  noteAction("play", `播放 ${track.source_platform || "local"} ${track.format || "?"}${autoPlay ? "" : " 装入"}${purpose ? ` ${purpose}` : ""}${position ? " 带位置" : ""}`);
   const intentId = issuePlayIntentId();
   const receivedAt = typeof performance !== "undefined" ? performance.now() : undefined;
   const playable = materializePlayableTrack(track);

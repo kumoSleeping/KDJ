@@ -6013,7 +6013,7 @@ async fn library_lyrics(
         &track.source_platform,
         &track.source_key,
     )?
-    .ok_or_else(|| ApiError::not_found("本地没有歌词"))?;
+    .ok_or_else(|| ApiError::not_found("本地没有歌词").expected())?;
     if !crate::lyrics::lyric_timeline_compatible(track.duration, &stored.lrc, &stored.word_lrc) {
         return Err(ApiError::not_found("本地歌词时间轴与当前音频版本不匹配"));
     }
@@ -8178,7 +8178,8 @@ async fn library_cover(
     let library = Arc::clone(&state.library);
     let source = run_library_cover_read(move || library.media_source(id))
         .await?
-        .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
+        // A row still showing a song that has just left the library asks once more.
+        .ok_or_else(|| ApiError::not_found("曲目不存在").expected())?;
     let path = PathBuf::from(&source.path);
     if kdj_providers::workshop_images::is_image_path(&path) {
         let width = params.size.unwrap_or(960).clamp(32, 1920);
@@ -8192,7 +8193,7 @@ async fn library_cover(
         {
             return Ok((StatusCode::OK, cover_headers(JPEG_MIME.into()), data).into_response());
         }
-        return Err(ApiError::not_found("没有可用封面"));
+        return Err(ApiError::not_found("没有可用封面").expected());
     }
 
     let cover_path = path.clone();
@@ -8219,7 +8220,7 @@ async fn library_cover(
             return Ok((StatusCode::OK, cover_headers(JPEG_MIME.into()), data).into_response());
         }
     }
-    Err(ApiError::not_found("没有内嵌封面"))
+    Err(ApiError::not_found("没有内嵌封面").expected())
 }
 
 #[derive(Debug, Default, Deserialize)]
