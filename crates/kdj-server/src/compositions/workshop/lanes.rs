@@ -65,6 +65,45 @@ pub enum Op {
         fade: Option<bool>,
     },
     Unbranch { clip: String, side: String },
+    /// A song into the song lane at `index` (before the song there), else after the last. The songs
+    /// play one after another; together they are the VJ's length and clock.
+    AddSong {
+        song: Map<String, Value>,
+        #[serde(default)]
+        index: Option<usize>,
+    },
+    /// The song at `index` out of the song lane.
+    RemoveSong { index: usize },
+    /// The song at `from` to the place `to` in the order of the song lane.
+    MoveSong { from: usize, to: usize },
+}
+
+/// The songs of the song lane in order: `songs`, or the one `song` a project of one song has.
+pub fn songs_of(doc: &Value) -> Vec<Value> {
+    match (doc.get("songs").and_then(Value::as_array), doc.get("song")) {
+        (Some(songs), _) => songs.clone(),
+        (None, Some(song)) if song.is_object() => vec![song.clone()],
+        _ => vec![],
+    }
+}
+
+/// Writes the song lane back: one song as `song` (as projects of one song have always been
+/// written, so builds that know only that keep reading them), several as `songs`.
+fn put_songs(doc: &mut Value, songs: Vec<Value>) -> Result<()> {
+    let object = doc.as_object_mut().context("工程不是 JSON 对象")?;
+    object.remove("song");
+    object.remove("songs");
+    match songs.len() {
+        0 => {}
+        1 => { object.insert("song".into(), songs.into_iter().next().unwrap()); }
+        _ => { object.insert("songs".into(), Value::Array(songs)); }
+    }
+    Ok(())
+}
+
+/// How long a song of the song lane plays.
+fn song_length(song: &Value) -> f64 {
+    (num(song, "out").unwrap_or(0.) - num(song, "in").unwrap_or(0.)).max(0.)
 }
 
 const SETTABLE: &[&str] = &["speed", "volume", "muted", "x", "y", "scale", "opacity", "fill"];
@@ -178,6 +217,9 @@ fn op_name(op: &Op) -> &'static str {
         Op::Gap { .. } => "gap",
         Op::Branch { .. } => "branch",
         Op::Unbranch { .. } => "unbranch",
+        Op::AddSong { .. } => "add_song",
+        Op::RemoveSong { .. } => "remove_song",
+        Op::MoveSong { .. } => "move_song",
     }
 }
 
@@ -191,7 +233,7 @@ fn drop_orphans(doc: &mut Value) {
 }
 
 fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
-    let vj = doc.get("song").is_some_and(|song| !song.is_null());
+    let vj = !songs_of(doc).is_empty();
     match op {
         Op::New { title, song, canvas } => {
             let mut fresh = json!({ "kdjv": 2, "title": title, "main": [], "branches": [] });
@@ -371,6 +413,39 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
                 branches.retain(|b| !(b["clip"] == json!(clip) && b["side"] == json!(side)));
             }
         }
+        Op::AddSong { song, index } => {
+            let song = Value::Object(song.clone());
+            if song.get("src").and_then(Value::as_str).is_none() || num(&song, "out").is_none() {
+                bail!("歌要有 src 和 out")
+            }
+            if !(song_length(&song) > EPS) {
+                bail!("歌的长度要大于 0（out 要大于 in）")
+            }
+            let mut songs = songs_of(doc);
+            let at = index.unwrap_or(songs.len());
+            if at > songs.len() {
+                bail!("index {at} 超出歌曲行（共 {} 首）", songs.len())
+            }
+            songs.insert(at, song);
+            put_songs(doc, songs)?;
+        }
+        Op::RemoveSong { index } => {
+            let mut songs = songs_of(doc);
+            if *index >= songs.len() {
+                bail!("歌曲行没有第 {} 首（共 {} 首）", index + 1, songs.len())
+            }
+            songs.remove(*index);
+            put_songs(doc, songs)?;
+        }
+        Op::MoveSong { from, to } => {
+            let mut songs = songs_of(doc);
+            if *from >= songs.len() || *to >= songs.len() {
+                bail!("歌曲行共 {} 首，没有第 {} 或第 {} 首", songs.len(), from + 1, to + 1)
+            }
+            let song = songs.remove(*from);
+            songs.insert(*to, song);
+            put_songs(doc, songs)?;
+        }
     }
     Ok(())
 }
@@ -398,8 +473,13 @@ pub fn layout(doc: &Value) -> Value {
         Some(json!({ "clip": clip, "side": b["side"], "at": round(at), "length": span }))
     }).collect();
     let end = begins.last().map_or(0., |s| s + length(main.last().unwrap()));
-    let song = (num(&doc["song"], "out").unwrap_or(0.) - num(&doc["song"], "in").unwrap_or(0.)).max(0.);
-    json!({ "duration": round(if song > 0. { song } else { end }), "main_end": round(end), "main": items, "branches": branches })
+    let mut at = 0.;
+    let songs: Vec<Value> = songs_of(doc).iter().enumerate().map(|(index, song)| {
+        let placed = json!({ "index": index, "at": round(at), "length": round(song_length(song)), "src": song["src"], "in": num(song, "in").unwrap_or(0.) });
+        at += song_length(song);
+        placed
+    }).collect();
+    json!({ "duration": round(if at > 0. { at } else { end }), "main_end": round(end), "main": items, "branches": branches, "songs": songs })
 }
 
 #[cfg(test)]
@@ -478,5 +558,27 @@ mod tests {
         let error = apply(&doc, &ops(r#"[{"op":"title","title":"x"},{"op":"set","id":"c1","fields":{"src":"/x.mp4"}}]"#)).unwrap_err();
         assert!(format!("{error:#}").contains("第 2 步（set）"), "{error:#}");
         assert_eq!(doc["title"], json!("VJ"));
+    }
+
+    #[test]
+    fn songs_play_one_after_another_and_a_single_song_stays_written_as_song() {
+        let doc = apply(&vj(), &ops(r#"[
+            {"op":"add_song","song":{"src":"/t.flac","in":5,"out":45}},
+            {"op":"add_song","song":{"src":"/first.flac","out":30},"index":0}
+        ]"#)).unwrap();
+        assert!(doc.get("song").is_none());
+        let order: Vec<&str> = doc["songs"].as_array().unwrap().iter().map(|s| s["src"].as_str().unwrap()).collect();
+        assert_eq!(order, ["/first.flac", "/s.flac", "/t.flac"], "inserted before the song at the index");
+        let placed = layout(&doc);
+        assert_eq!(placed["duration"], json!(130.), "30 + 60 + 40");
+        assert_eq!(placed["songs"][2]["at"], json!(90.));
+        let moved = apply(&doc, &ops(r#"[{"op":"move_song","from":2,"to":0}]"#)).unwrap();
+        assert_eq!(moved["songs"][0]["src"], json!("/t.flac"));
+        let one = apply(&doc, &ops(r#"[{"op":"remove_song","index":0},{"op":"remove_song","index":1}]"#)).unwrap();
+        assert!(one.get("songs").is_none(), "{one}");
+        assert_eq!(one["song"]["src"], json!("/s.flac"), "one song is written as before");
+        let none = apply(&one, &ops(r#"[{"op":"remove_song","index":0}]"#)).unwrap();
+        assert!(none.get("song").is_none() && none.get("songs").is_none());
+        assert_eq!(layout(&none)["duration"], json!(30.), "without songs the main lane is the length");
     }
 }

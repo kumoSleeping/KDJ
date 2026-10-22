@@ -111,6 +111,9 @@ struct Lanes {
     canvas: Option<DocCanvas>,
     #[serde(default)]
     song: Option<LaneSong>,
+    /// Several songs one after another (a project of one song writes `song`).
+    #[serde(default)]
+    songs: Vec<LaneSong>,
     #[serde(default)]
     main: Vec<LaneItem>,
     #[serde(default)]
@@ -247,15 +250,25 @@ impl Lanes {
         }
         aux.sort_by(|a, b| a.at.total_cmp(&b.at));
         let mut tracks = vec![DocTrack { clips: aux }, DocTrack { clips: main }];
-        if let Some(song) = &self.song {
-            let length = song.out - song.from;
-            if at > length + 0.05 {
-                bail!("主线长 {at:.3} 秒，比歌（{length:.3} 秒）长：VJ 的长度由歌决定")
+        let songs: Vec<&LaneSong> = if self.songs.is_empty() { self.song.iter().collect() } else { self.songs.iter().collect() };
+        if !songs.is_empty() {
+            // The songs one after another on one track: together they are the VJ's length.
+            let mut clips = vec![];
+            let mut end = 0.;
+            for (n, song) in songs.iter().enumerate() {
+                if !(song.out - song.from > 0.) {
+                    bail!("songs[{n}]（{}）：out 要大于 in", file_name(&song.src))
+                }
+                let mut clip = DocClip::new(&song.src, end, song.from, song.out);
+                clip.volume = song.volume;
+                clip.name = Some(format!("song（{}）", file_name(&song.src)));
+                end += song.out - song.from;
+                clips.push(clip);
             }
-            let mut clip = DocClip::new(&song.src, 0., song.from, song.out);
-            clip.volume = song.volume;
-            clip.name = Some(format!("song（{}）", file_name(&song.src)));
-            tracks.push(DocTrack { clips: vec![clip] });
+            if at > end + 0.05 {
+                bail!("主线长 {at:.3} 秒，比歌（{end:.3} 秒）长：VJ 的长度由歌决定")
+            }
+            tracks.push(DocTrack { clips });
         }
         Ok(Doc { title: self.title, canvas: self.canvas, tracks })
     }
@@ -741,7 +754,8 @@ impl Workshop {
         let text = serde_json::to_string_pretty(&after)?;
         let base = file.parent().filter(|dir| dir.is_dir()).with_context(|| format!("文件夹不存在：{}", file.display()))?;
         // A draft with nothing in it yet is kept as it is; anything else has to play.
-        let empty = after["main"].as_array().is_none_or(|main| main.is_empty()) && after.get("song").is_none_or(|song| song.is_null());
+        let songs = super::lanes::songs_of(&after);
+        let empty = after["main"].as_array().is_none_or(|main| main.is_empty()) && songs.is_empty();
         let duration = if empty { 0. } else { Self::kdjv_project_text(&text, base, cancel).await?.duration() / 1000. };
         let temporary = file.with_extension(format!("{EXTENSION}.{}.tmp", std::process::id()));
         tokio::fs::write(&temporary, format!("{text}\n")).await?;
@@ -749,12 +763,15 @@ impl Workshop {
         // The row is there at once (a new project) and reads its new length and title (an edit),
         // without waiting for the folder watcher.
         let track_id = self.state.library.upsert_file(file, "local", "").ok();
-        // The song's own row, where the editor reads its bar lines.
-        let song_track_id = after["song"]["src"].as_str()
-            .and_then(|src| self.state.library.get_by_path(&source_path(base, src)).ok().flatten())
-            .map(|track| track.id);
+        // Each song's own row, where the editor reads its bar lines.
+        let song_track_ids: Vec<Option<i64>> = songs.iter()
+            .map(|song| song["src"].as_str()
+                .and_then(|src| self.state.library.get_by_path(&source_path(base, src)).ok().flatten())
+                .map(|track| track.id))
+            .collect();
         Ok(serde_json::json!({
-            "path": file, "track_id": track_id, "song_track_id": song_track_id,
+            "path": file, "track_id": track_id,
+            "song_track_id": song_track_ids.first().copied().flatten(), "song_track_ids": song_track_ids,
             "document": after, "layout": super::lanes::layout(&after), "duration": duration,
         }))
     }
@@ -921,6 +938,27 @@ mod kdjv_tests {
         assert_eq!(head.fades.video_in_ms, 0., "a branch without a fade covers at its opacity");
         assert_eq!(p.layers[2].clips[0].duration(), 60_000.);
         assert_eq!(p.duration(), 60_000., "the song sets the length");
+    }
+
+    #[test]
+    fn several_songs_play_one_after_another_under_the_lanes() {
+        let doc = parse(
+            r#"{"kdjv":2,"title":"Set","songs":[{"src":"/music/a.flac","in":10,"out":40},{"src":"/music/b.flac","out":20}],
+                "main":[{"id":"a","src":"/vj/a.mp4","in":0,"out":45}]}"#,
+        )
+        .unwrap();
+        let audio = Probed { video: false, kind: "audio".into(), ..video() };
+        let probed = HashMap::from([
+            (PathBuf::from("/vj/a.mp4"), video()),
+            (PathBuf::from("/music/a.flac"), audio.clone()),
+            (PathBuf::from("/music/b.flac"), audio),
+        ]);
+        let p = project(&doc, Path::new("/projects"), &probed).unwrap();
+        let songs: Vec<(f64, f64, f64)> = p.layers.last().unwrap().clips.iter().map(|c| (c.start_ms, c.source_in_ms, c.duration())).collect();
+        assert_eq!(songs, vec![(0., 10_000., 30_000.), (30_000., 0., 20_000.)]);
+        assert_eq!(p.duration(), 50_000., "the songs together set the length");
+        let long = r#"{"kdjv":2,"songs":[{"src":"/music/a.flac","out":5},{"src":"/music/b.flac","out":5}],"main":[{"src":"/vj/a.mp4","out":12}]}"#;
+        assert!(parse(long).unwrap_err().to_string().contains("比歌"));
     }
 
     #[test]

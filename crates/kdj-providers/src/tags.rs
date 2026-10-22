@@ -72,7 +72,11 @@ fn project_tags(path: &Path, out: &mut TrackTags) {
         (speed > 0.).then(|| clip["out"].as_f64().map(|out| (out - from) / speed)).flatten()
     };
     if doc["kdjv"].as_u64() == Some(2) {
-        let song = length(&doc["song"]).unwrap_or(0.);
+        // Several songs (`songs`) play one after another.
+        let song: f64 = match doc["songs"].as_array() {
+            Some(songs) => songs.iter().filter_map(length).sum(),
+            None => length(&doc["song"]).unwrap_or(0.),
+        };
         let main: f64 = doc["main"].as_array().into_iter().flatten()
             .map(|item| item["gap"].as_f64().or_else(|| length(item)).unwrap_or(0.))
             .sum();
@@ -630,6 +634,8 @@ pub(crate) mod tests {
         assert_eq!(read_tags(&path).duration, Some(12.), "lanes: 5 + 3 + 4 s end to end");
         std::fs::write(&path, r#"{"kdjv":2,"song":{"src":"s.flac","in":1,"out":61},"main":[{"gap":3}]}"#).unwrap();
         assert_eq!(read_tags(&path).duration, Some(60.), "a VJ is as long as its song");
+        std::fs::write(&path, r#"{"kdjv":2,"songs":[{"src":"s.flac","in":1,"out":61},{"src":"t.flac","out":30}],"main":[{"gap":3}]}"#).unwrap();
+        assert_eq!(read_tags(&path).duration, Some(90.), "songs play one after another");
     }
 
     /// 造一个 8000Hz / 8bit / 单声道的静音 WAV，用来测时长读取。
