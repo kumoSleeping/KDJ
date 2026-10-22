@@ -1,5 +1,5 @@
 import { useLayoutEffect, useMemo, useRef } from "react";
-import { Download, Settings, Sparkles, TextQuote } from "lucide-react";
+import { Download, Settings, Sparkles, TextQuote, X } from "lucide-react";
 import { AI_DRAWER_APP, aiDrawerPages, useAiDrawer, type AiDrawerPage } from "../../lib/aiDrawer";
 import { shownLyricsExtent, useLyricsExtent, useLyricsExtentShape } from "../../lib/lyricsExtent";
 import type { PlayingLyrics } from "../../lib/playingLyrics";
@@ -20,6 +20,9 @@ import type { DrawerEntry, DrawerSpec } from "../drawer/drawerSchema";
 import { AiDrawer, AiDrawerTools } from "../ai/AiDrawer";
 import { LaneEditor } from "../editor/LaneEditor";
 import { LANE_EDITOR_APP, useLaneEditor } from "../../stores/laneEditorStore";
+import { api } from "../../lib/api";
+import { isTrackDrag, readTrackDragIds, activeTrackDragIds } from "../../lib/trackDrag";
+import type { Track } from "../../types";
 import { TrackMetaEditorDrawer } from "../library/TrackMetaEditor";
 import { DrawerLyrics } from "../player/SidePanels";
 import { SongColorBackdrop } from "../player/SongColorBackdrop";
@@ -43,6 +46,19 @@ const useTaskView = () => useTaskPanelStore(state => state.view);
 const useSettingsPageInView = () => useSettingsPage(state => state.page);
 const useStudioTabInView = () => useStudioTab(state => state.tab);
 const useAiPageInView = () => useAiDrawer(state => state.page);
+const useProjectInView = () => useLaneEditor(state => state.active ?? "");
+
+/** Songs or videos dropped on the editor's title start another project, another page. */
+const NEW_PROJECT_DROP = {
+  label: "新建一个工程",
+  accepts: (transfer: DataTransfer) => isTrackDrag({ dataTransfer: transfer }),
+  drop(transfer: DataTransfer) {
+    const ids = readTrackDragIds(transfer);
+    const list = ids.length ? ids : [...activeTrackDragIds()];
+    void Promise.all(list.map(id => api.track(id).catch(() => null)))
+      .then(tracks => useLaneEditor.getState().createFrom(tracks.filter((t): t is Track => Boolean(t))));
+  },
+};
 
 /** Full-screen lyrics give the window back by becoming the longer drawer again. */
 const LYRICS_WINDOW = { label: "退出全屏", leave: () => useLyricsExtent.getState().setExtent("longer") };
@@ -60,6 +76,8 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
   const metaId = useTrackMetaEditor(state => state.trackId);
   const ai = useAiDrawer(state => state.open);
   const laneEditor = useLaneEditor(state => state.open);
+  const laneProjects = useLaneEditor(state => state.projects);
+  const projectPages = useMemo(() => laneProjects.map(p => ({ id: p.path, label: p.doc.title || "未命名", title: p.path })), [laneProjects]);
   // How tall the lyrics are is the listener's choice (the menu on the panel, lyricsExtent.ts).
   // Full screen needs a song: the playing song's bubble is the other half of that window.
   const lyricsExtent = shownLyricsExtent(useLyricsExtent(state => state.extent), useLyricsExtentShape());
@@ -121,6 +139,13 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
     id: LANE_EDITOR_APP,
     title: "剪辑",
     extent: "at-least-half",
+    // One page per open project; nothing open yet, the plain title.
+    pages: projectPages.length ? projectPages : undefined,
+    usePage: projectPages.length ? useProjectInView : undefined,
+    onPage: id => useLaneEditor.getState().activate(id),
+    titleDrop: NEW_PROJECT_DROP,
+    tools: projectPages.length ? <button type="button" className="kd-title-tabs-tool" aria-label="关闭这个工程" title="关闭这个工程（文件留着）"
+      onClick={() => { const { active, closeProject } = useLaneEditor.getState(); if (active) closeProject(active); }}><X size={15} /></button> : undefined,
     body: <LaneEditor />,
     close: () => useLaneEditor.getState().close(),
   });

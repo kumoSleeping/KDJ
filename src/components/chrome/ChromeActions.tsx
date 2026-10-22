@@ -5,6 +5,7 @@ import { useAppStore } from "../../stores/appStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { ChromeMiniPlayerKey } from "../player/MiniPlayer";
 import { HintBulbIcon } from "../download/HintBulbIcon";
+import { ChromeEditorKey } from "../editor/EditorKey";
 import { greetTipsOnNewBuild, useTipsNudge } from "../../lib/tipsNudge";
 
 export interface ChromeActionsProps {
@@ -20,7 +21,7 @@ export interface ChromeActionsProps {
   onTips?(): void;
 }
 
-/** 顶栏的键：使用提示、下载与导出、更新、设置、小窗和主题。 */
+/** 顶栏的键：使用提示、下载与导出、剪辑、更新、设置、小窗和主题。 */
 export function ChromeActions({
   settingsOpen,
   onSettings,
@@ -44,6 +45,8 @@ export function ChromeActions({
       </button>}
       <button type="button" className="kd-chrome-btn" title="下载与导出" aria-label="下载与导出"
         data-kd-search-queue-drop="entry" aria-pressed={tasksOpen} data-open={tasksOpen || undefined} onClick={onTasks}><Download size={16} /></button>
+      {/* Only the main window has the editor, as only it has the tips. */}
+      {onTips && <ChromeEditorKey />}
       {updateReady ? (
         <button
           type="button"

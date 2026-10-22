@@ -27,6 +27,8 @@ export interface LaneDocument {
   kdjv: 2;
   title: string;
   song?: LaneSong | null;
+  /** Several songs one after another (one song is written as `song`). */
+  songs?: LaneSong[];
   main: LaneItem[];
   branches?: LaneBranch[];
   [key: string]: unknown;
@@ -38,13 +40,17 @@ export interface LaneLayout {
   main_end: number;
   main: Array<{ index: number; at: number; length: number; gap?: true; id?: string; src?: string }>;
   branches: Array<{ clip: string; side: BranchSide; at: number; length: number }>;
+  /** The song lane: each song's place in the project and where in its file it starts. */
+  songs?: Array<{ index: number; at: number; length: number; src: string; in: number }>;
 }
 
 export interface LaneEdited {
   path: string;
   track_id: number | null;
-  /** The song's own library row (its bar lines), when it is in the library. */
+  /** The first song's own library row (its bar lines), when it is in the library. */
   song_track_id: number | null;
+  /** Each song's library row, in the order of the song lane. */
+  song_track_ids?: Array<number | null>;
   document: LaneDocument;
   layout: LaneLayout;
   duration: number;
@@ -62,7 +68,11 @@ export type LaneOp =
   | { op: "set"; id: string; fields: Partial<Pick<LaneClip, "speed" | "volume" | "muted" | "x" | "y" | "scale" | "opacity" | "fill">> }
   | { op: "gap"; index: number; length: number }
   | { op: "branch"; clip: string; side: BranchSide; length: number; opacity?: number; fade?: boolean }
-  | { op: "unbranch"; clip: string; side: BranchSide };
+  | { op: "unbranch"; clip: string; side: BranchSide }
+  | { op: "add_song"; song: LaneSong; index?: number }
+  | { op: "remove_song"; index: number }
+  | { op: "move_song"; from: number; to: number }
+  | { op: "set_song"; index: number; fields: { volume?: number } };
 
 export const isGap = (item: LaneItem): item is { gap: number } => "gap" in item;
 
@@ -98,3 +108,35 @@ export function fileLabel(src: string): string {
   const name = src.split(/[\\/]/).pop() ?? src;
   return name.replace(/\.[^.]+$/, "");
 }
+
+/** One way a video lies in a song, as `/api/cli/align` answers it: ref = ref_at + (video - video_in) / speed. */
+export interface AlignPlan {
+  id: string;
+  label: string;
+  /** Sure enough to be applied without asking. */
+  auto: boolean;
+  similarity?: number;
+  segments: Array<{ video_in: number; video_out: number; ref_at: number; speed: number }>;
+}
+
+/**
+ * The operations that put `clip` where `plan` says it lies in the song placed at `song`: the clip
+ * leaves its place and each matched stretch goes in at its time, kept inside that song.
+ */
+export function alignedOps(clip: LaneClip, plan: AlignPlan, song: { at: number; in: number; length: number }): LaneOp[] {
+  const { id: _id, in: _in, out: _out, speed: _speed, ...keep } = clip;
+  const ops: LaneOp[] = [{ op: "remove", id: clip.id }];
+  for (const segment of plan.segments) {
+    const speed = segment.speed > 0 ? segment.speed : 1;
+    let from = segment.video_in, to = segment.video_out;
+    let at = song.at + segment.ref_at - song.in;
+    if (at < song.at) { from += (song.at - at) * speed; at = song.at; }
+    const end = at + (to - from) / speed, limit = song.at + song.length;
+    if (end > limit) to -= (end - limit) * speed;
+    if ((to - from) / speed <= 0.05) continue;
+    const round = (value: number) => Math.round(value * 1000) / 1000;
+    ops.push({ op: "add", clip: { ...keep, src: clip.src, in: round(from), out: round(to), speed: Math.round(speed * 10000) / 10000 }, at: round(at) });
+  }
+  return ops.length > 1 ? ops : [];
+}
+

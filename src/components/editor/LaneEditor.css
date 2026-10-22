@@ -1,7 +1,7 @@
-/* The editor of a `.kdjv` 2 project (LaneEditor.tsx). Like the rest of KDJ nothing is tinted: the
-   chosen clip is written in full ink, the main lane's clips are quiet blocks, black is black, and
-   the branch lane above holds only the branches, joined to the main lane by a slanted line like
-   railway points. */
+/* The editor of `.kdjv` 2 projects (LaneEditor.tsx). Like the rest of KDJ nothing is tinted: the
+   chosen clip is written in full ink, the picture's clips and the songs are quiet blocks, black is
+   black, and the branch lane above holds only the branches, joined to the picture by a slanted line
+   like railway points. Groups are apart by space and tone, never by a rule. */
 .kd-lanes { display: grid; grid-auto-rows: max-content; align-content: start; gap: 8px; min-width: 0; max-height: 100%; overflow-y: auto; padding: 4px 12px 12px; color: var(--kd-text); font-size: var(--kd-size-sm); }
 
 .kd-lanes-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -51,7 +51,7 @@
 
 .kd-lanes-scroll { overflow-x: auto; overflow-y: hidden; min-width: 0; }
 .kd-lanes-board { position: relative; display: grid; gap: 4px; min-width: 100%; padding-bottom: 4px; }
-.kd-lanes-ruler { position: relative; height: 16px; border-bottom: 1px solid var(--kd-line); cursor: pointer; }
+.kd-lanes-ruler { position: relative; height: 16px; cursor: pointer; }
 .kd-lanes-mark {
   position: absolute;
   top: 0;
@@ -67,7 +67,9 @@
 .kd-lanes-beat { position: absolute; bottom: 0; height: 5px; border-left: 1px solid var(--kd-line); pointer-events: none; }
 .kd-lanes-lane { position: relative; height: 26px; }
 .kd-lanes-lane[data-lane="aux"] { height: 14px; }
-.kd-lanes-lane[data-lane="song"] { height: 18px; }
+.kd-lanes-lane[data-lane="song"] { height: 22px; }
+/* A lane that something dragged over it would land in lifts a tone. */
+.kd-lanes-lane[data-drop] { border-radius: 4px; background: var(--kd-hover); }
 .kd-lanes-clip, .kd-lanes-gap, .kd-lanes-song, .kd-lanes-branch-block {
   position: absolute;
   top: 0;
@@ -96,13 +98,19 @@
 .kd-lanes-song {
   padding: 0 6px;
   overflow: hidden;
-  background: color-mix(in srgb, var(--kd-text) 5%, transparent);
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--kd-text) 6%, transparent);
   color: var(--kd-muted);
+  font: inherit;
   font-size: 10px;
-  line-height: 18px;
+  line-height: 20px;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
 }
+.kd-lanes-song:hover { color: var(--kd-text); }
+.kd-lanes-song[aria-pressed="true"] { border-color: var(--kd-text); color: var(--kd-text); font-weight: 600; }
 .kd-lanes-branch-block {
   padding: 0;
   border: 1px solid var(--kd-muted);
@@ -131,12 +139,14 @@
   pointer-events: none;
 }
 .kd-lanes-drop { background: transparent; border-left: 2px dashed var(--kd-text); }
+/* In the song lane the mark stands only by that lane: songs go between songs. */
+.kd-lanes-drop[data-lane="song"] { top: auto; height: 22px; }
 
-.kd-lanes-inspector { display: grid; gap: 8px; min-width: 0; padding-top: 4px; border-top: 1px solid var(--kd-line); }
+.kd-lanes-rows { display: grid; gap: 8px; min-width: 0; }
 .kd-lanes-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; }
-.kd-lanes-name { flex: 1 1 8rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kd-lanes-row > .kd-slider { flex: 1 1 10rem; min-width: 8rem; }
 .kd-lanes-field { display: inline-flex; align-items: center; gap: 4px; color: var(--kd-muted); font-size: var(--kd-size-xs); }
-.kd-lanes-field input[type="number"], .kd-lanes-field select {
+.kd-lanes-field input[type="number"] {
   width: 4.5rem;
   padding: 2px 4px;
   border: 1px solid var(--kd-line);
@@ -145,7 +155,32 @@
   color: var(--kd-text);
   font: inherit;
 }
-.kd-lanes-field input[type="range"] { width: 6rem; }
 .kd-lanes-check { display: inline-flex; align-items: center; gap: 4px; color: var(--kd-muted); font-size: var(--kd-size-xs); cursor: pointer; }
-.kd-lanes-branch { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
-.kd-lanes-branch[data-on] > .kd-lanes-check:first-child { color: var(--kd-text); }
+.kd-lanes-row[data-on] > .kd-lanes-check:first-child { color: var(--kd-text); }
+
+/* The tools: one row of words; the chosen one in full ink and weight, the others muted. Its few
+   controls come up under it in place of the last one's. */
+.kd-lanes-tools { display: flex; flex-wrap: wrap; gap: 2px 4px; min-width: 0; padding-top: 6px; }
+.kd-lanes-tool, .kd-lanes-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-sm);
+  cursor: pointer;
+}
+.kd-lanes-tool:hover, .kd-lanes-action:hover:not(:disabled) { background: var(--kd-hover); color: var(--kd-text); }
+.kd-lanes-tool[aria-pressed="true"] { color: var(--kd-text); font-weight: 650; }
+.kd-lanes-action { color: var(--kd-text); font-size: var(--kd-size-xs); }
+.kd-lanes-action:disabled { opacity: 0.4; cursor: default; }
+.kd-lanes-panel { min-width: 0; min-height: 1.75rem; padding: 2px 2px 4px; }
+
+/* Nothing open: the whole body is where songs and videos are dropped to start a project. */
+.kd-lanes-empty { min-height: 12rem; border-radius: 10px; }
+.kd-lanes-empty[data-drop] { background: var(--kd-hover); }
+.kd-lanes-note { color: var(--kd-muted); font-size: var(--kd-size-xs); }
