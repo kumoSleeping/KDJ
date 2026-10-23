@@ -84,7 +84,16 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
   project: KdjvLive;
   onTransport?: (transport: LiveTransport) => void;
 }) {
-  const [prepared, setPrepared] = useState<number[]>([]);
+  // The clips drawn, as indices into the project they were picked from. When the project changes
+  // (an edit refreshes the one playing) an index is kept only while it still names a clip of the
+  // same file, until the new project's own are picked: never a clip it does not have.
+  const [picked, setPicked] = useState<{ project: KdjvLive | null; clips: number[] }>({ project: null, clips: [] });
+  const sourceOf = (p: KdjvLive, n: number) => {
+    const c = p.clips[n];
+    return c ? `${api.kdjvSourceUrl(trackId, c.source)}|${p.sources[c.source]?.file ?? ""}` : null;
+  };
+  const prepared = picked.project === project ? picked.clips
+    : picked.project ? picked.clips.filter(n => sourceOf(project, n) !== null && sourceOf(project, n) === sourceOf(picked.project!, n)) : [];
   const nodes = useRef(new Map<number, HTMLVideoElement | HTMLImageElement>());
   const engine = useRef<VideoPlaybackEngine | null>(null);
   if (!engine.current) engine.current = new VideoPlaybackEngine();
@@ -144,7 +153,7 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
       const held = heldClips(project, t.position, isShown);
       const want = [...new Set([...preparedClips(project, t.position, t.playing), ...held])].sort((a, b) => a - b);
       const key = want.join(",");
-      if (key !== shown) { shown = key; setPrepared(want); }
+      if (key !== shown) { shown = key; setPicked({ project, clips: want }); }
       const align = !t.playing || now - lastAlign >= 100;
       if (align) lastAlign = now;
       for (const [n, node] of nodes.current) {
@@ -230,8 +239,7 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
   // A detach is the callback's cleanup and leaves the map alone; entries of clips no longer drawn
   // are dropped below, in the render that stops drawing them.
   const refs = useRef(new Map<string, (node: HTMLVideoElement | HTMLImageElement | null) => (() => void) | undefined>());
-  const refFor = (n: number, src: string) => {
-    const id = `${n}:${src}`;
+  const refFor = (id: string, n: number, src: string) => {
     let bind = refs.current.get(id);
     if (!bind) {
       bind = node => {
@@ -256,7 +264,7 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
     }
     return bind;
   };
-  const drawn = new Set(prepared.map(n => `${n}:${api.kdjvSourceUrl(trackId, project.clips[n].source)}`));
+  const drawn = new Set(prepared.map(n => `${n}:${sourceOf(project, n)}`));
   for (const id of refs.current.keys()) if (!drawn.has(id)) refs.current.delete(id);
 
   // The first track is on top; within a track a later clip covers an earlier one.
@@ -272,10 +280,12 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
             zIndex: (tracks - c.track) * 10_000 + n, opacity: 0,
           };
           const src = api.kdjvSourceUrl(trackId, c.source);
+          // Keyed by the file too: the same source number turned into another file is a new element.
+          const id = `${n}:${sourceOf(project, n)}`;
           return project.sources[c.source]?.kind === "video"
-            ? <video key={`${n}:${src}`} ref={refFor(n, src)} className="kd-kdjv-live-clip" style={style}
+            ? <video key={id} ref={refFor(id, n, src)} className="kd-kdjv-live-clip" style={style}
                 crossOrigin="anonymous" muted playsInline preload="auto" />
-            : <img key={`${n}:${src}`} ref={refFor(n, src)} className="kd-kdjv-live-clip" style={style}
+            : <img key={id} ref={refFor(id, n, src)} className="kd-kdjv-live-clip" style={style}
                 src={src} alt="" draggable={false} />;
         })}
       </div>

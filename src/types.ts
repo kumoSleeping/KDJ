@@ -962,7 +962,8 @@ export interface KdjvLive {
   duration: number;
   width: number;
   height: number;
-  sources: Array<{ kind: "video" | "image" | "gif" | "audio"; width: number; height: number; fps: number }>;
+  /** `file` names the file (and its signature): a source number may be another file after an edit. */
+  sources: Array<{ kind: "video" | "image" | "gif" | "audio"; width: number; height: number; fps: number; file?: string }>;
   /** Picture clips; `track` 0 is the top one, `source` numbers `/api/kdjv/source/{track}/{n}`. */
   clips: Array<{
     source: number; track: number; at: number; in: number; out: number; length: number;

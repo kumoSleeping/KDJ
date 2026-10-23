@@ -9,11 +9,21 @@ import { getPlayingTrack } from "./playingTrack";
 import { useLibraryStore } from "../stores/libraryStore";
 import { readPlace } from "../stores/navStore";
 
+/**
+ * The row's own file. A project being played carries the sound it is heard from (kdjvPlay.ts) as
+ * its path; the AI is told the project's file instead, from the library, or no path at all.
+ */
+function filePath(track: Track): string | undefined {
+  if (track.format?.toLowerCase() !== "kdjv" || /\.kdjv$/i.test(track.path)) return track.path || undefined;
+  const own = useLibraryStore.getState().summaryById.get(track.id)?.path;
+  return own && /\.kdjv$/i.test(own) ? own : undefined;
+}
+
 const song = (track: Track | null) => track && {
   track_id: track.id,
   title: track.title || track.filename,
   artist: track.artist || undefined,
-  path: track.path || undefined,
+  path: filePath(track),
 };
 
 export function kdjStatus(): Record<string, unknown> {

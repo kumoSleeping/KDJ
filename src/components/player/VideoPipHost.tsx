@@ -44,6 +44,7 @@ import {
 import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
 import { useKdjvLive } from "../../lib/kdjvPlay";
 import { KdjvLivePicture } from "./KdjvLivePicture";
+import { PanelErrorBoundary } from "../RootErrorBoundary";
 import type { KdjvLive } from "../../types";
 import {
   YoutubeEmbedController,
@@ -1855,11 +1856,13 @@ export function VideoPipHost() {
             muted
           />
           {live && showSurface && session?.source === "local" && (
-            <KdjvLivePicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
-              const pip = useVideoPip.getState();
-              if (pendingScrubRef.current === null) pip.setPosition(position);
-              if (pip.playing !== playing) pip.setPlaying(playing);
-            }} />
+            <PanelErrorBoundary name="工程画面" turn={session.trackId}>
+              <KdjvLivePicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
+                const pip = useVideoPip.getState();
+                if (pendingScrubRef.current === null) pip.setPosition(position);
+                if (pip.playing !== playing) pip.setPlaying(playing);
+              }} />
+            </PanelErrorBoundary>
           )}
           <canvas ref={pipCanvasRef} className="kd-pip-compositor" aria-hidden="true" />
           <video

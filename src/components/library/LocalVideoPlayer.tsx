@@ -24,6 +24,7 @@ import {
 import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
 import { useKdjvLive } from "../../lib/kdjvPlay";
 import { KdjvLivePicture } from "../player/KdjvLivePicture";
+import { PanelErrorBoundary } from "../RootErrorBoundary";
 import { playTrack } from "./TrackTable";
 import type { Track } from "../../types";
 
@@ -389,10 +390,12 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
           />
         ))}
         {live && !hidden && (
-          <KdjvLivePicture trackId={track.id} project={live} onTransport={transport => {
-            if (scrubPosition.current === null) setPosition(transport.position);
-            setPlaying(transport.playing);
-          }} />
+          <PanelErrorBoundary name="工程画面" turn={track.id}>
+            <KdjvLivePicture trackId={track.id} project={live} onTransport={transport => {
+              if (scrubPosition.current === null) setPosition(transport.position);
+              setPlaying(transport.playing);
+            }} />
+          </PanelErrorBoundary>
         )}
         {!hidden && <>
           <FloatingVideoControls title={track.title || track.filename} showTitle={false} playing={playing}

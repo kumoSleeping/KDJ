@@ -655,6 +655,8 @@ pub struct LiveSource {
     pub width: u32,
     pub height: u32,
     pub fps: f64,
+    /// The file and its signature: the same source number may be another file after an edit.
+    pub file: String,
 }
 /// One picture clip, in seconds as in the document.
 #[derive(Debug, Serialize)]
@@ -681,7 +683,7 @@ pub struct LiveClip {
 
 /// The live preview's view of a project: every picture clip and what its source is. Pure.
 pub fn live(p: &CompositionProject) -> Live {
-    let sources = p.sources.iter().map(|s| LiveSource { kind: s.kind.clone(), width: s.width, height: s.height, fps: s.fps }).collect();
+    let sources = p.sources.iter().map(|s| LiveSource { kind: s.kind.clone(), width: s.width, height: s.height, fps: s.fps, file: format!("{}#{}", s.path, s.signature) }).collect();
     let mut clips = vec![];
     for (track, layer) in p.layers.iter().enumerate() {
         for c in &layer.clips {

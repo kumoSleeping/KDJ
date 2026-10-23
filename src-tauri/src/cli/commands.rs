@@ -547,6 +547,10 @@ fn analyzed_tracks(http: &HttpClient, ids: &[i64]) -> Result<Vec<(Value, Value)>
     let mut pending_grid = Vec::new();
     for &id in ids {
         let track = http.get_value(&format!("/api/library/tracks/{id}"))?;
+        // A project is not sound to analyse: its songs are, by their own rows.
+        if track["format"].as_str().is_some_and(|f| f.eq_ignore_ascii_case("kdjv")) {
+            continue;
+        }
         if !analyzed(&track) {
             let queued = http.post_json(
                 "/api/library/analyze",
