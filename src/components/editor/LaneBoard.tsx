@@ -141,6 +141,22 @@ function DropMarks({ marks, tracks, span }: { marks: DropMark[] | null; tracks: 
   })}</>;
 }
 
+/**
+ * The fade's curve over a clip: the opacity it has at each moment (kdjvLive.ts `clipAlpha`, a
+ * smoothstep), drawn as a line, with what has faded away shaded above it.
+ */
+const FADE_STEPS = 24;
+const FADE_PATH = Array.from({ length: FADE_STEPS + 1 }, (_, n) => {
+  const x = n / FADE_STEPS;
+  return `${(x * 100).toFixed(2)},${(100 - x * x * (3 - 2 * x) * 100).toFixed(2)}`;
+}).join(" ");
+function FadeCurve({ side, width }: { side: "in" | "out"; width: string }) {
+  return <svg className="kd-lanes-fade" data-side={side} style={{ width }} viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+    <polygon className="kd-lanes-fade-away" points={`0,0 ${FADE_PATH}`} />
+    <polyline className="kd-lanes-fade-line" points={FADE_PATH} />
+  </svg>;
+}
+
 export function LaneBoard({ area, project, zoom, onZoom, selected, select, playhead, seek, edit, onDropped, onSearchDropped }: {
   /** The whole editor: what is let go anywhere on it is taken (on a track, there; elsewhere, each to the end of its kind of track). */
   area: RefObject<HTMLElement | null>;
@@ -616,8 +632,8 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
       style={{ left: pct(at.at, span), width: pct(at.length, span), zIndex: 10 - depth }}
       title={`${trackName(doc, track)} · ${fileLabel(clip.src)} · ${laneClock(at.at)}–${laneClock(at.at + at.length)}`} {...grip("clip", clip.id, clip.id)}>
       {picture && project.trackId !== null && <ClipFrames trackId={project.trackId} clip={clip} width={pixels(at.length)} />}
-      {fadeIn > 0 && <span className="kd-lanes-fade" data-side="in" style={{ width: pct(fadeIn, at.length) }} aria-hidden="true" />}
-      {fadeOut > 0 && <span className="kd-lanes-fade" data-side="out" style={{ width: pct(fadeOut, at.length) }} aria-hidden="true" />}
+      {fadeIn > 0 && <FadeCurve side="in" width={pct(fadeIn, at.length)} />}
+      {fadeOut > 0 && <FadeCurve side="out" width={pct(fadeOut, at.length)} />}
       <span className="kd-lanes-clip-name">{fileLabel(clip.src)}</span>
       <span className="kd-lanes-fade-dot" data-side="in" style={{ left: pct(fadeIn, at.length) }} title={`淡入 ${fadeIn.toFixed(2)} 秒`}
         {...grip("clip", clip.id, clip.id, "fade_in")} />

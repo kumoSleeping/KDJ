@@ -153,10 +153,12 @@
 .kd-lanes-clip[data-hidden] { opacity: 0.45; }
 .kd-lanes-clip[data-kind="sound"] { background: color-mix(in srgb, var(--kd-text) 6%, transparent); }
 .kd-lanes-clip[data-kind="sound"] .kd-lanes-clip-name { top: 50%; translate: 0 -50%; background: transparent; }
-/* A fade: the clip's picture shaded away toward the end it fades at. */
-.kd-lanes-fade { position: absolute; z-index: 1; top: 0; bottom: 0; pointer-events: none; }
-.kd-lanes-fade[data-side="in"] { left: 0; background: linear-gradient(to right, color-mix(in srgb, var(--kd-panel) 75%, transparent), transparent); }
-.kd-lanes-fade[data-side="out"] { right: 0; background: linear-gradient(to left, color-mix(in srgb, var(--kd-panel) 75%, transparent), transparent); }
+/* A fade: its curve drawn over the clip, what has faded away shaded above it (FadeCurve). */
+.kd-lanes-fade { position: absolute; z-index: 1; top: 0; height: 100%; overflow: visible; pointer-events: none; }
+.kd-lanes-fade[data-side="in"] { left: 0; }
+.kd-lanes-fade[data-side="out"] { right: 0; scale: -1 1; }
+.kd-lanes-fade-away { fill: color-mix(in srgb, var(--kd-panel) 72%, transparent); }
+.kd-lanes-fade-line { fill: none; stroke: var(--kd-text); stroke-width: 1.5px; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
 /* The dots at the top corners pull the fades; shown on the chosen clip and under the pointer. */
 .kd-lanes-fade-dot {
   position: absolute;
