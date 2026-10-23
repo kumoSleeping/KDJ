@@ -114,7 +114,7 @@ KDJ 的状态：各平台登录状态与登录方式、本机浏览器、账号�
 
 ## kdj_align
 
-把视频按声音对齐到参考曲（音视频合并的核心；short 版 MV/NCED 对整首歌也用它），返回几套定位方案 plans：segments 里 ref = ref_at + (video - video_in) / speed（秒）；ref_bar 是参考曲的小节号。每个视频对一次，结果就是结论（下载后用本地文件再对一次）：ref 用这首歌在曲库里的那一行或用户给的歌文件，不要截取歌的片段、不要把视频变调变速后再对、不要换个参考再试，工作目录里的文件会被拒绝；plans 没覆盖到的部分就是 gaps。每个 segment 原样写成工程里的一个片段（at=ref_at、in=video_in、out=video_out、speed），不拆成镜头重排、不另调速度；ref_at 是参考曲文件里的时间，歌在工程里不是从 0 秒、从头放时，at 再加上歌片段的 at − in。evidence 为 verified 的经过声学核实，auto=true 的可以直接采用；melody / partial 只是候选，auto=false 的方案照样铺好请用户试听确认，不要因为相似度低就换成自己算的位置。一个方案只管它 segments 覆盖的那一段，几套方案可以各管一段。只有部分对得上时用「裁切匹配段」（sections）。每套方案的 gaps 是参考曲里没有画面的空档（start、end、length，秒）：空档怎么填照用户在方案里选的办法（只剪拼时按小节从同一素材里剪；其余在方案里问过用户），不要拉和歌无关的素材填。matched 为 false 是对不上，告诉用户，不要硬拼。
+把视频按声音对齐到参考曲（音视频合并的核心；short 版 MV/NCED 对整首歌也用它），返回几套定位方案 plans：segments 里 ref = ref_at + (video - video_in) / speed（秒）；ref_bar 是参考曲的小节号。每个视频对一次，结果就是结论（下载后用本地文件再对一次）：ref 用这首歌在曲库里的那一行或用户给的歌文件，不要截取歌的片段、不要把视频变调变速后再对、不要换个参考再试，工作目录里的文件会被拒绝；plans 没覆盖到的部分就是 gaps。每个 segment 原样写成工程里的一个片段（at=ref_at、in=video_in、out=video_out、speed），不拆成镜头重排、不另调速度；ref_at 是参考曲文件里的时间，歌在工程里不是从 0 秒、从头放时，at 再加上歌片段的 at − in。evidence 为 verified 的经过声学核实，auto=true 的可以直接采用；能对到歌的拍上的方案会多出 -beat-whole（保留完整）、-beat（裁切匹配段）、-beat-bend（分段变速），beat.error_ms 是拍的误差（毫秒），同一 group 里优先用对拍的放法；melody / partial 只是候选，auto=false 的方案照样铺好请用户试听确认，不要因为相似度低就换成自己算的位置。一个方案只管它 segments 覆盖的那一段，几套方案可以各管一段。只有部分对得上时用「裁切匹配段」（sections）。每套方案的 gaps 是参考曲里没有画面的空档（start、end、length，秒）：空档怎么填照用户在方案里选的办法（只剪拼时按小节从同一素材里剪；其余在方案里问过用户），不要拉和歌无关的素材填。matched 为 false 是对不上，告诉用户，不要硬拼。
 
 ### 参数
 
