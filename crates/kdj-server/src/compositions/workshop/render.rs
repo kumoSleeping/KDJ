@@ -155,6 +155,25 @@ fn continuous_audio(a: &Clip, b: &Clip) -> bool {
         && a.sound.gain == b.sound.gain
 }
 
+/// What of `p` is heard: its sound runs without the muted clips, and without the picture's
+/// geometry, transitions and fades, which do not change PCM. Sound mixed from equal `heard`
+/// projects is the same, so a picture-only edit finds its sound in the cache.
+pub(super) fn heard(p: &CompositionProject) -> CompositionProject {
+    let mut audible = p.audio_project();
+    for l in &mut audible.layers {
+        l.clips = audio_runs(&l.clips);
+        l.grid = None; // Grid corrections do not change PCM.
+        l.clips.retain(|c| !c.sound.muted);
+        for c in &mut l.clips {
+            c.picture = Picture::default();
+            c.video_transition = None;
+            c.fades.video_in_ms = 0.;
+            c.fades.video_out_ms = 0.;
+        }
+    }
+    audible
+}
+
 /// Compile editorial splits into uninterrupted audio runs. Decoder, resampler and
 /// atempo state must survive a pure split, not restart and pad each child to length.
 /// This projection never changes the saved clips or their independent video edits.
@@ -414,20 +433,9 @@ impl Workshop {
         for layer in &mut audio.layers {
             layer.clips = audio_runs(&layer.clips);
         }
-        let mut audible = audio.clone();
+        let mut audible = heard(p);
         audible.layers.iter_mut().for_each(|l| {
-            l.grid = None; // Grid corrections do not change PCM.
-            l.clips.retain(|c| {
-                !c.sound.muted
-                    && c.start_ms < hi + 100.
-                    && c.start_ms + c.duration() > (lo - 500.).max(0.)
-            });
-            for c in &mut l.clips {
-                c.picture = Picture::default();
-                c.video_transition = None;
-                c.fades.video_in_ms = 0.;
-                c.fades.video_out_ms = 0.;
-            }
+            l.clips.retain(|c| c.start_ms < hi + 100. && c.start_ms + c.duration() > (lo - 500.).max(0.));
         });
         // Geometry, names and revisions do not invalidate already prepared sound.
         let key = key(&("audio-v4-crossfades", &audible.sources, &audible.layers, lo, hi))?;

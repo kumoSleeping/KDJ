@@ -85,6 +85,8 @@ export interface LaneEdited {
   lengths?: Record<string, number>;
   /** Why the project does not play as it is (only when opening it). */
   problem?: string | null;
+  /** The clips its live preview draws, as `/api/kdjv/preview` gives them; none for an empty draft. */
+  live?: import("../types").KdjvLive | null;
 }
 
 /** A clip as it is put in: no id yet, and `out` may be left to the server, which measures the file. */

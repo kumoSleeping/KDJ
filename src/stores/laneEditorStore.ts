@@ -249,7 +249,7 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       };
     });
     for (const id of songIds) if (id !== null) void loadSongGrid(id);
-    if (edited.track_id !== null) void refreshPlayingProject(edited.track_id);
+    if (edited.track_id !== null) void refreshPlayingProject(edited.track_id, edited.live);
   };
 
 

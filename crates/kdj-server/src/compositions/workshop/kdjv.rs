@@ -782,6 +782,15 @@ pub fn live(p: &CompositionProject) -> Live {
     Live { duration: p.duration() / 1000., width: p.canvas.width, height: p.canvas.height, sources, clips }
 }
 
+/// What the project's sound is keyed by: the clips heard, the sources they play and its length.
+fn sound_key(p: &CompositionProject) -> Result<String> {
+    let audible = super::render::heard(p);
+    let sources: Vec<_> = audible.sources.iter()
+        .filter(|s| audible.layers.iter().flat_map(|l| &l.clips).any(|c| c.source_id == s.id))
+        .collect();
+    key(&(&sources, &audible.layers, p.duration()))
+}
+
 /// How an export differs from the render made for playing: none of these set is that render.
 #[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -1007,6 +1016,8 @@ impl Workshop {
             "song_track_id": song_track_ids.first().copied().flatten(), "song_track_ids": song_track_ids,
             "document": after, "layout": tracks::layout(&after), "duration": duration,
             "lengths": lengths, "problem": problem,
+            // The live preview's clips at once: the picture follows the edit without waiting for the sound.
+            "live": project.as_ref().map(live),
         }))
     }
 
@@ -1032,9 +1043,10 @@ impl Workshop {
         Ok(out)
     }
 
-    /// The project's sound alone, keyed like its render but by what is heard only.
+    /// The project's sound alone, keyed by what is heard only (and how long it is): an edit of
+    /// the picture alone keeps the same file, so the playing row is not loaded again.
     fn kdjv_sound_cache(&self, p: &CompositionProject) -> Result<(String, PathBuf)> {
-        let name = format!("kdjv-sound-{}", key(&(&p.sources, &p.audio_project().layers))?);
+        let name = format!("kdjv-sound-v2-{}", sound_key(p)?);
         let path = self.cache.join(format!("{name}.wav"));
         Ok((name, path))
     }
@@ -1185,6 +1197,18 @@ mod kdjv_tests {
             fps: 30.,
             signature: "sig".into(),
         }
+    }
+
+    #[test]
+    fn an_edit_of_the_picture_alone_keeps_the_sound() {
+        let open = |main: &str| {
+            let doc = parse(&format!(r#"{{"kdjv":2,"title":"VJ","song":{{"src":"/vj/op.mp4","in":0,"out":30}},"main":[{main}]}}"#)).unwrap();
+            let probed = HashMap::from([(PathBuf::from("/vj/a.mp4"), video()), (PathBuf::from("/vj/op.mp4"), video())]);
+            sound_key(&project(&doc, Path::new("/projects"), &probed).unwrap()).unwrap()
+        };
+        let base = open(r#"{"id":"a","src":"/vj/a.mp4","in":0,"out":10,"muted":true}"#);
+        assert_eq!(base, open(r#"{"id":"a","src":"/vj/a.mp4","in":5,"out":15,"muted":true,"scale":0.5}"#), "a muted clip moved in its file");
+        assert_ne!(base, open(r#"{"id":"a","src":"/vj/a.mp4","in":0,"out":10}"#), "the same clip heard");
     }
 
     #[test]

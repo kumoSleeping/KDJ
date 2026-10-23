@@ -75,22 +75,37 @@ export function playProject(track: PlayableTrack, play: Play, autoPlay = true, p
 
 /**
  * A project edited while it plays shows the edit where it is: its picture is drawn from the new
- * document, and its sound (mixed again when the edit changed it) is swapped under the playing row
- * at the same position. Nothing is played anew, so the video window stays as it is.
+ * document at once (`live`, the edit's own answer), and its sound — the same file when only the
+ * picture changed, else mixed again from the cached pieces that did not change — is swapped under
+ * the playing row at the same position when it is ready. Nothing is played anew, so the video
+ * window stays as it is.
  */
 let refreshes = 0;
-export async function refreshPlayingProject(trackId: number): Promise<void> {
+/**
+ * The clips drawn for the row: the same object while nothing in them changed, so the picture
+ * keeps its decoders as they are (a new one, even equal, starts every clip settling again).
+ */
+function showLive(trackId: number, project: KdjvLive): void {
+  const now = useKdjvLive.getState().live[trackId];
+  if (now && JSON.stringify(now) === JSON.stringify(project)) return;
+  useKdjvLive.setState(({ live }) => ({ live: { ...live, [trackId]: project } }));
+}
+export async function refreshPlayingProject(trackId: number, live?: KdjvLive | null): Promise<void> {
   if (getPlayerSession().trackId !== trackId) return;
   // Only the last edit's answer is shown: an earlier one coming back late is not.
   const turn = ++refreshes;
+  if (live) showLive(trackId, live);
   const preview = await api.previewKdjv(trackId).catch(() => null);
   if (!preview || turn !== refreshes || getPlayerSession().trackId !== trackId) return;
-  useKdjvLive.setState(({ live }) => {
-    const next = { ...live };
-    if (preview.render) delete next[trackId];
-    else next[trackId] = preview.project;
-    return { live: next };
-  });
+  if (preview.render) {
+    useKdjvLive.setState(({ live }) => {
+      const next = { ...live };
+      delete next[trackId];
+      return { live: next };
+    });
+  } else {
+    showLive(trackId, preview.project);
+  }
   requestPlayerCommand({ type: "resound", trackId, path: preview.render ?? preview.sound });
 }
 

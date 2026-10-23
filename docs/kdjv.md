@@ -109,10 +109,14 @@ UTF-8 JSON，扩展名 `.kdjv`，`"kdjv": 1`。字段说明写给 AI 看，在�
   索引文件名带 `.sound`），重启后照样找得到。
 - **播放 = 实时预览**（`kdjv.rs::kdjv_preview`，`KdjvLivePicture.tsx`）：点开工程不渲染画面，和原来工坊的预览一样秒开。
   `.kdjv` → 工坊的 `CompositionProject`（每个素材 ffprobe 一次、记签名）→ 只混声音（`mix_file`：8 秒一段的 PCM，几段同时混，
-  每段缓存；改了工程只重混变了的段）成 `<data>/cache/vj-workshop/kdjv-sound-<键>.wav`，播放器把它当这一行的文件放。
+  每段缓存；改了工程只重混变了的段）成 `<data>/cache/vj-workshop/kdjv-sound-v2-<键>.wav`，播放器把它当这一行的文件放。
+  键只看听得到的东西（`render.rs::heard`：不静音的片段、它们的素材、工程长度），只改画面的编辑还是同一个文件，播放器不重载。
   画面由窗口实时画：每个正在显示和 2.5 秒内要出现的片段一个静音 `<video>`（图片是 `<img>`），直接读素材原文件
   （`GET /api/kdjv/source/{track}/{n}`，只给这个工程列出的文件，带 Range），按渲染的算法放大、定位、淡入淡出、叠放，
   每个都经 `VideoPlaybackEngine` 跟播放器的时钟走（片段的源时间 = `in` + 进片段的秒数 × 速度）。系统解码，不复制像素。
+  播放中缺画面的片段（刚出现、或被拖动跳转甩开）不追着跑：暂停、一次 seek 到「seek 落地时时钟会到的那一帧」（落地要多久按前几次学），
+  落地就显示这帧，时钟到了再起播（起播的延迟也学着提前）；以前边放边追要 1–5 秒才出画面。编辑后画面直接用 `/api/kdjv/edit`
+  回的 `live` 画，不等混音；没变的片段保留解码器和显示状态。
   预览和渲染可能有细微差别（转场的边缘、解码的取整），以渲染为准；gif 自己循环，不跟时钟。
 - **渲染**（`kdjv.rs::kdjv_render`）：工坊原来的声音混合和画面合成（`picture_file`）做成一个 MP4，放在
   `<data>/cache/vj-workshop/kdjv-<键>.mp4`，给「导出 MP4」和 AI 的 `kdj_project_render` 用。键由片段、素材签名和画布算出：
