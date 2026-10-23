@@ -757,6 +757,58 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
     Ok(())
 }
 
+/// Every clip and song brought within its file: an `out` past the end of what the file holds ends
+/// there instead (the library's length is often the sound's, a tenth of a second longer than the
+/// picture, or a guess from an MP3's bitrate). In a VJ the black after a clip takes what it lost,
+/// so what follows stays in sync, and the main lane ends where the songs do. `length_of` answers a
+/// file's length by its name in the document; None leaves it as it is (a still lasts as long as it
+/// is asked to, a file that cannot be read is reported by the check that follows). Answers whether
+/// anything changed.
+pub fn fit_sources(doc: &mut Value, length_of: impl Fn(&str) -> Option<f64>) -> Result<bool> {
+    let before = doc.clone();
+    let floor = |len: f64| (len * 1000.).floor() / 1000.;
+    // How far an item may reach in its file, when it reaches past it.
+    let over = |item: &Value| {
+        let len = length_of(item["src"].as_str()?)?;
+        (num(item, "out")? > len + EPS && len > num(item, "in").unwrap_or(0.) + EPS).then(|| floor(len))
+    };
+    let mut songs = songs_of(doc);
+    for song in &mut songs {
+        if let Some(out) = over(song) {
+            song["out"] = json!(out);
+        }
+    }
+    let vj = !songs.is_empty();
+    if songs != songs_of(doc) {
+        put_songs(doc, songs)?;
+    }
+    let main = main_of(doc)?;
+    // Black put in after a clip lengthens the lane as it goes.
+    let mut i = 0;
+    while i < main.len() {
+        if let Some(out) = over(&main[i]) {
+            let before = length(&main[i]);
+            main[i]["out"] = json!(out);
+            if vj {
+                hold_after(main, i, length(&main[i]) - before)?;
+            }
+        }
+        i += 1;
+    }
+    if vj {
+        let end = song_bounds(&songs_of(doc)).last().copied().unwrap_or(0.);
+        let main = main_of(doc)?;
+        let reach = starts(main).last().map_or(0., |s| s + length(main.last().unwrap()));
+        if reach > end + EPS {
+            let k = split_at(doc, end)?;
+            main_of(doc)?.truncate(k);
+        }
+    }
+    tidy(main_of(doc)?);
+    drop_orphans(doc);
+    Ok(*doc != before)
+}
+
 /// Where everything is, for whoever edits next: each stretch of the main lane with its start, and
 /// each branch with the stretch of the project it covers.
 pub fn layout(doc: &Value) -> Value {
@@ -966,5 +1018,37 @@ mod tests {
     fn a_crop_leaves_some_picture() {
         assert!(apply(&vj(), &ops(r#"[{"op":"set","id":"c1","fields":{"crop":[0.1,0,0.1,0.2]}}]"#)).is_ok());
         assert!(apply(&vj(), &ops(r#"[{"op":"set","id":"c1","fields":{"crop":[0.5,0,0.5,0]}}]"#)).is_err());
+    }
+
+    #[test]
+    fn an_out_past_the_end_of_its_file_ends_there_and_what_follows_stays() {
+        // The library said 10 s (the sound); the picture is 9.89 s.
+        let lengths = |src: &str| match src { "/a.mp4" => Some(9.89), "/s.flac" => Some(59.5), _ => None };
+        let mut doc = vj();
+        assert!(fit_sources(&mut doc, lengths).unwrap());
+        assert_eq!(shape(&doc), vec![("c1".into(), 0., 9.89), ("-".into(), 9.89, 10.11), ("c2".into(), 20., 10.)], "{doc}");
+        assert_eq!(doc["song"]["out"], json!(59.5));
+        assert!(!fit_sources(&mut doc, lengths).unwrap(), "nothing more to change");
+        let mut tight = apply(&json!({}), &ops(r#"[
+            {"op":"new","title":"VJ","song":{"src":"/s.flac","in":0,"out":40}},
+            {"op":"add","clip":{"src":"/a.mp4","in":0,"out":10}},
+            {"op":"add","clip":{"src":"/a.mp4","in":0,"out":10}}
+        ]"#)).unwrap();
+        fit_sources(&mut tight, lengths).unwrap();
+        assert_eq!(shape(&tight), vec![("c1".into(), 0., 9.89), ("-".into(), 9.89, 0.11), ("c2".into(), 10., 9.89)], "{tight}");
+
+        // Without a song the lane closes up.
+        let mut cut = apply(&json!({}), &ops(r#"[
+            {"op":"new","title":"cut"},
+            {"op":"add","clip":{"id":"a","src":"/a.mp4","out":10}},
+            {"op":"add","clip":{"id":"b","src":"/b.mp4","out":5}}
+        ]"#)).unwrap();
+        fit_sources(&mut cut, lengths).unwrap();
+        assert_eq!(shape(&cut), vec![("a".into(), 0., 9.89), ("b".into(), 9.89, 5.)]);
+
+        // A VJ's picture ends with its songs.
+        let mut long = apply(&vj(), &ops(r#"[{"op":"add","clip":{"src":"/c.mp4","out":40},"at":30}]"#)).unwrap();
+        fit_sources(&mut long, |src| (src == "/s.flac").then_some(50.)).unwrap();
+        assert_eq!(shape(&long).last().unwrap(), &("c3".into(), 30., 20.), "{long}");
     }
 }

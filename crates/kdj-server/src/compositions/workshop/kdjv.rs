@@ -374,6 +374,10 @@ pub fn parse(text: &str) -> Result<Doc> {
     Ok(doc)
 }
 
+/// What each source file held when it was last probed, by its path; its `signature` says whether
+/// it is still the same file.
+static PROBED: std::sync::OnceLock<Mutex<HashMap<PathBuf, Probed>>> = std::sync::OnceLock::new();
+
 /// What KDJ knows of one source file.
 #[derive(Debug, Clone)]
 pub struct Probed {
@@ -795,6 +799,12 @@ impl Workshop {
         if path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION)) {
             bail!("工程不能套用另一个工程：{}", path.display())
         }
+        // Every edit opens every source again: a file not changed since is not probed again.
+        let signature = signature(&path)?;
+        let known = PROBED.get_or_init(Default::default).lock().unwrap().get(&path).filter(|p| p.signature == signature).cloned();
+        if let Some(known) = known {
+            return Ok(known);
+        }
         let image = if kdj_providers::workshop_images::is_image_path(&path) {
             let path = path.clone();
             Some(tokio::task::spawn_blocking(move || kdj_providers::workshop_images::inspect(&path)).await??)
@@ -808,7 +818,7 @@ impl Workshop {
             None => probe.check(video)? as f64,
         };
         let (width, height, fps) = super::shape(&probe);
-        Ok(Probed {
+        let probed = Probed {
             kind: match &image {
                 Some(image) if image.frame_ends_ms.is_empty() => "image",
                 Some(_) => "gif",
@@ -823,8 +833,10 @@ impl Workshop {
             width: image.as_ref().map_or(width, |i| i.width),
             height: image.as_ref().map_or(height, |i| i.height),
             fps: if image.is_some() { 30. } else { fps },
-            signature: signature(&path)?,
-        })
+            signature,
+        };
+        PROBED.get_or_init(Default::default).lock().unwrap().insert(path, probed.clone());
+        Ok(probed)
     }
 
     /// The project a `.kdjv` file describes, with every source opened and checked.
@@ -867,7 +879,19 @@ impl Workshop {
         let opening = ops.is_empty() && !create;
         let folder = file.parent().unwrap_or(Path::new("."));
         let ops = Self::with_lengths(ops, folder, cancel).await?;
-        let after = super::lanes::apply(&before, &ops)?;
+        let mut after = super::lanes::apply(&before, &ops)?;
+        // What reaches past the end of its file ends there (an open project too: shown so, written
+        // only with the next edit).
+        let mut lengths: HashMap<String, Option<f64>> = HashMap::new();
+        let named: Vec<String> = after["main"].as_array().into_iter().flatten().chain(super::lanes::songs_of(&after).iter())
+            .filter_map(|item| item["src"].as_str().map(str::to_string)).collect();
+        for src in named {
+            if !lengths.contains_key(&src) {
+                let probed = Self::probe_source(&source_path(folder, &src), cancel).await.ok();
+                lengths.insert(src, probed.filter(|p| p.kind == "video" || p.kind == "audio").map(|p| p.duration_ms / 1000.));
+            }
+        }
+        super::lanes::fit_sources(&mut after, |src| lengths.get(src).copied().flatten())?;
         let text = serde_json::to_string_pretty(&after)?;
         let base = file.parent().filter(|dir| dir.is_dir()).with_context(|| format!("文件夹不存在：{}", file.display()))?;
         // A draft with nothing in it yet is kept as it is; anything else has to play.
@@ -919,8 +943,9 @@ impl Workshop {
         }))
     }
 
-    /// The operations with every clip and song that came without an `out` given its file's whole
-    /// length, measured here: the library may not know it (a fragmented M4A says 0 in its header).
+    /// The operations with every clip and song that came without an `out`, or with one past the end
+    /// of its file, given the file's whole length, measured here: the library may not know it (a
+    /// fragmented M4A says 0 in its header) or know the sound's, longer than the picture.
     async fn with_lengths(ops: &[super::lanes::Op], base: &Path, cancel: &CancellationToken) -> Result<Vec<super::lanes::Op>> {
         use super::lanes::Op;
         let mut out = ops.to_vec();
@@ -932,12 +957,15 @@ impl Workshop {
                 _ => None,
             };
             let Some(item) = item else { continue };
-            if item.get("out").is_some_and(|v| v.as_f64().is_some_and(|out| out > 0.)) {
-                continue;
-            }
+            let given = item.get("out").and_then(|v| v.as_f64()).filter(|out| *out > 0.);
             let Some(src) = item.get("src").and_then(|v| v.as_str()) else { continue };
             let probed = Self::probe_source(&source_path(base, src), cancel).await?;
             let seconds = (probed.duration_ms / 1000. * 1000.).floor() / 1000.;
+            // A still lasts as long as it is asked to.
+            let still = probed.kind == "image" || probed.kind == "gif";
+            if given.is_some_and(|out| still || out <= seconds + 1e-3) {
+                continue;
+            }
             item.insert("out".into(), serde_json::json!(seconds));
         }
         Ok(out)

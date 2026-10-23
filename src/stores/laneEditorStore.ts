@@ -94,7 +94,15 @@ interface LaneEditorState {
 const folderOf = (path: string) => path.slice(0, Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")));
 const separator = (path: string) => (path.includes("\\") && !path.includes("/") ? "\\" : "/");
 const cleanName = (name: string) => name.replace(/[\\/:*?"<>|]/g, "_").trim() || "工程";
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+/**
+ * What the server said, in the editor's words: without the step of the list it was ("第 2 步（add）：")
+ * and the document's own names of a clip ("main[1]（主线第 2 段，a.mp4）" says 主线第 2 段，a.mp4),
+ * which are for the AI that wrote the list.
+ */
+const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
+  .replace(/第 \d+ 步（[a-z_]+）：/g, "")
+  .replace(/(?:main|songs|titles|branches)\[\d+\]（([^）]*)）/g, "$1");
+const fileName = (path: string) => path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
 
 /** A song for the song lane; a picture for the picture lane. Projects themselves are neither. */
 export const isSongTrack = (track: Pick<Track, "format">) =>
@@ -244,23 +252,44 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
     }
   };
 
-  /** A new project beside `beside`, named after it; a name already taken gets a number. */
-  const create = async (beside: string, name: string, ops: LaneOp[]) => {
+  /** A new project beside `beside`, named after it; a name already taken gets a number. False when it could not be made. */
+  const create = async (beside: string, name: string, ops: LaneOp[]): Promise<boolean> => {
     set({ busy: true, error: null, open: true });
     const folder = folderOf(beside);
     for (let n = 1; n <= 20; n++) {
       const path = `${folder}${separator(beside)}${cleanName(n === 1 ? name : `${name} ${n}`)}.kdjv`;
       try {
         adopt(await api.editKdjv({ path, ops, create: true }));
-        return;
+        return true;
       } catch (error) {
         if (!message(error).includes("已经有这个文件")) {
           set({ busy: false, error: message(error) });
-          return;
+          return false;
         }
       }
     }
     set({ busy: false, error: "这个文件夹里同名的工程太多了" });
+    return false;
+  };
+
+  /**
+   * Files dropped together go in together; when that is refused, one file that cannot go in does
+   * not keep the others out: each goes on its own (the slots after a refused one move up), and the
+   * ones refused are named with why. True when any went in.
+   */
+  const editEach = async (path: string, ops: LaneOp[]): Promise<boolean> => {
+    if (await get().edit(ops, path)) return true;
+    if (ops.length < 2) return false;
+    const refused: string[] = [];
+    let any = false;
+    for (const op of ops) {
+      const shifted = (op.op === "add" || op.op === "add_song") && op.index !== undefined ? { ...op, index: op.index - refused.length } : op;
+      if (await get().edit([shifted], path)) { any = true; continue; }
+      const src = op.op === "add" ? op.clip.src : op.op === "add_song" ? op.song.src : "";
+      refused.push(`${fileName(src)}：${get().error ?? ""}`);
+    }
+    set({ error: refused.length ? `没放进去：${refused.join("；")}` : null });
+    return any;
   };
 
   return {
@@ -307,10 +336,12 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
         if (pictures.length && made) await get().placeTracks(made, pictures, 0);
       } else if (pictures.length) {
         const title = `${pictures[0].title || "未命名"} 剪辑`;
-        await create(pictures[0].path, title, [
-          { op: "new", title },
-          ...pictures.map(picture => ({ op: "add" as const, clip: clipOf(picture, false) })),
-        ]);
+        const adds = pictures.map(picture => ({ op: "add" as const, clip: clipOf(picture, false) }));
+        if (await create(pictures[0].path, title, [{ op: "new", title }, ...adds]) || adds.length < 2) return;
+        // One of them could not go in: the project is made without them, then each is put in on its own.
+        const made = await create(pictures[0].path, title, [{ op: "new", title }]);
+        const path = get().active;
+        if (made && path) await editEach(path, adds);
       }
     },
     activate: path => set({ active: path, selected: null, error: null }),
@@ -380,7 +411,7 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       }
       if (ops.length === 0) return;
       const before = new Set(doc.main.map(item => ("id" in item ? item.id : "")));
-      if (!(await get().edit(ops, project.path)) || !pictures.length) return;
+      if (!(await editEach(project.path, ops)) || !pictures.length) return;
       // Each video dropped into a VJ is looked for in its song and moved there when it is found for sure.
       const now = get().projects.find(p => p.path === project.path);
       if (!now || songsOf(now.doc).length === 0 || get().active !== project.path) return;
