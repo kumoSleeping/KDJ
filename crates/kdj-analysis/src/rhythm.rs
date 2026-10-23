@@ -31,12 +31,18 @@ pub struct RhythmAnalysis {
     pub downbeat_confidence: f64,
     pub segments: Vec<Segment>,
     pub coverage: Vec<[f64; 2]>,
+    /// Which bar-line tracking made `downbeats` (bars.rs `REVISION`); 0 for the old whole-song
+    /// count, which an analysis is brought up to when read (its beats stay as they are).
+    #[serde(default)]
+    pub bars: u32,
 }
 #[derive(Default)]
 struct Features {
     onset: Vec<f64>,
     low: Vec<f64>,
     attack: Vec<f64>,
+    /// Pitch classes per frame, for where the harmony changes (bar lines, bars.rs).
+    chroma: Vec<[f32; 12]>,
 }
 
 pub fn analyze(
@@ -44,6 +50,26 @@ pub fn analyze(
     precise: bool,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Option<RhythmAnalysis>> {
+    let Some((features, duration)) = features(path, cancelled)? else {
+        return Ok(None);
+    };
+    Ok(track(features, duration, precise, cancelled))
+}
+
+/// The bar lines among `beats` of the file at `path` and how sure they are (bars.rs), decoding
+/// it again: for an analysis made before bar lines were tracked beat by beat.
+pub fn bars_from_file(
+    path: &Path,
+    beats: &[f64],
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<(Vec<f64>, f64)>> {
+    let Some((f, _)) = features(path, cancelled)? else {
+        return Ok(None);
+    };
+    Ok(Some(crate::bars::bar_lines(beats, &f.low, &f.chroma, FPS)))
+}
+
+fn features(path: &Path, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<Option<(Features, f64)>> {
     let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT);
     let mut pending = VecDeque::from(vec![0.; FFT / 2]);
     let mut previous = vec![0f64; 64];
@@ -54,6 +80,13 @@ pub fn analyze(
         .collect();
     let mut features = Features::default();
     let mut previous_energy = 0.;
+    // Each FFT bin's pitch class, over the range where notes are heard.
+    let classes: Vec<Option<usize>> = (0..FFT / 2)
+        .map(|j| {
+            let hz = j as f64 * SR as f64 / FFT as f64;
+            (60. ..5000.).contains(&hz).then(|| ((12. * (hz / 440.).log2()).round() as i64 + 9).rem_euclid(12) as usize)
+        })
+        .collect();
     let Some(duration) = crate::decode::stream_mono(path, SR, cancelled, |samples| {
         pending.extend(samples);
         while pending.len() >= FFT {
@@ -80,6 +113,13 @@ pub fn analyze(
                 }] += delta;
                 previous[i] = value;
             }
+            let mut chroma = [0f32; 12];
+            for (j, class) in classes.iter().enumerate() {
+                if let Some(c) = class {
+                    chroma[*c] += buffer[j].norm();
+                }
+            }
+            features.chroma.push(chroma);
             features.onset.push(bands[0] + bands[1] + bands[2]);
             features.low.push(bands[0]);
             // A short centered energy window locates the physical attack. Spectral flux uses
@@ -100,7 +140,7 @@ pub fn analyze(
     else {
         return Ok(None);
     };
-    Ok(track(features, duration, precise, cancelled))
+    Ok(Some((features, duration)))
 }
 
 fn candidates(env: &[f64], low: &[f64], count: usize) -> Vec<(f64, f64)> {
@@ -388,32 +428,12 @@ fn track(
     } else {
         result.segments.iter().map(|s| s.confidence).sum::<f64>() / result.segments.len() as f64
     };
-    // Conservative 4/4 accent evidence. Equal kicks cannot establish the first beat of a bar.
-    let mut accents = [0.; 4];
-    let mut counts = [0f64; 4];
-    for (i, &beat) in result.beats.iter().enumerate() {
-        let t = (beat * FPS).round() as usize;
-        if t < f.low.len() {
-            accents[i % 4] += f.low[t];
-            counts[i % 4] += 1.;
-        }
-    }
-    for i in 0..4 {
-        accents[i] /= counts[i].max(1.);
-    }
-    let mut order = [0, 1, 2, 3];
-    order.sort_by(|&a, &b| accents[b].total_cmp(&accents[a]));
-    let contrast = (accents[order[0]] - accents[order[1]]) / accents[order[0]].max(1e-9);
-    if result.beats.len() >= 16 && contrast > 0.25 {
-        result.downbeat_confidence = contrast;
-        result.downbeats = result
-            .beats
-            .iter()
-            .skip(order[0])
-            .step_by(4)
-            .copied()
-            .collect();
-    }
+    // 4/4 bar lines tracked beat by beat (bars.rs). Equal kicks with an unchanging harmony
+    // cannot establish the first beat of a bar.
+    let (downbeats, confidence) = crate::bars::bar_lines(&result.beats, &f.low, &f.chroma, FPS);
+    result.downbeat_confidence = confidence;
+    result.downbeats = downbeats;
+    result.bars = crate::bars::REVISION;
     Some(result)
 }
 
@@ -873,6 +893,7 @@ mod regression {
             onset: vec![0.; n],
             low: vec![0.; n],
             attack: vec![0.; n],
+            chroma: vec![],
         };
         let pulse = |env: &mut [f64], time: f64, strength: f64| {
             let center = time * FPS;
@@ -905,6 +926,7 @@ mod regression {
                 onset: f.onset.clone(),
                 low: f.low.clone(),
                 attack: f.attack.clone(),
+                chroma: vec![],
             };
             let r = track(copy, duration, precise, &|| false).unwrap();
             assert_eq!(r.segments.len(), 1, "precise={precise}: {:?}", r.segments);

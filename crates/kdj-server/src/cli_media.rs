@@ -445,7 +445,7 @@ pub async fn align(State(state): State<Arc<AppState>>, Json(body): Json<AlignBod
     .await
     .map_err(|error| ApiError::bad_request(format!("对齐任务失败：{error}")))??;
     let downbeats = match &reference {
-        Media::File { track_id: Some(id), .. } => state.library.rhythm(*id).ok().flatten().map(|r| r.downbeats).unwrap_or_default(),
+        Media::File { track_id: Some(id), .. } => crate::rhythm::analysis(&state, *id).await.ok().flatten().map(|r| r.downbeats).unwrap_or_default(),
         _ => Vec::new(),
     };
     let plans = plans(&found, video_ms, reference_ms, &downbeats);

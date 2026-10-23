@@ -34,11 +34,46 @@ pub struct Request {
     #[serde(default)]
     pub force: bool,
 }
+/**
+ * A track's analysis with its bar lines tracked beat by beat (kdj-analysis bars.rs). One made by
+ * the old whole-song count (`bars` 0) — no bar lines at all once a beat was missed — gets them now
+ * from its own beats, the file decoded once more, and is kept so; its beats and tempo stay as
+ * they are, so nothing else of the library is analysed again.
+ */
+pub async fn analysis(state: &Arc<AppState>, id: i64) -> anyhow::Result<Option<kdj_analysis::rhythm::RhythmAnalysis>> {
+    let Some(mut analysis) = state.library.rhythm(id)? else { return Ok(None) };
+    if analysis.bars >= kdj_analysis::bars::REVISION || analysis.beats.len() < 16 {
+        return Ok(Some(analysis));
+    }
+    static BUSY: OnceLock<Mutex<std::collections::HashSet<i64>>> = OnceLock::new();
+    if !BUSY.get_or_init(Default::default).lock().unwrap().insert(id) {
+        return Ok(Some(analysis));
+    }
+    let done = async {
+        let path = state.library.get(id)?.map(|track| std::path::PathBuf::from(track.path)).ok_or_else(|| anyhow::anyhow!("素材不存在"))?;
+        let signature = kdj_library::rhythm::signature(&path)?;
+        let beats = analysis.beats.clone();
+        let found = tokio::task::spawn_blocking(move || kdj_analysis::rhythm::bars_from_file(&path, &beats, &|| false)).await??;
+        if let Some((downbeats, confidence)) = found {
+            analysis.downbeats = downbeats;
+            analysis.downbeat_confidence = confidence;
+            analysis.bars = kdj_analysis::bars::REVISION;
+            state.library.save_rhythm(id, &signature, &analysis)?;
+        }
+        anyhow::Ok(())
+    }.await;
+    BUSY.get_or_init(Default::default).lock().unwrap().remove(&id);
+    if let Err(error) = done {
+        tracing::warn!(track_id = id, "小节线补算失败：{error:#}");
+    }
+    Ok(Some(analysis))
+}
+
 pub async fn read(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let analysis = state.library.rhythm(id)?;
+    let analysis = analysis(&state, id).await?;
     let status = statuses().lock().unwrap().get(&id).cloned();
     Ok(Json(json!({"analysis":analysis,"status":status})))
 }

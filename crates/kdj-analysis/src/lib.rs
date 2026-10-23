@@ -6,6 +6,7 @@
 
 pub mod decode;
 pub mod alignment;
+pub mod bars;
 pub mod dj_grid;
 pub mod dsp;
 pub mod engine;
