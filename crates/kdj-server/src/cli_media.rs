@@ -321,6 +321,11 @@ fn bar_at(downbeats: &[f64], seconds: f64) -> Option<f64> {
     Some((((i + 1) as f64 + fraction) * 100.).round() / 100.)
 }
 
+/// A speed to a millionth: one rounded to a ten-thousandth drifts several milliseconds a minute.
+fn speed_value(speed: f64) -> f64 {
+    (speed * 1e6).round() / 1e6
+}
+
 fn plan(id: &str, label: &str, evidence: &str, auto: bool, similarity: Option<f64>, segments: &[Segment], downbeats: &[f64]) -> Value {
     let first = &segments[0];
     let speed = first.speed;
@@ -329,7 +334,7 @@ fn plan(id: &str, label: &str, evidence: &str, auto: bool, similarity: Option<f6
         "label": label,
         "evidence": evidence,
         "auto": auto,
-        "speed": (speed * 10000.).round() / 10000.,
+        "speed": speed_value(speed),
         // 视频 0 秒对应参考曲的时间（秒）。
         "offset": round((first.ref_at - first.video_in / speed) / 1000.),
         "segments": segments.iter().map(|s| {
@@ -338,7 +343,7 @@ fn plan(id: &str, label: &str, evidence: &str, auto: bool, similarity: Option<f6
                 "video_in": round(s.video_in / 1000.),
                 "video_out": round(s.video_out / 1000.),
                 "ref_at": round(ref_at),
-                "speed": (s.speed * 10000.).round() / 10000.,
+                "speed": speed_value(s.speed),
             });
             if let Some(bar) = bar_at(downbeats, ref_at) {
                 seg["ref_bar"] = json!(bar);
@@ -418,6 +423,149 @@ fn plans(found: &RecordingMatch, video_ms: f64, reference_ms: f64, downbeats: &[
     out
 }
 
+/// The beats of a file in its own timeline (a video's in video time, its sound shifted by the
+/// start of the sound stream): the library's analysis for a row, else one made now and kept for
+/// as long as the file does not change. None for what is not a local file, or has no beats.
+async fn beats_of(state: &Arc<AppState>, media: &Media, shift: f64) -> Option<Vec<f64>> {
+    let Media::File { path, track_id, .. } = media else { return None };
+    if let Some(id) = track_id {
+        // The library's analysis of a video row is already in video time.
+        return crate::rhythm::analysis(state, *id).await.ok().flatten().map(|a| a.beats).filter(|b| b.len() >= 16);
+    }
+    static MADE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, (String, Vec<f64>)>>> = std::sync::OnceLock::new();
+    let signature = kdj_library::rhythm::signature(path).ok()?;
+    if let Some((known, beats)) = MADE.get_or_init(Default::default).lock().unwrap().get(path) {
+        if *known == signature {
+            return Some(beats.clone());
+        }
+    }
+    let file = path.clone();
+    let analysis = tokio::task::spawn_blocking(move || kdj_analysis::rhythm::analyze(&file, true, &|| false)).await.ok()?.ok()??;
+    let beats: Vec<f64> = analysis.beats.iter().map(|b| b + shift).filter(|b| *b >= 0.).collect();
+    MADE.get_or_init(Default::default).lock().unwrap().insert(path.clone(), (signature, beats.clone()));
+    (beats.len() >= 16).then_some(beats)
+}
+
+/// Where a file's sound starts after its picture, in seconds: the sound decoded for matching
+/// starts there, the file's own timeline (what a clip's `in` counts) does not.
+async fn sound_shift(media: &Media, cancel: &CancellationToken) -> f64 {
+    let Media::File { path, .. } = media else { return 0. };
+    match probe(path, cancel).await {
+        Ok(found) if found.video().is_some() => found.audio_shift() as f64 / 1000.,
+        _ => 0.,
+    }
+}
+
+fn clock(seconds: f64) -> String {
+    let seconds = seconds.max(0.);
+    format!("{:02}:{:05.2}", (seconds / 60.).floor() as u64, seconds % 60.)
+}
+
+fn segment_value(piece: &kdj_analysis::beat_lock::Piece, downbeats: &[f64]) -> Value {
+    let mut seg = json!({
+        "video_in": round(piece.video_in), "video_out": round(piece.video_out),
+        "ref_at": round(piece.ref_at), "speed": speed_value(piece.speed),
+    });
+    if let Some(bar) = bar_at(downbeats, piece.ref_at) {
+        seg["ref_bar"] = json!(bar);
+    }
+    seg
+}
+
+fn pieces_of(plan: &Value) -> Vec<kdj_analysis::beat_lock::Piece> {
+    plan["segments"].as_array().into_iter().flatten().map(|s| kdj_analysis::beat_lock::Piece {
+        video_in: s["video_in"].as_f64().unwrap_or(0.), video_out: s["video_out"].as_f64().unwrap_or(0.),
+        ref_at: s["ref_at"].as_f64().unwrap_or(0.), speed: s["speed"].as_f64().unwrap_or(1.),
+    }).collect()
+}
+
+/// A plan laid as `pieces`, under `id` and `label`, with how well its beats sit (`locked`).
+fn locked_plan(base: &Value, id: String, label: &str, pieces: &[kdj_analysis::beat_lock::Piece], locked: &kdj_analysis::beat_lock::Locked, downbeats: &[f64]) -> Value {
+    let mut plan = base.clone();
+    let first = pieces[0];
+    plan["id"] = json!(id);
+    plan["label"] = json!(label);
+    plan["speed"] = json!(speed_value(first.speed));
+    plan["offset"] = json!(round(first.ref_at - first.video_in / first.speed));
+    plan["segments"] = json!(pieces.iter().map(|p| segment_value(p, downbeats)).collect::<Vec<_>>());
+    plan["beat"] = json!({ "error_ms": (locked.error_ms * 10.).round() / 10., "matched": locked.matched, "beats": locked.beats });
+    plan.as_object_mut().map(|o| o.remove("verified"));
+    plan
+}
+
+/**
+ * Every plan found by listening, as the workshop offered it, in groups: each found placement
+ * (`group` says which: how it was found, where, how fast, how alike) with its ways of laying the
+ * video. One that is not the same recording (a remix, a melody match) is also locked to the
+ * song's beats (kdj-analysis beat_lock.rs): 保留完整 — the whole video at the fitted speed, as
+ * far as the song goes; 裁切匹配段 — only what was matched; 分段变速 — pieces each at its own
+ * speed where the remix re-times the music. Its `beat` says how close the beats sit (median ms)
+ * and how many paired. The same recording (whole, sections) is matched to the sample already.
+ */
+fn lock_plans(plans: Vec<Value>, video: Option<&[f64]>, song: Option<&[f64]>, video_s: f64, song_s: f64, downbeats: &[f64]) -> Vec<Value> {
+    use kdj_analysis::beat_lock::{bend, lock, Piece};
+    let mut out = vec![];
+    for (n, mut plan) in plans.into_iter().enumerate() {
+        let group = format!("g{}", n + 1);
+        let pieces = pieces_of(&plan);
+        let Some(first) = pieces.first().copied() else { continue };
+        let similarity = plan["similarity"].as_f64().map(|s| format!(" · 相似度 {s:.2}")).unwrap_or_default();
+        let parts = if pieces.len() > 1 { format!(" · {} 段", pieces.len()) } else { String::new() };
+        let title = format!("{} · {} · {:.4}×{similarity}{parts}", plan["label"].as_str().unwrap_or(""), clock(first.ref_at), first.speed);
+        plan["group"] = json!(group);
+        plan["group_label"] = json!(title);
+        let same_recording = matches!(plan["id"].as_str(), Some("whole" | "sections"));
+        let (Some(video), Some(song), false) = (video, song, same_recording) else {
+            out.push(plan);
+            continue;
+        };
+        let mut found = vec![];
+        if pieces.len() == 1 {
+            if let Some(locked) = lock(video, song, &first) {
+                let piece = locked.pieces[0];
+                // The whole video at that speed, from where it can start in the song to where the song ends.
+                let from = (piece.video_in - piece.ref_at * piece.speed).max(0.);
+                let to = video_s.min(piece.video_in + (song_s - piece.ref_at) * piece.speed);
+                if to > from {
+                    let whole = Piece { video_in: from, video_out: to, ref_at: piece.at(from), speed: piece.speed };
+                    found.push(locked_plan(&plan, format!("{}-beat-whole", plan["id"].as_str().unwrap_or("")), "保留完整", &[whole], &locked, downbeats));
+                }
+                found.push(locked_plan(&plan, format!("{}-beat", plan["id"].as_str().unwrap_or("")), "裁切匹配段", &[piece], &locked, downbeats));
+                if let Some(bent) = bend(video, song, &locked) {
+                    found.push(locked_plan(&plan, format!("{}-beat-bend", plan["id"].as_str().unwrap_or("")), "分段变速", &bent.pieces, &bent, downbeats));
+                }
+            }
+        } else {
+            // Each piece locked on its own; all of them, or the plan is left as it was heard.
+            let locked: Vec<_> = pieces.iter().map(|p| lock(video, song, p)).collect();
+            if locked.iter().all(Option::is_some) {
+                let locked: Vec<_> = locked.into_iter().flatten().collect();
+                let laid: Vec<Piece> = locked.iter().map(|l| l.pieces[0]).collect();
+                let mut errors: Vec<f64> = locked.iter().map(|l| l.error_ms).collect();
+                let summary = kdj_analysis::beat_lock::Locked {
+                    pieces: laid.clone(),
+                    error_ms: kdj_analysis::dsp::median(&mut errors),
+                    matched: locked.iter().map(|l| l.matched).sum(),
+                    beats: locked.iter().map(|l| l.beats).sum(),
+                };
+                found.push(locked_plan(&plan, format!("{}-beat", plan["id"].as_str().unwrap_or("")), "对拍分段", &laid, &summary, downbeats));
+            }
+        }
+        // A verified placement locked to the beats goes in by itself in place of the heard one.
+        let auto = plan["auto"].as_bool().unwrap_or(false);
+        if !found.is_empty() {
+            for (k, locked) in found.iter_mut().enumerate() {
+                locked["auto"] = json!(auto && k == 0);
+            }
+            plan["auto"] = json!(false);
+            plan["label"] = json!("不对拍");
+        }
+        out.extend(found);
+        out.push(plan);
+    }
+    out
+}
+
 pub async fn align(State(state): State<Arc<AppState>>, Json(body): Json<AlignBody>) -> ApiResult<Json<Value>> {
     let cancel = CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
@@ -448,7 +596,23 @@ pub async fn align(State(state): State<Arc<AppState>>, Json(body): Json<AlignBod
         Media::File { track_id: Some(id), .. } => crate::rhythm::analysis(&state, *id).await.ok().flatten().map(|r| r.downbeats).unwrap_or_default(),
         _ => Vec::new(),
     };
-    let plans = plans(&found, video_ms, reference_ms, &downbeats);
+    // The matched sound starts with each file's sound stream; the plans are in the files' own time.
+    let (video_shift, reference_shift) = tokio::join!(sound_shift(&video, &cancel), sound_shift(&reference, &cancel));
+    let mut plans = plans(&found, video_ms, reference_ms, &downbeats);
+    for plan in &mut plans {
+        for seg in plan["segments"].as_array_mut().into_iter().flatten() {
+            for key in ["video_in", "video_out"] {
+                seg[key] = json!(round((seg[key].as_f64().unwrap_or(0.) + video_shift).max(0.)));
+            }
+            seg["ref_at"] = json!(round(seg["ref_at"].as_f64().unwrap_or(0.) + reference_shift));
+        }
+        if let Some(first) = pieces_of(plan).first() {
+            plan["offset"] = json!(round(first.ref_at - first.video_in / first.speed));
+        }
+    }
+    let (video_beats, song_beats) = tokio::join!(beats_of(&state, &video, video_shift), beats_of(&state, &reference, reference_shift));
+    let plans = lock_plans(plans, video_beats.as_deref(), song_beats.as_deref(),
+        video_ms / 1000. + video_shift, reference_ms / 1000. + reference_shift, &downbeats);
     // A library row may not know its length yet; the decoded sound always does, and the AI needs
     // it to see where the song runs without picture.
     let described = |media: &Media, ms: f64| {
@@ -528,6 +692,32 @@ mod tests {
         assert_eq!(plans[1]["id"], "melody-1");
         assert_eq!(plans[1]["evidence"], "melody");
         assert_eq!(plans[1]["auto"], false);
+    }
+
+    #[test]
+    fn a_melody_match_is_offered_locked_to_the_beats() {
+        // A 160 BPM opening under a 145 BPM remix: its 20 s at the song's 37.379 s.
+        let speed = 145. / 160.;
+        let video: Vec<f64> = (0..).map(|i| 0.2 + i as f64 * 0.375).take_while(|t| *t < 90.).collect();
+        let song: Vec<f64> = video.iter().map(|v| 37.379 + (v - 20.) / speed).filter(|t| *t >= 0. && *t < 275.).collect();
+        let mut found = RecordingMatch::default();
+        found.fuzzy.review = vec![FuzzyPlacement {
+            source_start_ms: 20_000., source_end_ms: 78_000., reference_start_ms: 37_379. + 80.,
+            speed: 0.9062, similarity: 0.56, anchors: 4,
+        }];
+        let heard = plans(&found, 92_139., 275_142., &[]);
+        let laid = lock_plans(heard, Some(&video), Some(&song), 92.139, 275.142, &[]);
+        let labels: Vec<_> = laid.iter().map(|p| p["label"].as_str().unwrap().to_string()).collect();
+        assert_eq!(labels, ["保留完整", "裁切匹配段", "不对拍"]);
+        assert!(laid.iter().all(|p| p["group"] == "g1" && p["auto"] == false));
+        let cut = &laid[1]["segments"][0];
+        assert!((cut["speed"].as_f64().unwrap() - speed).abs() < 1e-5, "{cut}");
+        assert!((cut["ref_at"].as_f64().unwrap() - 37.379).abs() < 0.003, "{cut}");
+        assert!(laid[1]["beat"]["error_ms"].as_f64().unwrap() < 2.);
+        // 保留完整 starts the video where it can and runs to its end.
+        let whole = &laid[0]["segments"][0];
+        assert_eq!(whole["video_in"], json!(0.0));
+        assert_eq!(whole["video_out"], json!(92.139));
     }
 
     #[test]
