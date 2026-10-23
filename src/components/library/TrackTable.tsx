@@ -2359,6 +2359,8 @@ export const TrackTable = memo(function TrackTable({
     },
     cancelPress,
     doubleClick(track) {
+      // A project double-clicked plays and opens in the editor beside the list, whichever click plays.
+      if (!selecting && isProjectTrack(track.format)) void useLaneEditor.getState().openTrack(track);
       if (selecting || playClick !== "double") return;
       const submitted = doubleClickPlaybackRef.current;
       doubleClickPlaybackRef.current = null;
