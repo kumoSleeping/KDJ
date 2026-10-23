@@ -556,10 +556,8 @@ export function LaneBoard({ area, project, zoom, selected, select, playhead, see
       </svg>
       <div ref={mainLane} className="kd-lanes-lane" data-lane="main" aria-label="画面" data-drop={drop?.some(mark => mark.lane === "main") || undefined}>
         {layout.main.map(item => {
-          if (item.gap) {
-            return <span key={`gap-${item.index}`} className="kd-lanes-gap" style={{ left: pct(item.at, span), width: pct(item.length, span) }}
-              title={`黑 · ${laneClock(item.at)}–${laneClock(item.at + item.length)}`} />;
-          }
+          // Where there is no picture the lane stays empty.
+          if (item.gap) return null;
           const id = item.id ?? "";
           const at = shown("main", id, item.at, item.length);
           const clip = clipOf(id);

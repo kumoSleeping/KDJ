@@ -81,7 +81,7 @@
 .kd-lanes-lane[data-lane="title"] { height: 16px; }
 /* A lane that something dragged over it would land in lifts a tone. */
 .kd-lanes-lane[data-drop] { border-radius: 4px; background: var(--kd-hover); }
-.kd-lanes-clip, .kd-lanes-gap, .kd-lanes-song, .kd-lanes-branch-block, .kd-lanes-title-block {
+.kd-lanes-clip, .kd-lanes-song, .kd-lanes-branch-block, .kd-lanes-title-block {
   position: absolute;
   top: 0;
   bottom: 0;
@@ -136,7 +136,6 @@
 [data-dragging] { z-index: 2; opacity: 0.85; cursor: grabbing; }
 .kd-lanes-clip[aria-pressed="true"] { border-color: var(--kd-text); color: var(--kd-text); font-weight: 600; }
 .kd-lanes-clip[aria-pressed="true"] .kd-lanes-clip-name { color: var(--kd-text); }
-.kd-lanes-gap { background: #000; opacity: 0.55; }
 .kd-lanes-song {
   padding: 0 6px;
   overflow: hidden;
