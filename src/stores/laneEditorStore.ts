@@ -52,10 +52,10 @@ interface LaneEditorState {
   selected: string | null;
   busy: boolean;
   error: string | null;
-  /** Clips being found in their song (校准), by id. */
+  /** Clips being found in their song (校准), by `alignKey`. */
   aligning: string[];
-  /** What 校准 found for a clip: its plans, best first, or none that fit. */
-  plans: Record<string, AlignPlan[]>;
+  /** What 校准 found for a clip, by `alignKey`: its plans, best first, or none that fit. */
+  plans: Record<string, AlignFound>;
   /** Each project's documents before its edits (undo) and after the ones undone (redo), by path. */
   history: Record<string, { past: LaneDocument[]; future: LaneDocument[] }>;
   /** Opens the drawer as it was (the key at the top right). */
@@ -105,6 +105,15 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
   .replace(/第 \d+ 步（[a-z_]+）：/g, "")
   .replace(/(?:main|songs|titles|branches)\[\d+\]（([^）]*)）/g, "$1");
 const fileName = (path: string) => path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
+
+/** What 校准 found for one clip's file in its song. */
+export interface AlignFound { plans: AlignPlan[]; reason?: string }
+
+/**
+ * Whose 校准 a result is: the project, the clip and its file. Clip ids repeat from project to
+ * project (c1, c2…), and a clip's file can change, so a result never shows on another clip.
+ */
+export const alignKey = (path: string, clipId: string, src: string) => `${path}\n${clipId}\n${src}`;
 
 /** A song for the song lane; a picture for the picture lane. Projects themselves are neither. */
 export const isSongTrack = (track: Pick<Track, "format">) =>
@@ -436,12 +445,14 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
     async calibrate(clipId, auto = false) {
       const project = get().projects.find(p => p.path === get().active);
       const target = project && songUnder(project, clipId);
-      if (!project || !target || get().aligning.includes(clipId)) return;
+      if (!project || !target) return;
       const before = target.clip;
-      set(state => ({ aligning: [...state.aligning, clipId], error: null }));
+      const key = alignKey(project.path, clipId, before.src);
+      if (get().aligning.includes(key)) return;
+      set(state => ({ aligning: [...state.aligning, key], error: null }));
       try {
         const reply = await api.align(target.reference, before.src);
-        set(state => ({ plans: { ...state.plans, [clipId]: reply.plans } }));
+        set(state => ({ plans: { ...state.plans, [key]: { plans: reply.plans, reason: reply.reason } } }));
         const now = get().projects.find(p => p.path === project.path);
         const still = now?.doc.main.find((item): item is LaneClip => !isGap(item) && item.id === clipId);
         // A plan sure enough goes in by itself, unless the clip was changed meanwhile.
@@ -451,7 +462,7 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       } catch (error) {
         if (!auto) set({ error: message(error) });
       } finally {
-        set(state => ({ aligning: state.aligning.filter(id => id !== clipId) }));
+        set(state => ({ aligning: state.aligning.filter(id => id !== key) }));
       }
     },
     async applyPlan(clipId, plan) {
@@ -461,7 +472,7 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       const ops = alignedOps(target.clip, plan, target.song);
       if (ops.length && await get().edit(ops)) {
         set(state => {
-          const { [clipId]: _gone, ...plans } = state.plans;
+          const { [alignKey(project.path, clipId, target.clip.src)]: _gone, ...plans } = state.plans;
           return { plans, selected: null };
         });
       }

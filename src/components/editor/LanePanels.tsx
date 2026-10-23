@@ -7,9 +7,9 @@ import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent as R
 import { ArrowLeft, ArrowRight, Crosshair, Download, LoaderCircle, Plus, RotateCcw, Scissors, Trash2 } from "lucide-react";
 import { api } from "../../lib/api";
 import { exportProject, useKdjvLive } from "../../lib/kdjvPlay";
-import { branchOps, isGap, laneClock, type BranchSide, type ExportOptions, type LaneBranch, type LaneClip, type LaneOp, type LaneTitle } from "../../lib/lanes";
+import { branchOps, fileLabel, isGap, laneClock, type BranchSide, type ExportOptions, type LaneBranch, type LaneClip, type LaneOp, type LaneTitle } from "../../lib/lanes";
 import { drawTitle, TITLE_DEFAULTS, type TitleLook } from "../../lib/titleImage";
-import { songsOf, useLaneEditor, type LaneProject } from "../../stores/laneEditorStore";
+import { alignKey, songsOf, useLaneEditor, type LaneProject } from "../../stores/laneEditorStore";
 import { Segmented, Slider } from "../common";
 
 export type Tool = "title" | "export";
@@ -144,20 +144,26 @@ function Branch({ clip, side, branch, beat, vj, at, sourceLength, onOps }: {
 }
 
 /** 校准: where the chosen clip's sound lies in the song under it, and the ways to place it there. */
-function AlignPanel({ clipId }: { clipId: string }) {
-  const aligning = useLaneEditor(state => state.aligning.includes(clipId));
-  const plans = useLaneEditor(state => state.plans[clipId]);
+function AlignPanel({ path, clip }: { path: string; clip: LaneClip }) {
+  const key = alignKey(path, clip.id, clip.src);
+  const aligning = useLaneEditor(state => state.aligning.includes(key));
+  const found = useLaneEditor(state => state.plans[key]);
   const { calibrate, applyPlan } = useLaneEditor.getState();
+  const plans = found?.plans;
+  // What came back, said of this clip's own file: not there at all, or only a likeness of the tune.
+  const note = !found || aligning ? null
+    : plans!.length === 0 ? `「${fileLabel(clip.src)}」的声音里没有找到这首歌`
+      : plans!.some(plan => plan.auto) ? null : "只找到旋律相近的位置，试听后再选";
   return <div className="kd-lanes-rows">
     <div className="kd-lanes-row">
-      <button type="button" className="kd-lanes-action" disabled={aligning} onClick={() => void calibrate(clipId)}>
+      <button type="button" className="kd-lanes-action" disabled={aligning} onClick={() => void calibrate(clip.id)}>
         {aligning ? <LoaderCircle size={14} className="kd-spin" /> : <Crosshair size={14} />}{aligning ? "正在对齐" : "对齐到歌"}
       </button>
-      {plans && plans.length === 0 && !aligning && <span className="kd-lanes-note">没有找到对得上的位置</span>}
+      {note && <span className="kd-lanes-note" title={found?.reason}>{note}</span>}
     </div>
     {plans && plans.length > 0 && <div className="kd-lanes-row">
       {plans.slice(0, 4).map(plan => <button key={plan.id} type="button" className="kd-lanes-action" title={plan.id}
-        onClick={() => void applyPlan(clipId, plan)}>
+        onClick={() => void applyPlan(clip.id, plan)}>
         {plan.label}{plan.similarity !== undefined ? ` · ${Math.round(plan.similarity * 100)}%` : ""}
       </button>)}
     </div>}
@@ -379,7 +385,7 @@ export function ToolPanel({ tool, project, selected, playhead, beatNear, edit }:
         <Branch clip={clip} side="out" branch={branchOf("out")} beat={beatNear(placed.at + placed.length)} vj={vj} at={placed.at}
           sourceLength={project.lengths[clip.src]} onOps={edit} />
       </Section>
-      {vj && <Section label="校准"><AlignPanel clipId={clip.id} /></Section>}
+      {vj && <Section label="校准"><AlignPanel path={project.path} clip={clip} /></Section>}
     </div>;
   }
 
