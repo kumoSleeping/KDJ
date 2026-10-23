@@ -58,6 +58,13 @@ interface LaneEditorState {
   plans: Record<string, AlignFound>;
   /** Each project's documents before its edits (undo) and after the ones undone (redo), by path. */
   history: Record<string, { past: LaneDocument[]; future: LaneDocument[] }>;
+  /** Whether what is dragged lands on the song's beats (N; Alt while dragging lets it go free). */
+  snap: boolean;
+  /** Each project's in and out points (I and O), in seconds, by path: what 导出 can write out. */
+  ranges: Record<string, { in?: number; out?: number }>;
+  toggleSnap(): void;
+  /** The in (I) or out (O) point of the project in view at `at`; an out before the in, or the reverse, clears the other. */
+  setRange(end: "in" | "out", at: number): void;
   /** Opens the drawer as it was (the key at the top right). */
   show(): void;
   openTrack(track: Pick<Track, "id" | "path">): Promise<void>;
@@ -305,6 +312,19 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
 
   return {
     open: false, projects: [], active: null, selected: null, busy: false, error: null, aligning: [], plans: {}, history: {},
+    snap: true, ranges: {},
+    toggleSnap: () => set(state => ({ snap: !state.snap })),
+    setRange(end, at) {
+      const path = get().active;
+      if (!path) return;
+      set(state => {
+        const now = state.ranges[path] ?? {};
+        const next = end === "in"
+          ? { in: at, out: now.out !== undefined && now.out > at ? now.out : undefined }
+          : { out: at, in: now.in !== undefined && now.in < at ? now.in : undefined };
+        return { ranges: { ...state.ranges, [path]: next } };
+      });
+    },
     show() {
       set({ open: true });
       useSidePanels.getState().raise(LANE_EDITOR_APP);

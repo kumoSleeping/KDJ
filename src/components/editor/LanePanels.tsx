@@ -253,7 +253,9 @@ function ExportPanel({ project }: { project: LaneProject }) {
   const [size, setSize] = useState<keyof typeof SIZES>("project");
   const [fps, setFps] = useState<"project" | 30 | 60>("project");
   const [quality, setQuality] = useState<keyof typeof QUALITY>("standard");
-  const [range, setRange] = useState<"all" | "marks">("all");
+  const points = useLaneEditor(state => state.ranges[project.path]);
+  const ranged = points !== undefined && (points.in !== undefined || points.out !== undefined);
+  const [range, setRange] = useState<"all" | "marks" | "points">(ranged ? "points" : "all");
   const [what, setWhat] = useState<"video" | "sound">("video");
   const markers = project.doc.markers ?? [];
   const marked = markers.length >= 2;
@@ -271,6 +273,7 @@ function ExportPanel({ project }: { project: LaneProject }) {
     if (fps !== "project") options.fps = fps;
     if (quality !== "standard") options.quality = QUALITY[quality];
     if (range === "marks" && marked) { options.from = markers[0].at; options.to = markers[markers.length - 1].at; }
+    if (range === "points" && ranged) { options.from = points.in ?? 0; options.to = points.out ?? project.layout.duration; }
     if (what === "sound") options.audio_only = true;
     const track = await api.track(project.trackId).catch(() => null);
     if (track) exportProject(track, Object.keys(options).length ? options : undefined);
@@ -280,8 +283,9 @@ function ExportPanel({ project }: { project: LaneProject }) {
     <div className="kd-lanes-row">
       <Segmented<"video" | "sound"> label="导出什么" value={what} onChange={setWhat}
         options={[{ value: "video", label: "视频" }, { value: "sound", label: "只要声音" }]} />
-      <Segmented<"all" | "marks"> label="范围" value={range} onChange={setRange}
-        options={[{ value: "all", label: "全部" }, ...(marked ? [{ value: "marks" as const, label: "标记之间" }] : [])]} />
+      <Segmented<"all" | "marks" | "points"> label="范围" value={range} onChange={setRange}
+        options={[{ value: "all", label: "全部" }, ...(ranged ? [{ value: "points" as const, label: "入出点" }] : []),
+          ...(marked ? [{ value: "marks" as const, label: "标记之间" }] : [])]} />
     </div>
     {!sound && <div className="kd-lanes-row">
       <Segmented<keyof typeof SIZES> label="尺寸" value={size} onChange={setSize}

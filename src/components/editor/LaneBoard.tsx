@@ -11,7 +11,7 @@
  * `onDropped`), whether the system carried them (the harmonic list) or the track table followed
  * the pointer by hand (lib/pointerTrackDrop.ts).
  */
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { api } from "../../lib/api";
 import { rulerStep } from "../../lib/aiTimeline";
 import { isImageTrack, isProjectTrack } from "../../lib/format";
@@ -22,9 +22,12 @@ import { activeSearchDrag, finishSearchDrop, isSearchDownloadDrag, readSearchDro
 import { useEditorDownloads } from "../../lib/editorDownloads";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
-import { isSongTrack, songsOf, type LaneProject } from "../../stores/laneEditorStore";
+import { isSongTrack, songsOf, useLaneEditor, type LaneProject } from "../../stores/laneEditorStore";
 
-export const ZOOMS = [1, 2, 4, 8, 16];
+/** How far the lanes can be drawn out: 1 is the whole project in view. */
+export const ZOOM_MIN = 1;
+export const ZOOM_MAX = 64;
+export const clampZoom = (zoom: number) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom));
 const pct = (t: number, span: number) => `${Math.max(0, Math.min(100, (t / span) * 100))}%`;
 const round = (v: number) => Math.round(v * 1000) / 1000;
 /** How near an end a press has to be to pull that end, in pixels. */
@@ -129,10 +132,12 @@ function DropMarks({ marks, lane, span }: { marks: DropMark[] | null; lane: "son
   })}</>;
 }
 
-export function LaneBoard({ area, project, zoom, selected, select, playhead, seek, beatNear, edit, onDropped, onSearchDropped }: {
+export function LaneBoard({ area, project, zoom, onZoom, selected, select, playhead, seek, beatNear, edit, onDropped, onSearchDropped }: {
   /** The whole editor: what is let go anywhere on it is taken (on a lane, there; elsewhere, each to its own lane's end). */
   area: RefObject<HTMLElement | null>;
-  project: LaneProject; zoom: number; selected: string | null; select(id: string | null): void;
+  project: LaneProject; selected: string | null; select(id: string | null): void;
+  /** How far the lanes are drawn out (1: the whole project in view); a pinch or ⌥/Ctrl + wheel asks for another. */
+  zoom: number; onZoom(zoom: number): void;
   /** Where the project is playing, or null when it is not the one loaded. */
   playhead: number | null; seek(t: number): void;
   /** One beat's length near `t`: how long a branch is when only pulled up. */
@@ -144,7 +149,10 @@ export function LaneBoard({ area, project, zoom, selected, select, playhead, see
   onSearchDropped(payload: ActiveSearchDrag, at: number, sound: boolean): void;
 }) {
   const { doc, layout, grid } = project;
+  const snapOn = useLaneEditor(state => state.snap);
+  const range = useLaneEditor(state => state.ranges[project.path]);
   const board = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLDivElement>(null);
   const aux = useRef<HTMLDivElement>(null);
   const mainLane = useRef<HTMLDivElement>(null);
   const soundLane = useRef<HTMLDivElement>(null);
@@ -174,14 +182,14 @@ export function LaneBoard({ area, project, zoom, selected, select, playhead, see
   const ruler = useMemo(() => {
     if (vj && downbeats.length > 1) {
       const bars = downbeats.map((at, n) => ({ n: n + 1, at })).filter(bar => bar.at >= 0 && bar.at <= span);
-      const step = rulerStep(bars.length / ZOOMS[zoom]);
+      const step = rulerStep(bars.length / zoom);
       return bars.filter(bar => (bar.n - 1) % step === 0).map(bar => ({ at: bar.at, label: String(bar.n) }));
     }
-    const step = secondStep(span / ZOOMS[zoom]);
+    const step = secondStep(span / zoom);
     return Array.from({ length: Math.floor(span / step) + 1 }, (_, n) => ({ at: n * step, label: laneClock(n * step).replace(/\.0$/, "") }));
   }, [vj, downbeats, span, zoom]);
   const beatTicks = useMemo(() => {
-    if (!vj || downbeats.length < 2 || downbeats.length / ZOOMS[zoom] > 24) return [];
+    if (!vj || downbeats.length < 2 || downbeats.length / zoom > 24) return [];
     return beats.filter(at => at >= 0 && at <= span);
   }, [vj, downbeats, beats, span, zoom]);
 
@@ -197,9 +205,79 @@ export function LaneBoard({ area, project, zoom, selected, select, playhead, see
     const box = aux.current?.getBoundingClientRect();
     return box ? clientY <= box.bottom + 2 : false;
   };
-  /** The beat nearest `t` in a VJ (when not let free), else `t`. */
+  // ---- zoom: a pinch, ⌥ or Ctrl + wheel about the pointer; Shift + wheel along the lanes ----
+  /** The second at the pointer, where it stood when the zoom began, until the new zoom is drawn. */
+  const anchor = useRef<{ time: number; x: number } | null>(null);
+  const shownZoom = useRef(zoom);
+  const pendingZoom = useRef(zoom);
+  const pinchFrom = useRef<{ zoom: number; clientX: number } | null>(null);
+  const zoomAt = (next: number, clientX: number) => {
+    const node = scroller.current;
+    const bounded = clampZoom(next);
+    if (!node || dragRef.current || !Number.isFinite(bounded) || bounded === pendingZoom.current) return;
+    const x = Math.max(0, Math.min(node.clientWidth, clientX - node.getBoundingClientRect().left));
+    anchor.current ??= { time: (node.scrollLeft + x) / (node.clientWidth * shownZoom.current) * span, x };
+    pendingZoom.current = bounded;
+    onZoom(bounded);
+  };
+  // A zoom from the keys keeps the playhead where it is on screen, else the middle of the view.
+  useLayoutEffect(() => {
+    const node = scroller.current;
+    const before = shownZoom.current;
+    shownZoom.current = pendingZoom.current = zoom;
+    if (!node || before === zoom) return;
+    const width = node.clientWidth;
+    let at = anchor.current;
+    anchor.current = null;
+    if (!at) {
+      const head = playhead !== null ? playhead / span * width * before - node.scrollLeft : -1;
+      const x = head >= 0 && head <= width ? head : width / 2;
+      at = { time: (node.scrollLeft + x) / (width * before) * span, x };
+    }
+    node.scrollLeft = Math.max(0, at.time / span * width * zoom - at.x);
+  }, [zoom]); // eslint-disable-line react-hooks/exhaustive-deps
+  const gesture = useRef({ zoomAt, width: () => scroller.current?.clientWidth ?? 0 });
+  gesture.current = { zoomAt, width: () => scroller.current?.clientWidth ?? 0 };
+  useEffect(() => {
+    const node = scroller.current;
+    if (!node) return;
+    const wheel = (event: WheelEvent) => {
+      if (!event.altKey && !event.ctrlKey && !event.shiftKey) return;
+      event.preventDefault();
+      const page = node.clientWidth || 200;
+      const unit = event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? page : 1;
+      const dx = event.deltaX * unit, dy = event.deltaY * unit;
+      // A touchpad pinch reaches WebView2 and Chromium as Ctrl + wheel.
+      if (event.altKey || event.ctrlKey) {
+        gesture.current.zoomAt(pendingZoom.current * Math.exp(-(dy || dx) * (event.ctrlKey ? 0.012 : 0.003)), event.clientX);
+        return;
+      }
+      node.scrollLeft += dx || dy;
+    };
+    // WebKit (the Mac) reports a pinch as gesture events, with the scale since it began.
+    const pinch = (event: Event) => {
+      const e = event as Event & { scale: number; clientX?: number };
+      e.preventDefault();
+      if (e.type === "gesturestart") {
+        const box = node.getBoundingClientRect();
+        pinchFrom.current = { zoom: pendingZoom.current, clientX: e.clientX ?? box.left + box.width / 2 };
+        return;
+      }
+      const from = pinchFrom.current;
+      if (from && Number.isFinite(e.scale) && e.scale > 0) gesture.current.zoomAt(from.zoom * e.scale, from.clientX);
+      if (e.type === "gestureend") pinchFrom.current = null;
+    };
+    node.addEventListener("wheel", wheel, { passive: false });
+    for (const name of ["gesturestart", "gesturechange", "gestureend"]) node.addEventListener(name, pinch, { passive: false });
+    return () => {
+      node.removeEventListener("wheel", wheel);
+      for (const name of ["gesturestart", "gesturechange", "gestureend"]) node.removeEventListener(name, pinch);
+    };
+  }, []);
+
+  /** The beat nearest `t` in a VJ (when not let free, and N has not turned it off), else `t`. */
   const snap = (t: number, free: boolean) => {
-    if (free || !vj || beats.length === 0) return Math.max(0, t);
+    if (free || !snapOn || !vj || beats.length === 0) return Math.max(0, t);
     return beats.reduce((best, b) => (Math.abs(b - t) < Math.abs(best - t) ? b : best), beats[0]);
   };
 
@@ -511,11 +589,14 @@ export function LaneBoard({ area, project, zoom, selected, select, playhead, see
     <span className="kd-lanes-name" data-lane="main">画面</span>
     <span className="kd-lanes-name" data-lane="song">声音</span>
    </div>
-   <div className="kd-lanes-scroll">
-    <div ref={board} className="kd-lanes-board" style={{ width: `${ZOOMS[zoom] * 100}%` }}
+   <div ref={scroller} className="kd-lanes-scroll">
+    <div ref={board} className="kd-lanes-board" style={{ width: `${zoom * 100}%` }}
       onPointerDown={scrubDown} onPointerMove={scrubMove} onPointerUp={scrubUp}
       onPointerCancel={() => { scrubRef.current = null; setScrub(null); }}>
       <div className="kd-lanes-ruler">
+        {range && (range.in !== undefined || range.out !== undefined) && <span className="kd-lanes-range"
+          style={{ left: pct(range.in ?? 0, span), width: pct((range.out ?? span) - (range.in ?? 0), span) }}
+          title={`入点 ${laneClock(range.in ?? 0)} · 出点 ${laneClock(range.out ?? span)}`} />}
         {beatTicks.map(at => <span key={`b${at}`} className="kd-lanes-beat" style={{ left: pct(at, span) }} />)}
         {ruler.map(mark => <span key={mark.at} className="kd-lanes-mark" style={{ left: pct(mark.at, span) }}>{mark.label}</span>)}
         {markers.map((marker, n) => <button key={`${n}:${marker.at}`} type="button" className="kd-lanes-marker"

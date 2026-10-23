@@ -32,6 +32,8 @@
 }
 .kd-lanes-key:hover:not(:disabled) { background: var(--kd-hover); color: var(--kd-text); }
 .kd-lanes-key:disabled { opacity: 0.4; cursor: default; }
+/* A key that is on (吸附) is in full ink; off, muted like the rest. */
+.kd-lanes-key[aria-pressed="true"] { color: var(--kd-text); }
 .kd-lanes-time { flex: none; color: var(--kd-muted); font-size: var(--kd-size-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* One line that is always there, so a message never moves what is under it. */
@@ -61,6 +63,9 @@
 .kd-lanes-scroll { overflow-x: auto; overflow-y: hidden; min-width: 0; }
 .kd-lanes-board { position: relative; display: grid; gap: 4px; min-width: 100%; padding-bottom: 4px; }
 .kd-lanes-ruler { position: relative; height: 16px; cursor: pointer; }
+/* The in and out points (I, O): a tone under the ruler between them. */
+.kd-lanes-range { position: absolute; top: 0; bottom: 0; border-radius: 3px; background: var(--kd-hover); pointer-events: none; }
+.kd-lanes:focus { outline: none; }
 .kd-lanes-mark {
   position: absolute;
   top: 0;
