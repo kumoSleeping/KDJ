@@ -10,7 +10,7 @@ import { create } from "zustand";
 import { api } from "../lib/api";
 import { isImageTrack, isProjectTrack, isVideoTrack } from "../lib/format";
 import { refreshPlayingProject } from "../lib/kdjvPlay";
-import { alignedOps, isGap, snapToBar, type AlignPlan, type LaneClip, type LaneDocument, type LaneEdited, type LaneLayout, type LaneOp } from "../lib/lanes";
+import { alignedOps, isGap, LANE_END, snapToBar, type AlignPlan, type LaneClip, type LaneDocument, type LaneEdited, type LaneLayout, type LaneOp } from "../lib/lanes";
 import { useSidePanels } from "../lib/sidePanels";
 import type { Track } from "../types";
 
@@ -75,9 +75,11 @@ interface LaneEditorState {
   edit(ops: LaneOp[], path?: string): Promise<boolean>;
   /**
    * Library rows dropped at `at` seconds of the project at `path` go where they belong: songs into
-   * the song lane at that slot, pictures there (in a VJ at the bar, over what is there). A project
+   * the song lane at that slot, pictures there (in a VJ at the bar, over what is there); at
+   * `LANE_END` (let go anywhere but on a lane) each after the last thing in its own lane. A project
    * among them opens as a page of its own. No project (`path` null, or one no longer open): they
-   * start a new one. `sound`: let go on the sound lane, where a video gives only its sound.
+   * start a new one. `sound`: videos alone let go on the sound lane, where a video gives only its
+   * sound; with a song among them each goes to its own lane all the same.
    */
   placeTracks(path: string | null, tracks: Track[], at: number, sound?: boolean): Promise<void>;
   undo(): Promise<void>;
@@ -323,7 +325,8 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
     startVj: song => get().createFrom([song]),
     startVideo: video => get().createFrom([video]),
     async createFrom(tracks, sound = false) {
-      const songs = tracks.filter(track => isSongTrack(track) || (sound && isVideoTrack(track.format)));
+      const asSound = sound && !tracks.some(isSongTrack);
+      const songs = tracks.filter(track => isSongTrack(track) || (asSound && isVideoTrack(track.format)));
       const pictures = tracks.filter(track => !songs.includes(track) && isPictureTrack(track));
       if (songs.length) {
         const title = `${songs[0].title || "未命名"} VJ`;
@@ -375,7 +378,10 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       for (const project of tracks.filter(track => isProjectTrack(track.format))) await get().openTrack(project);
       const rest = tracks.filter(track => !isProjectTrack(track.format));
       if (rest.length === 0) return;
-      const heard = (track: Track) => isSongTrack(track) || (sound && isVideoTrack(track.format));
+      // Songs and videos dropped together each go to their own lane: only videos alone, let go on
+      // the sound lane, are taken for their sound.
+      const asSound = sound && !rest.some(isSongTrack);
+      const heard = (track: Track) => isSongTrack(track) || (asSound && isVideoTrack(track.format));
       const project = path ? get().projects.find(p => p.path === path) : undefined;
       if (!project) { await get().createFrom(rest, sound); return; }
       const { doc, layout, grid } = project;
@@ -384,7 +390,7 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       // Songs and pictures at once: the songs first, then the pictures over the song lane as it is
       // then, with every song's length known (the library may not have had it).
       if (songs.length && pictures.length) {
-        await get().placeTracks(project.path, songs, at, sound);
+        await get().placeTracks(project.path, songs, at);
         await get().placeTracks(project.path, pictures, at);
         return;
       }
@@ -396,7 +402,10 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
           // In a VJ a picture goes in at the bar where it is let go, over whatever is there, as far
           // as the songs reach.
           const end = placed.reduce((sum, s) => sum + s.length, 0);
-          let place = Math.min(snapToBar(grid?.downbeats ?? [], at), Math.max(0, end - 0.1));
+          // At the end: after the last picture, not back at the last bar over it.
+          const from = at >= LANE_END ? layout.main_end : snapToBar(grid?.downbeats ?? [], at);
+          let place = Math.min(from, Math.max(0, end - 0.1));
+          if (end - place <= 0.05) { get().fail("画面已经铺到最后一首歌的结尾了"); return; }
           for (const picture of pictures) {
             // A picture whose length the library does not know runs to the end of the songs.
             const out = Math.round(Math.min(picture.duration && picture.duration > 0 ? picture.duration : Infinity, end - place) * 1000) / 1000;

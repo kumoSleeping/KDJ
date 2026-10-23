@@ -8,7 +8,7 @@
  * server checks and saves (laneEditorStore.ts); the picture is the video window's while the
  * project plays.
  */
-import { useState, useSyncExternalStore, type KeyboardEvent } from "react";
+import { useRef, useState, useSyncExternalStore, type KeyboardEvent } from "react";
 import { Download, LoaderCircle, MapPin, Pause, Play, Redo2, Type, Undo2, ZoomIn, ZoomOut } from "lucide-react";
 import { api } from "../../lib/api";
 import { downloadIntoEditor } from "../../lib/editorDownloads";
@@ -54,6 +54,7 @@ export function LaneEditor() {
   const playhead = usePlayhead(project.trackId);
   const [zoom, setZoom] = useState(0);
   const [tool, setTool] = useState<Tool | null>(null);
+  const area = useRef<HTMLDivElement>(null);
 
   const send = (ops: LaneOp[]) => { void edit(ops); };
   const { doc, layout, grid, trackId } = project;
@@ -122,7 +123,7 @@ export function LaneEditor() {
       : aligning ? <><LoaderCircle size={12} className="kd-spin" />正在校准</>
         : project.analysing ? <><LoaderCircle size={12} className="kd-spin" />正在分析小节线</> : null;
 
-  return <div className="kd-lanes kd-scroll" data-drawer-scroll data-empty={open ? undefined : ""} onKeyDown={keys}>
+  return <div ref={area} className="kd-lanes kd-scroll" data-drawer-scroll data-empty={open ? undefined : ""} onKeyDown={keys}>
     <div className="kd-lanes-head">
       <button type="button" className="kd-lanes-key" disabled={!open} onClick={toggle} aria-label={playhead.playing ? "暂停" : "播放"}>
         {playhead.playing ? <Pause size={14} /> : <Play size={14} />}
@@ -140,7 +141,7 @@ export function LaneEditor() {
     </div>
     {status && <p className="kd-lanes-status" role={error ? "alert" : undefined} data-error={error ? "" : undefined} title={error ?? undefined}>{status}</p>}
 
-    <LaneBoard project={project} zoom={zoom} selected={selected} select={id => { select(id); setTool(null); }} playhead={playhead.position}
+    <LaneBoard area={area} project={project} zoom={zoom} selected={selected} select={id => { select(id); setTool(null); }} playhead={playhead.position}
       seek={seek} beatNear={beatNear} edit={send} onDropped={(ids, at, sound) => void dropInto(ids, at, sound)}
       onSearchDropped={(payload, at, sound) => void downloadIntoEditor(payload, active?.path ?? null, at, sound)} />
 

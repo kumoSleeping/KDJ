@@ -234,8 +234,22 @@
   white-space: nowrap;
   pointer-events: none;
 }
-/* In the song lane the mark stands only by that lane: songs go between songs. */
-.kd-lanes-drop[data-lane="song"] { top: auto; height: 22px; }
+/* Where a drop lands, in each lane it goes to: the line, and beside it what goes in. */
+.kd-lanes-drop { z-index: 2; pointer-events: none; }
+.kd-lanes-drop-tag {
+  position: absolute;
+  top: 50%;
+  left: 6px;
+  translate: 0 -50%;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--kd-theme);
+  color: var(--kd-theme-ink);
+  font-size: 10px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+.kd-lanes-drop[data-left] .kd-lanes-drop-tag { left: auto; right: 6px; }
 
 .kd-lanes-rows { display: grid; gap: 8px; min-width: 0; }
 .kd-lanes-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; }

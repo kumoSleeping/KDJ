@@ -104,6 +104,9 @@ export type NewLaneSong = Omit<LaneSong, "out"> & { out?: number };
 
 export const isGap = (item: LaneItem): item is { gap: number } => "gap" in item;
 
+/** Where something let go anywhere but on a lane goes: after the last thing in its own lane. */
+export const LANE_END = Number.MAX_SAFE_INTEGER;
+
 /** The bar line at or before `t`, else `t`: where a drop on the ruler snaps to in a VJ. */
 export function snapToBar(downbeats: readonly number[], t: number, songIn = 0): number {
   let best = t;

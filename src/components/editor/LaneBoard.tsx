@@ -11,11 +11,11 @@
  * `onDropped`), whether the system carried them (the harmonic list) or the track table followed
  * the pointer by hand (lib/pointerTrackDrop.ts).
  */
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { api } from "../../lib/api";
 import { rulerStep } from "../../lib/aiTimeline";
 import { isImageTrack, isProjectTrack } from "../../lib/format";
-import { branchOps, fileLabel, isGap, laneClock, snapToBar, type BranchSide, type LaneClip, type LaneOp } from "../../lib/lanes";
+import { branchOps, fileLabel, isGap, LANE_END, laneClock, snapToBar, type BranchSide, type LaneClip, type LaneOp } from "../../lib/lanes";
 import { activeTrackDragIds, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
 import { usePointerSearchDrop, usePointerTrackDrop } from "../../lib/pointerTrackDrop";
 import { activeSearchDrag, finishSearchDrop, isSearchDownloadDrag, readSearchDrop, type ActiveSearchDrag } from "../../lib/searchDrag";
@@ -57,25 +57,33 @@ function frameStep(seconds: number): number {
   return 120;
 }
 
-/** Whether a library drag holds nothing but stills (which have no sound). */
-function onlyStills(ids: readonly number[]): boolean {
-  const byId = useLibraryStore.getState().summaryById;
-  return ids.length > 0 && ids.every(id => isImageTrack(byId.get(id)?.format ?? ""));
-}
-
 /** Whether a library drag holds nothing but projects. */
 function onlyProjects(ids: readonly number[]): boolean {
   const byId = useLibraryStore.getState().summaryById;
   return ids.length > 0 && ids.every(id => isProjectTrack(byId.get(id)?.format ?? ""));
 }
 
-/** What a library drag holds, read while it is still over the lanes: songs, or pictures. */
-function draggedKind(ids: readonly number[]): "song" | "picture" | null {
+/** What a drag holds: how many songs, videos and stills. */
+interface Dragged { songs: number; videos: number; stills: number }
+
+/** What a library drag holds, read while it is still over the editor. */
+function draggedRows(ids: readonly number[]): Dragged {
   const byId = useLibraryStore.getState().summaryById;
-  const rows = ids.map(id => byId.get(id)).filter(Boolean);
-  if (rows.length === 0) return null;
-  return rows.some(row => isSongTrack(row!)) ? "song" : "picture";
+  const rows = ids.map(id => byId.get(id)).filter((row): row is NonNullable<typeof row> => Boolean(row) && !isProjectTrack(row!.format));
+  const stills = rows.filter(row => isImageTrack(row.format)).length;
+  const songs = rows.filter(row => isSongTrack(row)).length;
+  return { songs, stills, videos: rows.length - songs - stills };
 }
+
+/** An online song or video: one song, or one video (its sound alone when asked for so). */
+const draggedSearch = (payload: ActiveSearchDrag): Dragged =>
+  payload.kind === "audio" || payload.request.audio_only ? { songs: 1, videos: 0, stills: 0 } : { songs: 0, videos: 1, stills: 0 };
+
+/** Where a drop lands in one lane: the mark drawn there meanwhile and what it says. */
+interface DropMark { lane: "song" | "main"; at: number; label: string }
+
+/** Where a drop goes: `at` for the editor (seconds, or LANE_END), `sound` for videos taken for their sound alone. */
+interface Landing { at: number; sound: boolean; marks: DropMark[]; label: string }
 
 /** A clip's frames along it, one every frame's width, each at the moment of its source it starts on. */
 function ClipFrames({ trackId, clip, width }: { trackId: number; clip: LaneClip; width: number }) {
@@ -96,7 +104,7 @@ function ClipFrames({ trackId, clip, width }: { trackId: number; clip: LaneClip;
 }
 
 /** Where an online song or video dropped on the lanes will go once downloaded, and how far along it is. */
-function PendingDownloads({ path, lane, span }: { path: string | null; lane: "song" | "main"; span: number }) {
+function PendingDownloads({ path, lane, span, end }: { path: string | null; lane: "song" | "main"; span: number; end: number }) {
   const all = useEditorDownloads(state => state.pending);
   const tasks = useDownloadStore(state => state.tasks);
   const pending = all.filter(item => item.path === path && item.lane === lane);
@@ -104,13 +112,26 @@ function PendingDownloads({ path, lane, span }: { path: string | null; lane: "so
     const task = tasks.get(item.task);
     const progress = task ? Math.round(Math.min(1, Math.max(0, task.progress)) * 100) : 0;
     return <span key={item.task} className="kd-lanes-pending"
-      style={{ left: pct(Math.min(item.at, span), span) }} title={`${item.title} · 下载好就放在这里`}>
+      style={{ left: pct(Math.min(item.at >= LANE_END ? end : item.at, span), span) }} title={`${item.title} · 下载好就放在这里`}>
       {item.title}{task?.state === "done" ? "" : ` · ${progress}%`}
     </span>;
   })}</>;
 }
 
-export function LaneBoard({ project, zoom, selected, select, playhead, seek, beatNear, edit, onDropped, onSearchDropped }: {
+/** Where what is dragged would land in one lane: a dashed line there, and what goes in. */
+function DropMarks({ marks, lane, span }: { marks: DropMark[] | null; lane: "song" | "main"; span: number }) {
+  return <>{(marks ?? []).filter(mark => mark.lane === lane).map(mark => {
+    // Near the right end the words stand to the left of the line.
+    const left = Math.min(mark.at, span) / span > 0.7;
+    return <span key={mark.lane} className="kd-lanes-drop" data-left={left || undefined} style={{ left: pct(Math.min(mark.at, span), span) }}>
+      <span className="kd-lanes-drop-tag">{mark.label}</span>
+    </span>;
+  })}</>;
+}
+
+export function LaneBoard({ area, project, zoom, selected, select, playhead, seek, beatNear, edit, onDropped, onSearchDropped }: {
+  /** The whole editor: what is let go anywhere on it is taken (on a lane, there; elsewhere, each to its own lane's end). */
+  area: RefObject<HTMLElement | null>;
   project: LaneProject; zoom: number; selected: string | null; select(id: string | null): void;
   /** Where the project is playing, or null when it is not the one loaded. */
   playhead: number | null; seek(t: number): void;
@@ -125,9 +146,10 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, bea
   const { doc, layout, grid } = project;
   const board = useRef<HTMLDivElement>(null);
   const aux = useRef<HTMLDivElement>(null);
+  const mainLane = useRef<HTMLDivElement>(null);
   const soundLane = useRef<HTMLDivElement>(null);
   const [boardWidth, setBoardWidth] = useState(0);
-  const [drop, setDrop] = useState<{ lane: "song" | "main"; at: number } | null>(null);
+  const [drop, setDrop] = useState<DropMark[] | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const dragRef = useRef<Drag | null>(null);
   const [scrub, setScrub] = useState<number | null>(null);
@@ -169,11 +191,6 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, bea
     if (!node) return 0;
     const box = node.getBoundingClientRect();
     return Math.max(0, Math.min(span, ((clientX - box.left) / box.width) * span));
-  };
-  /** Whether a point is down on the sound lane (or below it). */
-  const overSound = (clientY: number) => {
-    const box = soundLane.current?.getBoundingClientRect();
-    return box ? clientY >= box.top - 2 : false;
   };
   /** Whether a point is up in the branch lane (or above it). */
   const overAux = (clientY: number) => {
@@ -351,53 +368,117 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, bea
     seek(timeAt(event.clientX));
   };
 
-  /**
-   * Where what is let go at (x, y) lands. Songs go to the sound lane, at a slot between songs. A
-   * video goes to the picture where it is let go over the picture or the branch lane, and to the
-   * sound lane, its sound alone, where it is let go over that; a still only ever to the picture.
-   */
-  const landing = (ids: readonly number[], x: number, y: number, kind = draggedKind(ids)): { lane: "song" | "main"; at: number } => {
-    const t = timeAt(x);
-    if (kind === "song" || (kind === "picture" && overSound(y) && !onlyStills(ids))) {
-      const index = songs.filter(s => s.at + s.length / 2 < t).length;
-      const end = songs.length ? songs[songs.length - 1].at + songs[songs.length - 1].length : 0;
-      return { lane: "song", at: songs[index]?.at ?? end };
-    }
-    return { lane: "main", at: vj ? snapToBar(downbeats, t) : t };
+  /** The lane under (x, y): the picture (or the branch lane above it), the sound, or none. */
+  const laneAt = (x: number, y: number): "song" | "main" | null => {
+    const inside = (node: HTMLElement | null) => {
+      const box = node?.getBoundingClientRect();
+      return !!box && x >= box.left && x <= box.right && y >= box.top - 2 && y <= box.bottom + 2;
+    };
+    if (inside(soundLane.current)) return "song";
+    if (inside(mainLane.current) || inside(aux.current)) return "main";
+    return null;
   };
-  const hoverRows = (ids: readonly number[], x: number, y: number) => setDrop(onlyProjects(ids) ? null : landing(ids, x, y));
+  const songsEnd = songs.length ? songs[songs.length - 1].at + songs[songs.length - 1].length : 0;
+
+  /**
+   * Where what is dragged lands when let go at (x, y). Songs and pictures each go to their own lane:
+   * let go on a lane, at that time (a song between songs, in a VJ a picture at the bar); anywhere
+   * else on the editor, after the last thing in their lane. Only videos alone, let go on the sound
+   * lane on purpose, go there, for their sound; a song let go on the picture goes to the sound all
+   * the same, and a still never to the sound.
+   */
+  const landing = (what: Dragged, x: number, y: number): Landing | null => {
+    const pictures = what.videos + what.stills;
+    if (what.songs + pictures === 0) return null;
+    const lane = laneAt(x, y);
+    const t = timeAt(x);
+    const sound = lane === "song" && what.songs === 0 && what.videos > 0 && what.stills === 0;
+    const at = lane === null ? LANE_END : t;
+    const marks: DropMark[] = [];
+    const songCount = what.songs + (sound ? what.videos : 0);
+    if (songCount) {
+      const index = songs.filter(s => s.at + s.length / 2 < at).length;
+      const count = songCount > 1 ? ` ×${songCount}` : "";
+      marks.push({ lane: "song", at: at >= LANE_END ? songsEnd : (songs[index]?.at ?? songsEnd), label: sound ? `只要声音${count}` : `音频${count}` });
+    }
+    if (pictures && !sound) {
+      const placeAt = at >= LANE_END ? layout.main_end : vj ? snapToBar(downbeats, t) : t;
+      const kind = what.stills === 0 ? "视频" : what.videos === 0 ? "图片" : "画面";
+      marks.push({ lane: "main", at: placeAt, label: `${kind}${pictures > 1 ? ` ×${pictures}` : ""}` });
+    }
+    const label = songCount && pictures && !sound ? "音频放声音，画面放画面"
+      : sound ? "只要声音"
+        : lane === null ? (songCount ? "接在声音最后" : "接在画面最后")
+          : songCount ? "放进声音" : "放进画面";
+    return { at, sound, marks, label };
+  };
   const dropRows = (ids: readonly number[], x: number, y: number) => {
     setDrop(null);
-    if (ids.length === 0) return;
-    const where = landing(ids, x, y);
-    onDropped(ids, where.at, where.lane === "song");
+    const where = landing(draggedRows(ids), x, y);
+    // Projects alone open as pages of their own (the editor does that with whatever is dropped).
+    if (ids.length) onDropped(ids, where?.at ?? LANE_END, where?.sound ?? false);
   };
-  usePointerTrackDrop(board, {
-    over: (ids, x, y) => {
-      // Projects open as pages of their own; they do not go into this one.
-      if (onlyProjects(ids)) { setDrop(null); return "打开工程"; }
-      hoverRows(ids, x, y);
-      return landing(ids, x, y).lane === "song" && draggedKind(ids) === "picture" ? "只要声音" : null;
-    },
-    leave: () => setDrop(null),
-    drop: (ids, x, y) => dropRows(ids, x, y),
-  });
-  // Online songs and videos: a song (or a video's sound alone) to the sound lane, a video to the picture.
-  const searchKind = (payload: ActiveSearchDrag) => (payload.kind === "audio" || payload.request.audio_only ? "song" : "picture");
+  const overRows = (ids: readonly number[], x: number, y: number) => {
+    // Projects open as pages of their own; they do not go into this one.
+    if (onlyProjects(ids)) { setDrop(null); return "打开工程"; }
+    const where = landing(draggedRows(ids), x, y);
+    setDrop(where?.marks ?? null);
+    return where?.label ?? null;
+  };
   const dropSearch = (payload: ActiveSearchDrag, x: number, y: number) => {
     setDrop(null);
-    const where = landing([], x, y, searchKind(payload));
-    onSearchDropped(payload, where.at, where.lane === "song");
+    const where = landing(draggedSearch(payload), x, y);
+    if (where) onSearchDropped(payload, where.at, where.sound || draggedSearch(payload).songs > 0);
   };
-  usePointerSearchDrop(board, {
-    over: (payload, x, y) => {
-      const where = landing([], x, y, searchKind(payload));
-      setDrop(where);
-      return where.lane === "song" && searchKind(payload) === "picture" ? "下载后只要声音" : "下载后放在这里";
-    },
-    leave: () => setDrop(null),
-    drop: (payload, x, y) => dropSearch(payload, x, y),
-  });
+  const overSearch = (payload: ActiveSearchDrag, x: number, y: number) => {
+    const where = landing(draggedSearch(payload), x, y);
+    setDrop(where?.marks ?? null);
+    return where ? `下载后${where.label}` : null;
+  };
+  usePointerTrackDrop(area, { over: overRows, leave: () => setDrop(null), drop: dropRows });
+  usePointerSearchDrop(area, { over: overSearch, leave: () => setDrop(null), drop: dropSearch });
+
+  // What the system carries (the harmonic list, a search result) is taken by the whole editor too.
+  const native = useRef({ overRows, dropRows, overSearch, dropSearch });
+  native.current = { overRows, dropRows, overSearch, dropSearch };
+  useEffect(() => {
+    const node = area.current;
+    if (!node) return;
+    const over = (event: DragEvent) => {
+      if (isTrackDrag(event)) {
+        event.preventDefault();
+        native.current.overRows(activeTrackDragIds(), event.clientX, event.clientY);
+        return;
+      }
+      if (!isSearchDownloadDrag(event)) return;
+      event.preventDefault();
+      const payload = activeSearchDrag();
+      if (payload) native.current.overSearch(payload, event.clientX, event.clientY);
+    };
+    const leave = (event: DragEvent) => { if (!node.contains(event.relatedTarget as Node | null)) setDrop(null); };
+    const dropped = (event: DragEvent) => {
+      if (isTrackDrag(event)) {
+        event.preventDefault();
+        const ids = event.dataTransfer ? readTrackDragIds(event.dataTransfer) : [];
+        native.current.dropRows(ids.length ? ids : activeTrackDragIds(), event.clientX, event.clientY);
+        return;
+      }
+      if (!isSearchDownloadDrag(event)) return;
+      event.preventDefault();
+      const payload = event.dataTransfer ? readSearchDrop(event.dataTransfer) : null;
+      finishSearchDrop();
+      if (payload) native.current.dropSearch(payload, event.clientX, event.clientY);
+      else setDrop(null);
+    };
+    node.addEventListener("dragover", over);
+    node.addEventListener("dragleave", leave);
+    node.addEventListener("drop", dropped);
+    return () => {
+      node.removeEventListener("dragover", over);
+      node.removeEventListener("dragleave", leave);
+      node.removeEventListener("drop", dropped);
+    };
+  }, [area]);
 
   // The branch a drag is making or changing, drawn in the branch lane meanwhile.
   const pending = (() => {
@@ -433,37 +514,7 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, bea
    <div className="kd-lanes-scroll">
     <div ref={board} className="kd-lanes-board" style={{ width: `${ZOOMS[zoom] * 100}%` }}
       onPointerDown={scrubDown} onPointerMove={scrubMove} onPointerUp={scrubUp}
-      onPointerCancel={() => { scrubRef.current = null; setScrub(null); }}
-      onDragOver={event => {
-        if (isTrackDrag(event)) {
-          event.preventDefault();
-          event.stopPropagation();
-          hoverRows(activeTrackDragIds(), event.clientX, event.clientY);
-          return;
-        }
-        if (!isSearchDownloadDrag(event)) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const payload = activeSearchDrag();
-        setDrop(landing([], event.clientX, event.clientY, payload ? searchKind(payload) : "picture"));
-      }}
-      onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDrop(null); }}
-      onDrop={event => {
-        if (isTrackDrag(event)) {
-          event.preventDefault();
-          event.stopPropagation();
-          const ids = readTrackDragIds(event.dataTransfer);
-          dropRows(ids.length ? ids : activeTrackDragIds(), event.clientX, event.clientY);
-          return;
-        }
-        if (!isSearchDownloadDrag(event)) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const payload = readSearchDrop(event.dataTransfer);
-        finishSearchDrop();
-        if (payload) dropSearch(payload, event.clientX, event.clientY);
-        else setDrop(null);
-      }}>
+      onPointerCancel={() => { scrubRef.current = null; setScrub(null); }}>
       <div className="kd-lanes-ruler">
         {beatTicks.map(at => <span key={`b${at}`} className="kd-lanes-beat" style={{ left: pct(at, span) }} />)}
         {ruler.map(mark => <span key={mark.at} className="kd-lanes-mark" style={{ left: pct(mark.at, span) }}>{mark.label}</span>)}
@@ -503,7 +554,7 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, bea
           return <path key={`${b.clip}:${b.side}`} d={`M ${edge} 40 L ${far} 0`} vectorEffect="non-scaling-stroke" />;
         })}
       </svg>
-      <div className="kd-lanes-lane" data-lane="main" aria-label="画面" data-drop={drop?.lane === "main" || undefined}>
+      <div ref={mainLane} className="kd-lanes-lane" data-lane="main" aria-label="画面" data-drop={drop?.some(mark => mark.lane === "main") || undefined}>
         {layout.main.map(item => {
           if (item.gap) {
             return <span key={`gap-${item.index}`} className="kd-lanes-gap" style={{ left: pct(item.at, span), width: pct(item.length, span) }}
@@ -520,9 +571,10 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, bea
             <span className="kd-lanes-clip-name">{fileLabel(item.src ?? "")}</span>
           </button>;
         })}
-        <PendingDownloads path={project.path || null} lane="main" span={span} />
+        <PendingDownloads path={project.path || null} lane="main" span={span} end={layout.main_end} />
+        <DropMarks marks={drop} lane="main" span={span} />
       </div>
-      <div ref={soundLane} className="kd-lanes-lane" data-lane="song" aria-label="声音" data-drop={drop?.lane === "song" || undefined}>
+      <div ref={soundLane} className="kd-lanes-lane" data-lane="song" aria-label="声音" data-drop={drop?.some(mark => mark.lane === "song") || undefined}>
         {songs.map(song => {
           const id = `song:${song.index}`;
           const at = shown("song", String(song.index), song.at, song.length);
@@ -532,10 +584,10 @@ export function LaneBoard({ project, zoom, selected, select, playhead, seek, bea
             {fileLabel(song.src)}
           </button>;
         })}
-        <PendingDownloads path={project.path || null} lane="song" span={span} />
+        <PendingDownloads path={project.path || null} lane="song" span={span} end={songsEnd} />
+        <DropMarks marks={drop} lane="song" span={span} />
       </div>
       {head !== null && <span className="kd-lanes-playhead" style={{ left: pct(head, span) }} />}
-      {drop && <span className="kd-lanes-drop" data-lane={drop.lane} style={{ left: pct(drop.at, span) }} />}
     </div>
    </div>
   </div>;

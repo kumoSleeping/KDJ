@@ -10,6 +10,7 @@ import { api } from "./api";
 import { withDownloadDisplay } from "./downloadDisplay";
 import { tossToDownloads } from "./downloadToss";
 import { rememberVideoEnqueue } from "./queueTaskDraft";
+import { LANE_END } from "./lanes";
 import type { ActiveSearchDrag } from "./searchDrag";
 import { useAppStore } from "../stores/appStore";
 import { useDownloadStore } from "../stores/downloadStore";
@@ -128,7 +129,7 @@ async function place(item: EditorDownload, task: DownloadTask): Promise<void> {
   const into = project ? project.path : useLaneEditor.getState().active;
   const now = useLaneEditor.getState().projects.find(p => p.path === into)?.layout.songs ?? [];
   const placed = now[project ? slot : 0];
-  const next = item.lane === "song" && placed ? placed.at + placed.length : Number.MAX_SAFE_INTEGER;
+  const next = item.lane === "song" && placed ? placed.at + placed.length : LANE_END;
   for (const other of useEditorDownloads.getState().pending) {
     if (other !== item && other.drop === item.drop) update(other, { path: into, at: next });
   }
