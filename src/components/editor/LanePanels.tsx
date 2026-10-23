@@ -7,7 +7,7 @@ import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent as R
 import { CopyPlus, Crosshair, Download, LoaderCircle, Plus, RotateCcw, Scissors, Trash2 } from "lucide-react";
 import { api } from "../../lib/api";
 import { exportProject, useKdjvLive } from "../../lib/kdjvPlay";
-import { allClips, clipLength, fileLabel, findClip, laneClock, type ExportOptions, type LaneClip, type LaneOp, type LaneTitle } from "../../lib/lanes";
+import { allClips, clipLength, fileLabel, findClip, laneClock, type AlignPlan, type ExportOptions, type LaneClip, type LaneOp, type LaneTitle } from "../../lib/lanes";
 import { drawTitle, TITLE_DEFAULTS, type TitleLook } from "../../lib/titleImage";
 import { alignKey, songsOf, useLaneEditor, type LaneProject } from "../../stores/laneEditorStore";
 import { Segmented, Slider } from "../common";
@@ -135,13 +135,40 @@ function AlignPanel({ path, clip }: { path: string; clip: LaneClip }) {
       </button>
       {note && <span className="kd-lanes-note" title={found?.reason}>{note}</span>}
     </div>
-    {plans && plans.length > 0 && <div className="kd-lanes-row">
-      {plans.slice(0, 4).map(plan => <button key={plan.id} type="button" className="kd-lanes-action" title={plan.id}
-        onClick={() => void applyPlan(clip.id, plan)}>
-        {plan.label}{plan.similarity !== undefined ? ` · ${Math.round(plan.similarity * 100)}%` : ""}
-      </button>)}
-    </div>}
+    {groupsOf(plans ?? []).slice(0, 5).map(group => <div key={group.id} className="kd-lanes-plan" role="group" aria-label={group.label}>
+      <span className="kd-lanes-note">{group.label}</span>
+      <div className="kd-lanes-row">
+        {group.plans.map(plan => <button key={plan.id} type="button" className="kd-lanes-action" title={planTitle(plan)}
+          onClick={() => void applyPlan(clip.id, plan)}>
+          {plan.label}{plan.beat ? ` · ${plan.beat.error_ms < 1 ? "<1" : Math.round(plan.beat.error_ms)} ms` : ""}
+          {plan.segments.length > 1 ? ` · ${plan.segments.length} 段` : ""}
+        </button>)}
+      </div>
+    </div>)}
   </div>;
+}
+
+/** The plans of one placement found, in the order the server gave them: its ways of laying the video. */
+function groupsOf(plans: AlignPlan[]) {
+  const groups: Array<{ id: string; label: string; plans: AlignPlan[] }> = [];
+  for (const plan of plans) {
+    const id = plan.group ?? plan.id;
+    const last = groups.at(-1);
+    if (last?.id === id) last.plans.push(plan);
+    else groups.push({ id, label: plan.group_label ?? plan.label, plans: [plan] });
+  }
+  return groups;
+}
+
+/** What a way of laying the video does, said on its key. */
+function planTitle(plan: AlignPlan): string {
+  const what = plan.label === "保留完整" ? "整段视频按对拍后的速度放，歌放到哪就到哪"
+    : plan.label === "裁切匹配段" ? "只放匹配到的那一段，速度和起点按拍对齐"
+      : plan.label === "分段变速" ? "按歌里节奏的变化分成几段，每段自己的速度，首尾相接"
+        : plan.label === "不对拍" ? "按听到的位置和速度放，不按拍修正" : plan.label;
+  const speeds = [...new Set(plan.segments.map(s => s.speed.toFixed(4)))].join(" / ");
+  const beat = plan.beat ? `；${plan.beat.matched}/${plan.beat.beats} 拍对上，中位误差 ${plan.beat.error_ms} ms` : "";
+  return `${what}；速度 ${speeds}×${beat}`;
 }
 
 const TITLE_COLORS = ["#ffffff", "#ffd60a", "#111111"];
@@ -337,6 +364,8 @@ export function ToolPanel({ tool, project, selected, playhead, beatNear, edit }:
           <Segmented label="速度" value={clip.speed ?? 1}
             options={SPEEDS.map(speed => ({ value: speed, label: `${speed}×` }))}
             onChange={value => edit([{ op: "set", id: clip.id, fields: { speed: value } }])} />
+          <NumberField label="速度×" value={clip.speed ?? 1} step={0.0001} min={0.25} max={4}
+            onCommit={value => edit([{ op: "set", id: clip.id, fields: { speed: Math.max(0.25, Math.min(4, value)) } }])} />
         </div>
         <div className="kd-lanes-row">
           <CropBox crop={clip.crop ?? [0, 0, 0, 0]} onCommit={crop => edit([{ op: "set", id: clip.id, fields: { crop } }])} />

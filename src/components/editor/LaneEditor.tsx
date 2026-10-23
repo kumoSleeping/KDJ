@@ -16,7 +16,7 @@ import { clipLength, findClip, laneClock, type LaneOp } from "../../lib/lanes";
 import { getPlayerSession, requestPlayerCommand, subscribePlayerSession } from "../../lib/playerSession";
 import { playTrack } from "../../lib/playTrack";
 import { requestLocalVideo, useVideoPip } from "../../lib/videoPip";
-import { songsOf, useActiveProject, useLaneEditor, type LaneProject, type Placement } from "../../stores/laneEditorStore";
+import { bpmAt, songsOf, useActiveProject, useLaneEditor, type LaneProject, type Placement } from "../../stores/laneEditorStore";
 import type { Track } from "../../types";
 import { clampZoom, LaneBoard, ZOOM_MAX, ZOOM_MIN } from "./LaneBoard";
 import { ToolPanel, type Tool } from "./LanePanels";
@@ -63,6 +63,8 @@ export function LaneEditor() {
   const { doc, layout, grid, trackId } = project;
   const span = Math.max(1, layout.duration);
   const vj = songsOf(doc).length > 0;
+  /** The tempo heard at the playhead, the song's own at the speed it plays. */
+  const tempoNow = vj && playhead.position !== null ? bpmAt(grid, playhead.position) : null;
 
   /** What was dropped goes where it belongs (laneEditorStore `placeTracks`). */
   const dropInto = async (ids: readonly number[], place: Placement) => {
@@ -163,7 +165,8 @@ export function LaneEditor() {
   const status = busy ? <><LoaderCircle size={12} className="kd-spin" />保存中</>
     : error ? error
       : aligning ? <><LoaderCircle size={12} className="kd-spin" />正在校准</>
-        : project.analysing ? <><LoaderCircle size={12} className="kd-spin" />正在分析小节线</> : null;
+        : project.analysing ? <><LoaderCircle size={12} className="kd-spin" />正在分析小节线</>
+          : grid?.guessedBars ? "首拍置信度低：小节线按每 4 拍排" : null;
 
   // A press on the lanes or the keys gives the editor the keyboard (WebKit does not focus a pressed button).
   const focusKeys = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -175,7 +178,8 @@ export function LaneEditor() {
       <button type="button" className="kd-lanes-key" disabled={!open} onClick={toggle} aria-label={playhead.playing ? "暂停" : "播放"}>
         {playhead.playing ? <Pause size={14} /> : <Play size={14} />}
       </button>
-      <span className="kd-lanes-time">{laneClock(playhead.position ?? 0)} / {laneClock(open ? span : 0)}</span>
+      <span className="kd-lanes-time">{laneClock(playhead.position ?? 0)} / {laneClock(open ? span : 0)}
+        {tempoNow !== null ? ` · ${tempoNow} BPM` : ""}</span>
       <button type="button" className="kd-lanes-key" disabled={!history?.past.length || busy} onClick={() => void undo()} aria-label="撤销" title="撤销 · ⌘Z"><Undo2 size={14} /></button>
       <button type="button" className="kd-lanes-key" disabled={!history?.future.length || busy} onClick={() => void redo()} aria-label="重做" title="重做 · ⇧⌘Z"><Redo2 size={14} /></button>
       <button type="button" className="kd-lanes-key" disabled={playhead.position === null} onClick={mark} aria-label="在播放头加标记" title="标记 · M"><MapPin size={14} /></button>

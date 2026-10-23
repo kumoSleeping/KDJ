@@ -68,7 +68,7 @@ export interface LaneLayout {
   tracks: Array<{ index: number; id: string; kind: TrackKind; clips: Array<{ id: string; src: string; at: number; length: number; in: number; out: number }> }>;
   folds: LaneFold[];
   /** The songs the bar lines come from: the first sound track's clips. */
-  songs: Array<{ index: number; at: number; length: number; src: string; in: number }>;
+  songs: Array<{ index: number; at: number; length: number; src: string; in: number; speed?: number }>;
 }
 
 export interface LaneEdited {
@@ -174,10 +174,18 @@ export function fileLabel(src: string): string {
 /** One way a video lies in a song, as `/api/cli/align` answers it: ref = ref_at + (video - video_in) / speed. */
 export interface AlignPlan {
   id: string;
+  /** The way of laying it (保留完整, 裁切匹配段, 分段变速, 不对拍…). */
   label: string;
+  /** Which found placement it is a way of laying, and how that one was found, where, how fast. */
+  group?: string;
+  group_label?: string;
+  /** "verified" (the same recording), "melody" (a likeness of the tune) or "partial". */
+  evidence?: string;
   /** Sure enough to be applied without asking. */
   auto: boolean;
   similarity?: number;
+  /** Locked to the song's beats: how far its beats sit from the song's (median ms), how many paired. */
+  beat?: { error_ms: number; matched: number; beats: number };
   segments: Array<{ video_in: number; video_out: number; ref_at: number; speed: number }>;
 }
 
@@ -185,19 +193,22 @@ export interface AlignPlan {
  * The operations that put `clip` where `plan` says it lies in the song placed at `song`: the clip
  * leaves its place and each matched stretch goes into its track at its time, kept inside that song.
  */
-export function alignedOps(clip: LaneClip, track: string, plan: AlignPlan, song: { at: number; in: number; length: number }): LaneOp[] {
+export function alignedOps(clip: LaneClip, track: string, plan: AlignPlan, song: { at: number; in: number; length: number; speed?: number }): LaneOp[] {
   const { id: _id, at: _at, in: _in, out: _out, speed: _speed, ...keep } = clip;
   const ops: LaneOp[] = [{ op: "remove", id: clip.id }];
+  // A song played faster or slower takes its video along: the song's second `ref` is at
+  // `at + (ref - in) / k` in the project, and the video runs k times as fast with it.
+  const k = song.speed && song.speed > 0 ? song.speed : 1;
   for (const segment of plan.segments) {
-    const speed = segment.speed > 0 ? segment.speed : 1;
+    const speed = (segment.speed > 0 ? segment.speed : 1) * k;
     let from = segment.video_in, to = segment.video_out;
-    let at = song.at + segment.ref_at - song.in;
+    let at = song.at + (segment.ref_at - song.in) / k;
     if (at < song.at) { from += (song.at - at) * speed; at = song.at; }
     const end = at + (to - from) / speed, limit = song.at + song.length;
     if (end > limit) to -= (end - limit) * speed;
     if ((to - from) / speed <= 0.05) continue;
     const round = (value: number) => Math.round(value * 1000) / 1000;
-    ops.push({ op: "add", clip: { ...keep, src: clip.src, in: round(from), out: round(to), speed: Math.round(speed * 10000) / 10000 }, track, at: round(at) });
+    ops.push({ op: "add", clip: { ...keep, src: clip.src, in: round(from), out: round(to), speed: Math.round(speed * 1e6) / 1e6 }, track, at: round(at) });
   }
   return ops.length > 1 ? ops : [];
 }

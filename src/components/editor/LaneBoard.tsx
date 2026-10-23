@@ -27,7 +27,7 @@ import { activeSearchDrag, finishSearchDrop, isSearchDownloadDrag, readSearchDro
 import { useEditorDownloads } from "../../lib/editorDownloads";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
-import { isSongTrack, songsOf, useLaneEditor, type LaneProject, type Placement } from "../../stores/laneEditorStore";
+import { isSongTrack, songsOf, tempoMarks, useLaneEditor, type LaneProject, type Placement } from "../../stores/laneEditorStore";
 
 /** How far the tracks can be drawn out: 1 is the whole project in view. */
 export const ZOOM_MIN = 1;
@@ -228,6 +228,7 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     const step = secondStep(span / zoom);
     return Array.from({ length: Math.floor(span / step) + 1 }, (_, n) => ({ at: n * step, label: laneClock(n * step).replace(/\.0$/, "") }));
   }, [vj, downbeats, span, zoom]);
+  const tempo = useMemo(() => tempoMarks(grid).filter(mark => mark.at <= span), [grid, span]);
   const beatTicks = useMemo(() => {
     if (!vj || downbeats.length < 2 || downbeats.length / zoom > 24) return [];
     return beats.filter(at => at >= 0 && at <= span);
@@ -696,6 +697,10 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     <div ref={board} className="kd-lanes-board" style={{ width: `${zoom * 100}%` }}
       onPointerDown={scrubDown} onPointerMove={scrubMove} onPointerUp={scrubUp}
       onPointerCancel={() => { scrubRef.current = null; setScrub(null); }}>
+      {vj && tempo.length > 0 && <div className="kd-lanes-tempo-row" aria-label="速度">
+        {tempo.map(mark => <span key={mark.at} className="kd-lanes-tempo" style={{ left: pct(mark.at, span) }}
+          title={`${laneClock(mark.at)} 起 ${mark.bpm} BPM`}>{mark.bpm} BPM</span>)}
+      </div>}
       <div className="kd-lanes-ruler">
         {range && (range.in !== undefined || range.out !== undefined) && <span className="kd-lanes-range"
           style={{ left: pct(range.in ?? 0, span), width: pct((range.out ?? span) - (range.in ?? 0), span) }}

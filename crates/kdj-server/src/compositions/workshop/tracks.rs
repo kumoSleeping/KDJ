@@ -631,7 +631,7 @@ pub fn layout(doc: &Value) -> Value {
         .fold(0., f64::max);
     let songs: Vec<Value> = song_clips(doc).iter().enumerate().map(|(index, clip)| json!({
         "index": index, "at": round(clip_at(clip)), "length": round(clip_length(clip)), "src": clip["src"],
-        "in": num(clip, "in").unwrap_or(0.),
+        "in": num(clip, "in").unwrap_or(0.), "speed": num(clip, "speed").unwrap_or(1.),
     })).collect();
     json!({ "duration": round(end), "tracks": tracks, "folds": doc.get("folds").cloned().unwrap_or(json!([])), "songs": songs })
 }

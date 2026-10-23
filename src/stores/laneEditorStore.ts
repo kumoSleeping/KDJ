@@ -17,10 +17,37 @@ import type { Track } from "../types";
 export const LANE_EDITOR_APP = "lane-editor";
 
 /** Bar lines and beats in seconds of the project, through every song of the song lane. */
-export interface LaneGrid { downbeats: number[]; beats: number[] }
+export interface LaneGrid {
+  downbeats: number[];
+  beats: number[];
+  /** Each tempo stretch, in seconds of the project, at the tempo heard (the song's speed in it). */
+  tempo: Array<{ from: number; to: number; bpm: number }>;
+  /** A song whose first beat of the bar is not known: its bar lines are every fourth beat. */
+  guessedBars: boolean;
+}
 
 /** One song's own grid, in seconds of the song; `precise` once the full analysis has answered. */
-interface SongGrid { downbeats: number[]; beats: number[]; precise: boolean }
+interface SongGrid { downbeats: number[]; beats: number[]; tempo: Array<{ from: number; to: number; bpm: number }>; precise: boolean }
+
+/** The tempo heard at `t` seconds of the project, if a song plays there. */
+export function bpmAt(grid: LaneGrid | null, t: number): number | null {
+  return grid?.tempo.find(stretch => t >= stretch.from && t < stretch.to)?.bpm ?? null;
+}
+
+/**
+ * Where the ruler names the tempo: at the start of each stretch long enough to be one (eight
+ * seconds) whose tempo differs by a beat a minute or more from the one last named. The beat
+ * tracker's short wobbles stay unnamed.
+ */
+export function tempoMarks(grid: LaneGrid | null): Array<{ at: number; bpm: number }> {
+  const marks: Array<{ at: number; bpm: number }> = [];
+  for (const stretch of grid?.tempo ?? []) {
+    if (stretch.to - stretch.from < 8) continue;
+    const last = marks.at(-1);
+    if (!last || Math.abs(last.bpm - stretch.bpm) >= 1) marks.push({ at: stretch.from, bpm: stretch.bpm });
+  }
+  return marks;
+}
 
 /** How many edits back undo reaches. */
 const HISTORY = 100;
@@ -164,15 +191,25 @@ export function songsOf(doc: LaneDocument): LaneClip[] {
 function projectGrid(doc: LaneDocument, layout: LaneLayout, songIds: Array<number | null>): LaneGrid | null {
   const songs = layout.songs ?? [];
   if (songs.length === 0) return null;
-  const grid: LaneGrid = { downbeats: [], beats: [] };
+  const grid: LaneGrid = { downbeats: [], beats: [], tempo: [], guessedBars: false };
   songs.forEach((placed, n) => {
     const id = songIds[n];
     const own = id === null || id === undefined ? undefined : songGrids.get(id);
     if (!own) return;
-    const from = placed.in ?? 0, to = from + placed.length;
-    const move = (times: number[]) => times.filter(t => t >= from - 1e-3 && t < to - 1e-3).map(t => t - from + placed.at);
-    grid.downbeats.push(...move(own.downbeats));
+    // A song played at speed k: its second t is at placed.at + (t - in) / k, its tempo k times.
+    const k = placed.speed && placed.speed > 0 ? placed.speed : 1;
+    const from = placed.in ?? 0, to = from + placed.length * k;
+    const at = (t: number) => placed.at + (t - from) / k;
+    const move = (times: number[]) => times.filter(t => t >= from - 1e-3 && t < to - 1e-3).map(at);
+    // Not sure of the bar's first beat: every fourth beat, so the bars are there to cut to.
+    const guessed = own.downbeats.length === 0 && own.beats.length >= 16;
+    grid.guessedBars ||= guessed;
+    grid.downbeats.push(...move(guessed ? own.beats.filter((_, i) => i % 4 === 0) : own.downbeats));
     grid.beats.push(...move(own.beats));
+    for (const stretch of own.tempo) {
+      const a = Math.max(from, stretch.from), b = Math.min(to, stretch.to);
+      if (b > a) grid.tempo.push({ from: at(a), to: at(b), bpm: Math.round(stretch.bpm * k * 10) / 10 });
+    }
   });
   void doc;
   return grid;
@@ -215,7 +252,7 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
     if (!songGrids.has(songId)) {
       const track = await api.track(songId).catch(() => null);
       if (track?.beat_times?.length) {
-        songGrids.set(songId, { downbeats: track.downbeats ?? [], beats: track.beat_times, precise: false });
+        songGrids.set(songId, { downbeats: track.downbeats ?? [], beats: track.beat_times, tempo: [], precise: false });
         regrid();
       }
     }
@@ -234,7 +271,12 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       waiting.delete(songId);
     }
     const analysis = reply?.analysis;
-    if (analysis) songGrids.set(songId, { downbeats: analysis.downbeats, beats: analysis.beats, precise: true });
+    if (analysis) {
+      songGrids.set(songId, {
+        downbeats: analysis.downbeats, beats: analysis.beats, precise: true,
+        tempo: (analysis.segments ?? []).map(s => ({ from: s.start_seconds, to: s.end_seconds, bpm: s.bpm })),
+      });
+    }
     regrid();
   };
 

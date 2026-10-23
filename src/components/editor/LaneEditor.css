@@ -86,6 +86,11 @@
 .kd-lanes-scroll { overflow-x: auto; overflow-y: hidden; min-width: 0; }
 .kd-lanes-board { position: relative; display: grid; gap: 4px; min-width: 100%; padding-bottom: 4px; }
 .kd-lanes-ruler { position: relative; height: 16px; cursor: pointer; }
+/* The tempo where it changes, over the bar numbers. */
+.kd-lanes-tempo-row { position: relative; height: 12px; pointer-events: none; }
+.kd-lanes-tempo { position: absolute; top: 0; padding-left: 3px; color: var(--kd-muted); font-size: 10px; line-height: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* One placement 校准 found, and its ways of laying the video. */
+.kd-lanes-plan { display: grid; gap: 2px; }
 /* The in and out points (I, O): a tone under the ruler between them. */
 .kd-lanes-range { position: absolute; top: 0; bottom: 0; border-radius: 3px; background: var(--kd-hover); pointer-events: none; }
 .kd-lanes:focus { outline: none; }
