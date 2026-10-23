@@ -48,7 +48,7 @@ async function droppedTracks(ids: readonly number[]): Promise<Track[]> {
 
 export function LaneEditor() {
   const active = useActiveProject();
-  const { selected, busy, error, select, placeTracks, undo, redo, snap, toggleSnap, setRange } = useLaneEditor();
+  const { selected, busy, error, select, placeTracks, undo, redo, snap, toggleSnap, setRange, copy, paste, duplicate } = useLaneEditor();
   const edit = useLaneEditor(state => state.edit);
   const history = useLaneEditor(state => (active ? state.history[active.path] : undefined));
   const aligning = useLaneEditor(state => state.aligning.length);
@@ -114,7 +114,8 @@ export function LaneEditor() {
    * The editor's keys, as the workshop had them: Space plays; ← → a frame (Shift ten), the chosen
    * clip or else the playhead; ↑ ↓ the edit point before or after; N snapping to the beats;
    * I and O the in and out points; M a marker; S a cut at the playhead; Delete what is chosen
-   * (Shift + Delete closes up behind it); Esc lets it go; ⌘Z / ⇧⌘Z / ⌘Y undo and redo.
+   * (Shift + Delete closes up behind it); Esc lets it go; ⌘Z / ⇧⌘Z / ⌘Y undo and redo; ⌘C / ⌘X
+   * copy and cut the chosen clip, ⌘V puts it at the playhead, ⌘D repeats it right after itself.
    */
   const keys = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!open || event.nativeEvent.isComposing || (event.target as HTMLElement).closest("input, textarea, select, [role=slider], [role=radiogroup]")) return;
@@ -122,6 +123,12 @@ export function LaneEditor() {
     const key = event.key.toLowerCase();
     if (command && key === "z") { event.preventDefault(); void (event.shiftKey ? redo() : undo()); return; }
     if (command && key === "y") { event.preventDefault(); void redo(); return; }
+    if (command && !event.shiftKey && !event.altKey) {
+      const chosen = findClip(doc, selected) !== null;
+      if ((key === "c" || key === "x") && chosen) { event.preventDefault(); copy(key === "x"); return; }
+      if (key === "v") { event.preventDefault(); void paste(playhead.position); return; }
+      if (key === "d" && chosen) { event.preventDefault(); void duplicate(); return; }
+    }
     if (command || event.altKey) return;
     const clip = findClip(doc, selected)?.clip ?? null;
     const removal: LaneOp | null = clip ? { op: "remove", id: clip.id, ...(event.shiftKey ? { ripple: true } : {}) }

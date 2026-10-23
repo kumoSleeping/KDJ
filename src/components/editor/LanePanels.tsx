@@ -4,7 +4,7 @@
  * once, when they settle; text is sent when it is left.
  */
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { Crosshair, Download, LoaderCircle, Plus, RotateCcw, Scissors, Trash2 } from "lucide-react";
+import { CopyPlus, Crosshair, Download, LoaderCircle, Plus, RotateCcw, Scissors, Trash2 } from "lucide-react";
 import { api } from "../../lib/api";
 import { exportProject, useKdjvLive } from "../../lib/kdjvPlay";
 import { allClips, clipLength, fileLabel, findClip, laneClock, type ExportOptions, type LaneClip, type LaneOp, type LaneTitle } from "../../lib/lanes";
@@ -300,6 +300,7 @@ export function ToolPanel({ tool, project, selected, playhead, beatNear, edit }:
   const title = doc.titles?.find(t => t.id === titleId) ?? null;
   const vj = songsOf(doc).length > 0;
   const pictures = allClips(doc).filter(({ track }) => track.kind === "picture").map(({ clip }) => clip);
+  const duplicate = useLaneEditor(state => state.duplicate);
 
   if (tool === "export") return <ExportPanel project={project} />;
   if (tool === "title" || title) return <TitlePanel key={title?.id ?? "new"} title={title} playhead={playhead} beat={beatNear(playhead ?? 0)} edit={edit} />;
@@ -322,6 +323,9 @@ export function ToolPanel({ tool, project, selected, playhead, beatNear, edit }:
           </button>
           <NumberField label="入点" value={clip.in ?? 0} step={0.1} min={0} onCommit={value => edit([{ op: "trim", id: clip.id, in: value }])} />
           <NumberField label="出点" value={clip.out} step={0.1} min={0} onCommit={value => edit([{ op: "trim", id: clip.id, out: value }])} />
+          <button type="button" className="kd-lanes-action" title="在后面重复 · ⌘D（⌘C 复制，⌘V 粘贴到播放头）" onClick={() => void duplicate()}>
+            <CopyPlus size={14} />重复
+          </button>
           <button type="button" className="kd-lanes-action" title="Delete（Shift + Delete 后面的跟上）" onClick={() => edit([{ op: "remove", id: clip.id }])}><Trash2 size={14} />删掉</button>
         </div>
       </Section>

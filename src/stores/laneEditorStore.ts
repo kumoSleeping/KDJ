@@ -10,7 +10,7 @@ import { create } from "zustand";
 import { api } from "../lib/api";
 import { isImageTrack, isProjectTrack, isVideoTrack } from "../lib/format";
 import { refreshPlayingProject } from "../lib/kdjvPlay";
-import { alignedOps, clipLength, findClip, LANE_END, snapToBar, type AlignPlan, type LaneClip, type LaneDocument, type LaneEdited, type LaneLayout, type LaneOp, type NewClip } from "../lib/lanes";
+import { alignedOps, allClips, clipLength, findClip, LANE_END, snapToBar, type AlignPlan, type LaneClip, type LaneDocument, type LaneEdited, type LaneLayout, type LaneOp, type NewClip, type TrackKind } from "../lib/lanes";
 import { useSidePanels } from "../lib/sidePanels";
 import type { Track } from "../types";
 
@@ -62,6 +62,18 @@ interface LaneEditorState {
   snap: boolean;
   /** Each project's in and out points (I and O), in seconds, by path: what 导出 can write out. */
   ranges: Record<string, { in?: number; out?: number }>;
+  /** The clip copied (⌘C), with the track it was in: pasted as it was, in any open project. */
+  clipboard: { clip: NewClip; track: string; kind: TrackKind } | null;
+  /** Copies the chosen clip (⌘C); with `cut`, takes it out too (⌘X). */
+  copy(cut?: boolean): void;
+  /**
+   * The copied clip into the project in view (⌘V): at `at` (the playhead), else after the last
+   * clip of its track, in a track of the same id and kind, else the first of its kind. The new
+   * clip is chosen. Whatever it lands on in that track gives way, as with a drop.
+   */
+  paste(at: number | null): Promise<void>;
+  /** The chosen clip once more, right after itself in its track (⌘D); the copy is chosen. */
+  duplicate(): Promise<void>;
   toggleSnap(): void;
   /** The in (I) or out (O) point of the project in view at `at`; an out before the in, or the reverse, clears the other. */
   setRange(end: "in" | "out", at: number): void;
@@ -319,9 +331,22 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
     return any;
   };
 
+  /**
+   * One clip added to `project`; the clip it became is chosen: a new one of its file (a clip it
+   * lands in the middle of is cut in two, and the far piece is new too), where it was put.
+   */
+  const putIn = async (project: LaneProject, op: Extract<LaneOp, { op: "add" }>) => {
+    const before = new Set(allClips(project.doc).map(({ clip }) => clip.id));
+    if (!(await get().edit([op], project.path))) return;
+    const now = get().projects.find(p => p.path === project.path);
+    const made = (now ? allClips(now.doc) : []).filter(({ clip }) => !before.has(clip.id) && clip.src === op.clip.src)
+      .sort((a, b) => (op.at === undefined ? b.clip.at - a.clip.at : Math.abs(a.clip.at - op.at) - Math.abs(b.clip.at - op.at)))[0];
+    if (made && get().active === project.path) set({ selected: made.clip.id });
+  };
+
   return {
     open: false, projects: [], active: null, selected: null, busy: false, error: null, aligning: [], plans: {}, history: {},
-    snap: true, ranges: {},
+    snap: true, ranges: {}, clipboard: null,
     toggleSnap: () => set(state => ({ snap: !state.snap })),
     setRange(end, at) {
       const path = get().active;
@@ -450,6 +475,29 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       for (const track of now.doc.tracks.filter(t => t.kind === "picture")) {
         for (const clip of track.clips) if (!before.has(clip.id)) void get().calibrate(clip.id, true);
       }
+    },
+    copy(cut = false) {
+      const project = get().projects.find(p => p.path === get().active);
+      const found = project && findClip(project.doc, get().selected);
+      if (!found) return;
+      const { id, at: _at, ...clip } = found.clip;
+      set({ clipboard: { clip, track: found.track.id, kind: found.track.kind } });
+      if (cut) void get().edit([{ op: "remove", id }]);
+    },
+    async paste(at) {
+      const { clipboard } = get();
+      const project = get().projects.find(p => p.path === get().active);
+      if (!clipboard || !project) return;
+      const same = project.doc.tracks.find(track => track.id === clipboard.track && track.kind === clipboard.kind);
+      await putIn(project, { op: "add", clip: clipboard.clip, ...(same ? { track: same.id } : { kind: clipboard.kind }),
+        ...(at !== null ? { at: Math.round(Math.max(0, at) * 1000) / 1000 } : {}) });
+    },
+    async duplicate() {
+      const project = get().projects.find(p => p.path === get().active);
+      const found = project && findClip(project.doc, get().selected);
+      if (!project || !found) return;
+      const { id: _id, at, ...clip } = found.clip;
+      await putIn(project, { op: "add", clip, track: found.track.id, at: Math.round((at + clipLength(found.clip)) * 1000) / 1000 });
     },
     undo: () => inTurn(() => turnBack("past")),
     redo: () => inTurn(() => turnBack("future")),
