@@ -10,9 +10,11 @@ use super::render::{check, key, Scratch, Step};
 use super::*;
 
 pub const EXTENSION: &str = kdj_providers::tags::PROJECT_EXTENSION;
-/// The formats this build reads: 1, tracks of timed clips; 2, the editor's lanes (`Lanes`).
+/// The formats this build reads: 1, tracks of timed clips; 2, the editor's lanes (`Lanes`); 3,
+/// the editor's free tracks (`Tracks`, tracks.rs), the one the editor writes.
 const VERSION: u64 = 1;
 const LANES: u64 = 2;
+const TRACKS: u64 = super::tracks::FORMAT;
 
 fn one() -> f64 {
     1.
@@ -306,6 +308,72 @@ impl Lanes {
     }
 }
 
+/// `.kdjv` 3: the editor's free tracks (tracks.rs). Read into format 1's tracks: the titles on
+/// top, then each track in its order. A sound track is heard and not seen (a video there gives its
+/// sound alone); a hidden picture track is not seen, a muted track not heard. A clip's fades may
+/// last its whole length: a fade over the overlap of two tracks is a crossfade.
+#[derive(Debug, Deserialize)]
+struct Tracks {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    canvas: Option<DocCanvas>,
+    #[serde(default)]
+    tracks: Vec<FreeTrack>,
+    #[serde(default)]
+    titles: Vec<LaneTitle>,
+}
+#[derive(Debug, Deserialize)]
+struct FreeTrack {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    muted: bool,
+    #[serde(default)]
+    clips: Vec<DocClip>,
+}
+
+impl Tracks {
+    fn doc(self) -> Result<Doc> {
+        let mut tracks = vec![];
+        if !self.titles.is_empty() {
+            let mut clips = vec![];
+            for (n, t) in self.titles.iter().enumerate() {
+                if !(t.at >= 0. && t.length > 0.) {
+                    bail!("titles[{n}]：at 要 ≥ 0，length 要 > 0")
+                }
+                let mut clip = DocClip::new(&t.src, t.at, 0., t.length);
+                clip.muted = true;
+                clip.name = Some(format!("titles[{n}]（字幕）"));
+                clips.push(clip);
+            }
+            clips.sort_by(|a, b| a.at.total_cmp(&b.at));
+            tracks.push(DocTrack { clips });
+        }
+        let (mut pictures, mut sounds) = (0, 0);
+        for track in self.tracks {
+            let sound = track.kind == "sound";
+            let (word, n) = if sound { sounds += 1; ("声音", sounds) } else { pictures += 1; ("画面", pictures) };
+            let mut clips = vec![];
+            for (k, mut clip) in track.clips.into_iter().enumerate() {
+                if sound || track.hidden {
+                    clip.opacity = 0.;
+                }
+                if track.muted {
+                    clip.muted = true;
+                }
+                clip.whole_fade = true;
+                clip.name = Some(format!("{word}轨 {n} 第 {} 段（{}）", k + 1, file_name(&clip.src)));
+                clips.push(clip);
+            }
+            tracks.push(DocTrack { clips });
+        }
+        Ok(Doc { title: self.title, canvas: self.canvas, tracks })
+    }
+}
+
 fn file_name(src: &str) -> String {
     Path::new(src).file_name().map_or(src.to_string(), |f| f.to_string_lossy().into_owned())
 }
@@ -365,8 +433,9 @@ pub fn parse(text: &str) -> Result<Doc> {
     let doc: Doc = match value.get("kdjv").and_then(|v| v.as_u64()) {
         Some(VERSION) => serde_json::from_value(value).context("工程内容无效")?,
         Some(LANES) => serde_json::from_value::<Lanes>(value).context("工程内容无效")?.doc()?,
+        Some(TRACKS) => serde_json::from_value::<Tracks>(value).context("工程内容无效")?.doc()?,
         Some(other) => bail!("工程格式版本 {other} 需要更新的 KDJ"),
-        None => bail!("缺少 \"kdjv\": 1 或 2"),
+        None => bail!("缺少 \"kdjv\": 1、2 或 3"),
     };
     if doc.tracks.iter().all(|t| t.clips.is_empty()) {
         bail!("工程里没有片段")
@@ -859,47 +928,49 @@ impl Workshop {
         project(&doc, base, &probed)
     }
 
-    /// The editor's and the AI's edits of a format 2 project (lanes.rs): the operations applied in
-    /// order, the result opened as playing it would (every source checked) and only then written,
-    /// whole, in place of the file. `create` starts a file that must not be there yet. Answers the
-    /// document and where everything in it is.
-    pub async fn kdjv_edit(&self, file: &Path, ops: &[super::lanes::Op], create: bool, cancel: &CancellationToken) -> Result<serde_json::Value> {
+    /// The editor's and the AI's edits of a project (tracks.rs, format 3): the operations applied
+    /// in order, the result opened as playing it would (every source checked) and only then
+    /// written, whole, in place of the file. A project of an earlier format is read as format 3
+    /// (tracks.rs `from_earlier`) and written as one by its first edit; opening it writes nothing.
+    /// `create` starts a file that must not be there yet. Answers the document and where
+    /// everything in it is.
+    pub async fn kdjv_edit(&self, file: &Path, ops: &[serde_json::Value], create: bool, cancel: &CancellationToken) -> Result<serde_json::Value> {
+        use super::tracks;
         // A new project never takes the place of one that is there.
         if create && file.exists() {
             bail!("已经有这个文件：{}", file.display())
         }
-        let before: serde_json::Value = match tokio::fs::read_to_string(file).await {
+        let read: serde_json::Value = match tokio::fs::read_to_string(file).await {
             Ok(text) => serde_json::from_str(&text).context("工程不是有效的 JSON")?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => serde_json::json!({ "kdjv": LANES }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => serde_json::json!({ "kdjv": tracks::FORMAT, "tracks": [] }),
             Err(error) => return Err(error).with_context(|| format!("无法读取工程：{}", file.display())),
         };
-        if before.get("kdjv").and_then(|v| v.as_u64()) != Some(LANES) {
-            bail!("只有格式 2 的工程（编辑器的两条线）能用剪辑操作改；这个是格式 {}", before.get("kdjv").map_or("?".into(), |v| v.to_string()))
-        }
+        let before = match read.get("kdjv").and_then(|v| v.as_u64()) {
+            Some(tracks::FORMAT) => read,
+            Some(VERSION | LANES) => tracks::from_earlier(&read).context("工程内容无效")?,
+            other => bail!("这个工程是格式 {}，这个版本的 KDJ 改不了", other.map_or("?".into(), |v| v.to_string())),
+        };
+        let ops: Vec<tracks::Op> = ops.iter().enumerate()
+            .map(|(n, op)| serde_json::from_value(op.clone()).with_context(|| format!("第 {} 步不是认得的剪辑操作：{op}", n + 1)))
+            .collect::<Result<_>>()?;
         // Opening a project (no operations) only reads it: the file is not written, and one that does
         // not play as it is still opens, saying why, so that it can be put right here.
         let opening = ops.is_empty() && !create;
         let folder = file.parent().unwrap_or(Path::new("."));
-        let ops = Self::with_lengths(ops, folder, cancel).await?;
-        let mut after = super::lanes::apply(&before, &ops)?;
+        let ops = Self::with_lengths(&ops, folder, cancel).await?;
+        let mut after = tracks::apply(&before, &ops)?;
         // What reaches past the end of its file ends there (an open project too: shown so, written
         // only with the next edit).
         let mut lengths: HashMap<String, Option<f64>> = HashMap::new();
-        let named: Vec<String> = after["main"].as_array().into_iter().flatten().chain(super::lanes::songs_of(&after).iter())
-            .filter_map(|item| item["src"].as_str().map(str::to_string)).collect();
-        for src in named {
-            if !lengths.contains_key(&src) {
-                let probed = Self::probe_source(&source_path(folder, &src), cancel).await.ok();
-                lengths.insert(src, probed.filter(|p| p.kind == "video" || p.kind == "audio").map(|p| p.duration_ms / 1000.));
-            }
+        for src in tracks::sources(&after) {
+            let probed = Self::probe_source(&source_path(folder, &src), cancel).await.ok();
+            lengths.insert(src, probed.filter(|p| p.kind == "video" || p.kind == "audio").map(|p| p.duration_ms / 1000.));
         }
-        super::lanes::fit_sources(&mut after, |src| lengths.get(src).copied().flatten())?;
+        tracks::fit_sources(&mut after, |src| lengths.get(src).copied().flatten())?;
         let text = serde_json::to_string_pretty(&after)?;
         let base = file.parent().filter(|dir| dir.is_dir()).with_context(|| format!("文件夹不存在：{}", file.display()))?;
         // A draft with nothing in it yet is kept as it is; anything else has to play.
-        let songs = super::lanes::songs_of(&after);
-        let empty = after["main"].as_array().is_none_or(|main| main.is_empty()) && songs.is_empty();
-        let (project, problem) = if empty {
+        let (project, problem) = if tracks::is_empty(&after) {
             (None, None)
         } else {
             match Self::kdjv_project_text(&text, base, cancel).await {
@@ -910,15 +981,9 @@ impl Workshop {
         };
         let duration = project.as_ref().map_or(0., |p| p.duration() / 1000.);
         // How long each file the document names is, by its name there: how far a clip can reach.
-        let lengths: serde_json::Map<String, serde_json::Value> = project.as_ref().map(|p| {
-            let named = after["main"].as_array().into_iter().flatten().chain(songs.iter())
-                .filter_map(|item| item["src"].as_str());
-            named.filter_map(|src| {
-                let path = source_path(base, src);
-                let source = p.sources.iter().find(|s| Path::new(&s.path) == path)?;
-                Some((src.to_string(), serde_json::json!(source.duration_ms / 1000.)))
-            }).collect()
-        }).unwrap_or_default();
+        let lengths: serde_json::Map<String, serde_json::Value> = lengths.into_iter()
+            .filter_map(|(src, len)| Some((src, serde_json::json!(len?))))
+            .collect();
         if !opening {
             let temporary = file.with_extension(format!("{EXTENSION}.{}.tmp", std::process::id()));
             tokio::fs::write(&temporary, format!("{text}\n")).await?;
@@ -931,8 +996,8 @@ impl Workshop {
         } else {
             self.state.library.upsert_file(file, "local", "").ok()
         };
-        // Each song's own row, where the editor reads its bar lines.
-        let song_track_ids: Vec<Option<i64>> = songs.iter()
+        // The songs' own rows (the first sound track's clips), where the editor reads bar lines.
+        let song_track_ids: Vec<Option<i64>> = tracks::song_clips(&after).iter()
             .map(|song| song["src"].as_str()
                 .and_then(|src| self.state.library.get_by_path(&source_path(base, src)).ok().flatten())
                 .map(|track| track.id))
@@ -940,25 +1005,19 @@ impl Workshop {
         Ok(serde_json::json!({
             "path": file, "track_id": track_id,
             "song_track_id": song_track_ids.first().copied().flatten(), "song_track_ids": song_track_ids,
-            "document": after, "layout": super::lanes::layout(&after), "duration": duration,
+            "document": after, "layout": tracks::layout(&after), "duration": duration,
             "lengths": lengths, "problem": problem,
         }))
     }
 
-    /// The operations with every clip and song that came without an `out`, or with one past the end
-    /// of its file, given the file's whole length, measured here: the library may not know it (a
+    /// The operations with every clip that came without an `out`, or with one past the end of its
+    /// file, given the file's whole length, measured here: the library may not know it (a
     /// fragmented M4A says 0 in its header) or know the sound's, longer than the picture.
-    async fn with_lengths(ops: &[super::lanes::Op], base: &Path, cancel: &CancellationToken) -> Result<Vec<super::lanes::Op>> {
-        use super::lanes::Op;
+    async fn with_lengths(ops: &[super::tracks::Op], base: &Path, cancel: &CancellationToken) -> Result<Vec<super::tracks::Op>> {
+        use super::tracks::Op;
         let mut out = ops.to_vec();
         for op in &mut out {
-            let item = match op {
-                Op::Add { clip, .. } => Some(clip),
-                Op::AddSong { song, .. } => Some(song),
-                Op::New { song: Some(serde_json::Value::Object(song)), .. } => Some(song),
-                _ => None,
-            };
-            let Some(item) = item else { continue };
+            let Op::Add { clip: item, .. } = op else { continue };
             let given = item.get("out").and_then(|v| v.as_f64()).filter(|out| *out > 0.);
             let Some(src) = item.get("src").and_then(|v| v.as_str()) else { continue };
             let probed = Self::probe_source(&source_path(base, src), cancel).await?;
@@ -1278,9 +1337,26 @@ mod kdjv_tests {
     }
 
     #[test]
+    fn free_tracks_play_top_first_a_sound_track_heard_and_not_seen() {
+        let doc = parse(r#"{"kdjv":3,"title":"t","tracks":[
+            {"id":"v2","kind":"picture","hidden":true,"clips":[{"id":"c1","src":"/b.mp4","at":0,"in":0,"out":5}]},
+            {"id":"v1","kind":"picture","clips":[{"id":"c2","src":"/a.mp4","at":2,"in":0,"out":5,"fade_in":5}]},
+            {"id":"a1","kind":"sound","muted":true,"clips":[{"id":"c3","src":"/a.mp4","at":0,"in":0,"out":9}]}
+        ]}"#).unwrap();
+        assert_eq!(doc.tracks.len(), 3);
+        assert_eq!(doc.tracks[0].clips[0].opacity, 0., "a hidden picture track is not seen");
+        assert_eq!(doc.tracks[1].clips[0].opacity, 1.);
+        assert!(doc.tracks[1].clips[0].whole_fade, "a fade may last the whole clip");
+        assert_eq!(doc.tracks[2].clips[0].opacity, 0., "a sound track is not seen");
+        assert!(doc.tracks[2].clips[0].muted, "a muted track is not heard");
+        assert_eq!(doc.duration(), 9.);
+    }
+
+    #[test]
     fn what_cannot_play_is_said_instead_of_guessed() {
         assert!(parse(r#"{"tracks":[]}"#).unwrap_err().to_string().contains("kdjv"));
-        assert!(parse(r#"{"kdjv":3,"tracks":[]}"#).unwrap_err().to_string().contains("更新"));
+        assert!(parse(r#"{"kdjv":4,"tracks":[]}"#).unwrap_err().to_string().contains("更新"));
+        assert!(parse(r#"{"kdjv":3,"tracks":[{"kind":"picture","clips":[]}]}"#).unwrap_err().to_string().contains("没有片段"));
         assert!(parse(r#"{"kdjv":1,"tracks":[{"clips":[]}]}"#).is_err());
         let doc = parse(r#"{"kdjv":1,"tracks":[{"clips":[{"src":"/a.mp4","at":0,"in":0,"out":90}]}]}"#).unwrap();
         let probed = HashMap::from([(PathBuf::from("/a.mp4"), video())]);

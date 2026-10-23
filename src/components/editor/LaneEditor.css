@@ -1,7 +1,7 @@
-/* The editor of `.kdjv` 2 projects (LaneEditor.tsx). Like the rest of KDJ nothing is tinted: the
-   chosen clip is written in full ink, the picture's clips and the songs are quiet blocks, black is
-   black, and the branch lane above holds only the branches, joined to the picture by a slanted line
-   like railway points. Groups are apart by space and tone, never by a rule. */
+/* The editor of `.kdjv` 3 projects (LaneEditor.tsx), free tracks. Like the rest of KDJ nothing is
+   tinted: the chosen clip is written in full ink, clips are quiet blocks (a picture's show its
+   frames), where nothing is the row stays empty, and tracks folded together are one row a tone
+   under the others. Groups are apart by space and tone, never by a rule. */
 .kd-lanes { display: grid; grid-auto-rows: max-content; align-content: start; gap: 8px; min-width: 0; max-height: 100%; overflow-y: auto; padding: 4px 12px 12px; color: var(--kd-text); font-size: var(--kd-size-sm); }
 
 .kd-lanes-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -51,15 +51,38 @@
 }
 .kd-lanes-status[data-error] { color: var(--kd-danger, var(--kd-text)); }
 
-/* The lanes' names stand in a narrow column at the left, level with the lanes. */
+/* The tracks' names stand in a narrow column at the left, level with their rows, with their keys. */
 .kd-lanes-frame { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px; min-width: 0; }
 .kd-lanes-names { display: grid; grid-auto-rows: max-content; gap: 4px; padding-bottom: 4px; }
 .kd-lanes-name { color: var(--kd-muted); font-size: var(--kd-size-xs); line-height: 1; display: flex; align-items: center; white-space: nowrap; }
 .kd-lanes-name[data-lane="ruler"] { height: 16px; }
 .kd-lanes-name[data-lane="title"] { height: 16px; }
-.kd-lanes-name[data-lane="aux"] { height: 18px; }
-.kd-lanes-name[data-lane="main"] { height: 48px; }
-.kd-lanes-name[data-lane="song"] { height: 22px; }
+.kd-lanes-name[data-lane="picture"] { height: 48px; }
+.kd-lanes-name[data-lane="sound"] { height: 26px; }
+.kd-lanes-name { gap: 2px; }
+.kd-lanes-name-text { max-width: 7rem; overflow: hidden; text-overflow: ellipsis; padding-right: 2px; }
+/* A folded track keeps its place in the fold: its name a little in. */
+.kd-lanes-name[data-folded] .kd-lanes-name-text { font-weight: 500; }
+.kd-lanes-name-key {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  height: 1.25rem;
+  min-width: 1.25rem;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  justify-content: center;
+  cursor: pointer;
+}
+.kd-lanes-name-key:hover { background: var(--kd-hover); color: var(--kd-text); }
+.kd-lanes-name-key[aria-pressed="false"] { color: var(--kd-text); }
+.kd-lanes-add { display: flex; gap: 4px; padding-top: 2px; }
 .kd-lanes-scroll { overflow-x: auto; overflow-y: hidden; min-width: 0; }
 .kd-lanes-board { position: relative; display: grid; gap: 4px; min-width: 100%; padding-bottom: 4px; }
 .kd-lanes-ruler { position: relative; height: 16px; cursor: pointer; }
@@ -80,13 +103,80 @@
 }
 .kd-lanes-beat { position: absolute; bottom: 0; height: 5px; border-left: 1px solid var(--kd-line); pointer-events: none; }
 .kd-lanes-lane { position: relative; height: 26px; }
-.kd-lanes-lane[data-lane="aux"] { height: 18px; border-radius: 4px; }
-.kd-lanes-lane[data-lane="main"] { height: 48px; }
-.kd-lanes-lane[data-lane="song"] { height: 22px; }
+.kd-lanes-lane[data-lane="picture"] { height: 48px; }
+.kd-lanes-lane[data-lane="sound"] { height: 26px; }
+/* Tracks folded into one row: the row a tone under the others. */
+.kd-lanes-lane[data-folded] { border-radius: 4px; background: color-mix(in srgb, var(--kd-text) 4%, transparent); }
+.kd-lanes-row-wrap { position: relative; }
+.kd-lanes-row-wrap[data-end] { height: 0; margin-top: -4px; }
+/* Where a clip held past a track's edge would make a new track: a dashed line between the rows. */
+.kd-lanes-new-track {
+  position: absolute;
+  z-index: 3;
+  top: -3px;
+  right: 0;
+  left: 0;
+  height: 0;
+  border-top: 2px dashed var(--kd-text);
+  pointer-events: none;
+}
+.kd-lanes-new-track > span {
+  position: absolute;
+  top: -8px;
+  left: 6px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--kd-theme);
+  color: var(--kd-theme-ink);
+  font-size: 10px;
+  line-height: 14px;
+}
+/* The clip held over another track, drawn where it would land. */
+.kd-lanes-ghost {
+  position: absolute;
+  z-index: 20;
+  top: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 2px 6px;
+  border: 1px dashed var(--kd-text);
+  border-radius: 4px;
+  background: var(--kd-hover);
+  color: var(--kd-text);
+  font-size: 10px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+.kd-lanes-clip[data-away] { opacity: 0.35; }
+.kd-lanes-clip[data-hidden] { opacity: 0.45; }
+.kd-lanes-clip[data-kind="sound"] { background: color-mix(in srgb, var(--kd-text) 6%, transparent); }
+.kd-lanes-clip[data-kind="sound"] .kd-lanes-clip-name { top: 50%; translate: 0 -50%; background: transparent; }
+/* A fade: the clip's picture shaded away toward the end it fades at. */
+.kd-lanes-fade { position: absolute; z-index: 1; top: 0; bottom: 0; pointer-events: none; }
+.kd-lanes-fade[data-side="in"] { left: 0; background: linear-gradient(to right, color-mix(in srgb, var(--kd-panel) 75%, transparent), transparent); }
+.kd-lanes-fade[data-side="out"] { right: 0; background: linear-gradient(to left, color-mix(in srgb, var(--kd-panel) 75%, transparent), transparent); }
+/* The dots at the top corners pull the fades; shown on the chosen clip and under the pointer. */
+.kd-lanes-fade-dot {
+  position: absolute;
+  z-index: 2;
+  top: 1px;
+  width: 9px;
+  height: 9px;
+  margin: 0 -1px;
+  border-radius: 50%;
+  background: var(--kd-text);
+  opacity: 0;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.kd-lanes-fade-dot[data-side="in"] { translate: 0 0; }
+.kd-lanes-clip:hover .kd-lanes-fade-dot, .kd-lanes-clip[aria-pressed="true"] .kd-lanes-fade-dot { opacity: 0.85; }
 .kd-lanes-lane[data-lane="title"] { height: 16px; }
 /* A lane that something dragged over it would land in lifts a tone. */
 .kd-lanes-lane[data-drop] { border-radius: 4px; background: var(--kd-hover); }
-.kd-lanes-clip, .kd-lanes-song, .kd-lanes-branch-block, .kd-lanes-title-block {
+.kd-lanes-clip, .kd-lanes-title-block {
   position: absolute;
   top: 0;
   bottom: 0;
@@ -123,8 +213,6 @@
   white-space: nowrap;
   pointer-events: none;
 }
-/* A clip held up over the branch lane stays where it is, a little faded: the branch is drawn above. */
-.kd-lanes-clip[data-up] { opacity: 0.6; }
 /* Either end of a clip or a title pulls that end. */
 .kd-lanes-clip::before, .kd-lanes-clip::after, .kd-lanes-title-block::before, .kd-lanes-title-block::after {
   content: "";
@@ -136,36 +224,11 @@
 }
 .kd-lanes-clip::before, .kd-lanes-title-block::before { left: 0; }
 .kd-lanes-clip::after, .kd-lanes-title-block::after { right: 0; }
-.kd-lanes-clip, .kd-lanes-song, .kd-lanes-title-block { touch-action: none; }
+.kd-lanes-clip, .kd-lanes-title-block { touch-action: none; }
 /* What is being dragged stands a little above the rest and lets the pointer through. */
 [data-dragging] { z-index: 2; opacity: 0.85; cursor: grabbing; }
 .kd-lanes-clip[aria-pressed="true"] { border-color: var(--kd-text); color: var(--kd-text); font-weight: 600; }
 .kd-lanes-clip[aria-pressed="true"] .kd-lanes-clip-name { color: var(--kd-text); }
-.kd-lanes-song {
-  padding: 0 6px;
-  overflow: hidden;
-  border: 1px solid transparent;
-  background: color-mix(in srgb, var(--kd-text) 6%, transparent);
-  color: var(--kd-muted);
-  font: inherit;
-  font-size: 10px;
-  line-height: 20px;
-  text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.kd-lanes-song:hover { color: var(--kd-text); }
-.kd-lanes-song[aria-pressed="true"] { border-color: var(--kd-text); color: var(--kd-text); font-weight: 600; }
-.kd-lanes-branch-block {
-  padding: 0;
-  border: 1px solid var(--kd-muted);
-  background: color-mix(in srgb, var(--kd-text) 18%, transparent);
-  cursor: ew-resize;
-  touch-action: none;
-}
-.kd-lanes-branch-block[aria-pressed="true"] { border-color: var(--kd-text); }
-.kd-lanes-branch-block[data-pending] { border-style: dashed; border-color: var(--kd-text); background: transparent; pointer-events: none; }
 .kd-lanes-title-block {
   padding: 0 5px;
   overflow: hidden;
@@ -196,20 +259,6 @@
   cursor: pointer;
 }
 .kd-lanes-marker:focus-visible { outline: 1px solid var(--kd-text); outline-offset: 2px; }
-/* The points: under the branch lane, over the top of the main lane. */
-.kd-lanes-switches {
-  position: absolute;
-  left: 0;
-  width: 100%;
-  top: calc(16px + 4px + 9px);
-  --kd-lanes-titles: 0px;
-  transform: translateY(var(--kd-lanes-titles));
-  height: calc(9px + 4px);
-  overflow: visible;
-  pointer-events: none;
-}
-.kd-lanes-switches[data-titles] { --kd-lanes-titles: calc(16px + 4px); }
-.kd-lanes-switches path { fill: none; stroke: var(--kd-muted); stroke-width: 1.5; }
 .kd-lanes-playhead, .kd-lanes-drop {
   position: absolute;
   top: 0;
@@ -297,8 +346,8 @@
 .kd-lanes-section-label { padding-top: 5px; color: var(--kd-muted); font-size: var(--kd-size-xs); white-space: nowrap; }
 
 /* The lanes stand quietly even when empty, so the editor reads as one with nothing in it yet. */
-.kd-lanes-lane[data-lane="main"], .kd-lanes-lane[data-lane="song"] { border-radius: 4px; background: color-mix(in srgb, var(--kd-text) 3%, transparent); }
-.kd-lanes-lane[data-lane="main"][data-drop], .kd-lanes-lane[data-lane="song"][data-drop] { background: var(--kd-hover); }
+.kd-lanes-lane[data-lane="picture"], .kd-lanes-lane[data-lane="sound"] { border-radius: 4px; background: color-mix(in srgb, var(--kd-text) 3%, transparent); }
+.kd-lanes-lane[data-lane="picture"][data-drop], .kd-lanes-lane[data-lane="sound"][data-drop] { background: var(--kd-hover); }
 .kd-lanes-grow { flex: 1 1 auto; min-width: 0; }
 
 /* The crop: a small frame of the picture, the kept part marked inside it, each side pulled. */

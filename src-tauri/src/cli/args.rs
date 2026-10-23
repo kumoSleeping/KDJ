@@ -130,11 +130,11 @@ pub enum ProjectCmd {
         /// .kdjv 文件路径
         path: String,
     },
-    /// 用剪辑操作改一个格式 2 的 .kdjv 工程（主线和辅线，docs/kdjv.md「格式 2」）：按顺序做完，能播放才写回；返回工程和每一段的位置
+    /// 用剪辑操作改 .kdjv 工程（自由轨道，docs/kdjv.md「格式 3」；格式 1、2 的工程第一次改时转成格式 3）：按顺序做完，能播放才写回；返回工程和每条轨道上片段的位置
     Edit {
         /// .kdjv 文件路径
         path: String,
-        /// 操作列表（JSON 数组），如 [{"op":"add","clip":{"src":"/a.mp4","in":0,"out":10},"at":12}]
+        /// 操作列表（JSON 数组），如 [{"op":"add","clip":{"src":"/a.mp4","in":0,"out":10},"kind":"picture","at":12}]
         #[arg(long)]
         ops: String,
         /// 文件还没有时新建

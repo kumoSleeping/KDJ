@@ -1,9 +1,9 @@
 /**
- * The editor of `.kdjv` 2 projects (docs/kdjv.md, "格式 2"), in the drawer beside the list. Each
+ * The editor of `.kdjv` 3 projects (docs/kdjv.md, "格式 3"), in the drawer beside the list. Each
  * open project is a page of the drawer's title; a song dropped on the title starts another one.
  * At the top the transport, undo and redo, a marker at the playhead and the zoom; under it the
- * lanes (LaneBoard.tsx), handled directly; below them 字幕 and 导出, and everything that can be
- * done to what is chosen on the lanes, in one place (LanePanels.tsx). Nothing open, the same
+ * tracks (LaneBoard.tsx), handled directly; below them 字幕 and 导出, and everything that can be
+ * done to what is chosen on the tracks, in one place (LanePanels.tsx). Nothing open, the same
  * editor stands empty, ready for what is dropped into it. Every change is a list of operations the
  * server checks and saves (laneEditorStore.ts); the picture is the video window's while the
  * project plays.
@@ -12,11 +12,11 @@ import { useRef, useState, useSyncExternalStore, type KeyboardEvent, type Pointe
 import { Download, LoaderCircle, Magnet, MapPin, Maximize2, Pause, Play, Redo2, Type, Undo2, ZoomIn, ZoomOut } from "lucide-react";
 import { api } from "../../lib/api";
 import { downloadIntoEditor } from "../../lib/editorDownloads";
-import { isGap, laneClock, type LaneClip, type LaneOp } from "../../lib/lanes";
+import { clipLength, findClip, laneClock, type LaneOp } from "../../lib/lanes";
 import { getPlayerSession, requestPlayerCommand, subscribePlayerSession } from "../../lib/playerSession";
 import { playTrack } from "../../lib/playTrack";
 import { requestLocalVideo, useVideoPip } from "../../lib/videoPip";
-import { songsOf, useActiveProject, useLaneEditor, type LaneProject } from "../../stores/laneEditorStore";
+import { songsOf, useActiveProject, useLaneEditor, type LaneProject, type Placement } from "../../stores/laneEditorStore";
 import type { Track } from "../../types";
 import { clampZoom, LaneBoard, ZOOM_MAX, ZOOM_MIN } from "./LaneBoard";
 import { ToolPanel, type Tool } from "./LanePanels";
@@ -24,11 +24,14 @@ import "./LaneEditor.css";
 
 
 
-/** What the editor shows with nothing open: the lanes of a project not made yet. */
+/** What the editor shows with nothing open: a picture track and a sound track of a project not made yet. */
 const NOTHING: LaneProject = {
   path: "", trackId: null, songIds: [], grid: null, analysing: false, lengths: {},
-  doc: { kdjv: 2, title: "", main: [], branches: [] },
-  layout: { duration: 60, main_end: 0, main: [], branches: [], songs: [] },
+  doc: { kdjv: 3, title: "", tracks: [{ id: "v1", kind: "picture", clips: [] }, { id: "a1", kind: "sound", clips: [] }] },
+  layout: {
+    duration: 60, folds: [], songs: [],
+    tracks: [{ index: 0, id: "v1", kind: "picture", clips: [] }, { index: 1, id: "a1", kind: "sound", clips: [] }],
+  },
 };
 
 function usePlayhead(trackId: number | null) {
@@ -62,9 +65,9 @@ export function LaneEditor() {
   const vj = songsOf(doc).length > 0;
 
   /** What was dropped goes where it belongs (laneEditorStore `placeTracks`). */
-  const dropInto = async (ids: readonly number[], at: number, sound: boolean) => {
+  const dropInto = async (ids: readonly number[], place: Placement) => {
     const tracks = await droppedTracks(ids);
-    if (tracks.length) await placeTracks(active?.path ?? null, tracks, at, sound);
+    if (tracks.length) await placeTracks(active?.path ?? null, tracks, place);
   };
 
   /** One beat at `t` (the song's own beat there, through any tempo change), else half a second. */
@@ -86,7 +89,7 @@ export function LaneEditor() {
       // Playing again after the picture was put away brings it back.
       const pip = useVideoPip.getState();
       const shown = pip.active && pip.session?.source === "local" && pip.session.trackId === trackId;
-      if (!playhead.playing && !shown && layout.main.some(item => !item.gap)) {
+      if (!playhead.playing && !shown && doc.tracks.some(track => track.kind === "picture" && track.clips.length > 0)) {
         void api.track(trackId).then(track => requestLocalVideo(track, true)).catch(() => undefined);
       }
       return;
@@ -105,28 +108,11 @@ export function LaneEditor() {
   const frame = 1 / ((doc.canvas as { fps?: number } | undefined)?.fps || 30);
   /** Where the playhead stops on ↑ and ↓: both ends, the markers, and where clips, songs and titles begin and end. */
   const editPoints = () => [...new Set([0, span, ...(doc.markers ?? []).map(m => m.at),
-    ...layout.main.filter(item => !item.gap).flatMap(item => [item.at, item.at + item.length]),
-    ...(layout.songs ?? []).flatMap(song => [song.at, song.at + song.length]),
+    ...layout.tracks.flatMap(track => track.clips.flatMap(clip => [clip.at, clip.at + clip.length])),
     ...(doc.titles ?? []).flatMap(title => [title.at, title.at + title.length])].map(t => Math.round(t * 1000) / 1000))].sort((a, b) => a - b);
   /**
-   * Shift + Delete: the clip goes and what follows closes up behind it. In a VJ the black left in its
-   * place (with the black beside it) is shortened by the clip's length; without songs the lane
-   * already closes up.
-   */
-  const rippleOps = (clip: LaneClip): LaneOp[] => {
-    const i = layout.main.findIndex(item => item.id === clip.id);
-    if (i < 0) return [];
-    if (!vj) return [{ op: "remove", id: clip.id }];
-    const before = layout.main[i - 1]?.gap ? layout.main[i - 1] : null;
-    const after = layout.main[i + 1]?.gap ? layout.main[i + 1] : null;
-    const index = before ? i - 1 : i;
-    const left = (before?.length ?? 0) + (after?.length ?? 0);
-    return [{ op: "remove", id: clip.id }, { op: "gap", index, length: Math.round(left * 1000) / 1000 }];
-  };
-
-  /**
    * The editor's keys, as the workshop had them: Space plays; ← → a frame (Shift ten), the chosen
-   * clip of a VJ or else the playhead; ↑ ↓ the edit point before or after; N snapping to the beats;
+   * clip or else the playhead; ↑ ↓ the edit point before or after; N snapping to the beats;
    * I and O the in and out points; M a marker; S a cut at the playhead; Delete what is chosen
    * (Shift + Delete closes up behind it); Esc lets it go; ⌘Z / ⇧⌘Z / ⌘Y undo and redo.
    */
@@ -137,10 +123,9 @@ export function LaneEditor() {
     if (command && key === "z") { event.preventDefault(); void (event.shiftKey ? redo() : undo()); return; }
     if (command && key === "y") { event.preventDefault(); void redo(); return; }
     if (command || event.altKey) return;
-    const clip = doc.main.find((item): item is LaneClip => !isGap(item) && item.id === selected);
-    const removal: LaneOp | null = clip ? { op: "remove", id: clip.id }
-      : selected?.startsWith("title:") ? { op: "remove_title", id: selected.slice(6) }
-        : selected?.startsWith("song:") ? { op: "remove_song", index: Number(selected.slice(5)) } : null;
+    const clip = findClip(doc, selected)?.clip ?? null;
+    const removal: LaneOp | null = clip ? { op: "remove", id: clip.id, ...(event.shiftKey ? { ripple: true } : {}) }
+      : selected?.startsWith("title:") ? { op: "remove_title", id: selected.slice(6) } : null;
     const step = frame * (event.shiftKey ? 10 : 1);
     if (key === " ") {
       // Space on a key presses that key.
@@ -149,8 +134,7 @@ export function LaneEditor() {
     } else if (key === "arrowleft" || key === "arrowright") {
       event.preventDefault();
       const by = key === "arrowleft" ? -step : step;
-      const placed = clip && layout.main.find(item => item.id === clip.id);
-      if (vj && clip && placed) send([{ op: "move_to", id: clip.id, at: Math.max(0, Math.round((placed.at + by) * 1000) / 1000), over: true }]);
+      if (clip) send([{ op: "move", id: clip.id, at: Math.max(0, Math.round((clip.at + by) * 1000) / 1000) }]);
       else seek(Math.max(0, Math.min(span, (playhead.position ?? 0) + by)));
     } else if (key === "arrowup" || key === "arrowdown") {
       event.preventDefault();
@@ -162,9 +146,9 @@ export function LaneEditor() {
       event.preventDefault(); setRange(key === "i" ? "in" : "out", Math.round(playhead.position * 1000) / 1000);
     }
     else if (key === "m") { event.preventDefault(); mark(); }
-    else if (key === "s" && clip && playhead.position !== null) { event.preventDefault(); send([{ op: "split", id: clip.id, at: playhead.position }]); }
+    else if (key === "s" && clip && playhead.position !== null && playhead.position > clip.at && playhead.position < clip.at + clipLength(clip)) { event.preventDefault(); send([{ op: "split", id: clip.id, at: playhead.position }]); }
     else if ((event.key === "Delete" || event.key === "Backspace") && removal) {
-      event.preventDefault(); send(event.shiftKey && clip ? rippleOps(clip) : [removal]);
+      event.preventDefault(); send([removal]);
     }
     else if (event.key === "Escape" && (selected || tool)) { event.preventDefault(); select(null); setTool(null); }
   };
@@ -200,8 +184,8 @@ export function LaneEditor() {
     {status && <p className="kd-lanes-status" role={error ? "alert" : undefined} data-error={error ? "" : undefined} title={error ?? undefined}>{status}</p>}
 
     <LaneBoard area={area} project={project} zoom={zoom} onZoom={setZoom} selected={selected} select={id => { select(id); setTool(null); }} playhead={playhead.position}
-      seek={seek} beatNear={beatNear} edit={send} onDropped={(ids, at, sound) => void dropInto(ids, at, sound)}
-      onSearchDropped={(payload, at, sound) => void downloadIntoEditor(payload, active?.path ?? null, at, sound)} />
+      seek={seek} edit={send} onDropped={(ids, place) => void dropInto(ids, place)}
+      onSearchDropped={(payload, place) => void downloadIntoEditor(payload, active?.path ?? null, place.at, place.sound)} />
 
     <div className="kd-lanes-tools" role="toolbar" aria-label="剪辑工具">
       <span className="kd-lanes-grow" />

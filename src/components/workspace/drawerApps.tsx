@@ -62,7 +62,7 @@ const NEW_PROJECT_DROP: TitleDrop = {
   },
   drop(ids) {
     void Promise.all(ids.map(id => api.track(id).catch(() => null)))
-      .then(tracks => useLaneEditor.getState().placeTracks(null, tracks.filter((t): t is Track => Boolean(t)), 0));
+      .then(tracks => useLaneEditor.getState().placeTracks(null, tracks.filter((t): t is Track => Boolean(t)), { at: 0 }));
   },
   dropSearch: payload => {
     useLaneEditor.getState().show();

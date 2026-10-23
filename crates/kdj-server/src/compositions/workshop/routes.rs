@@ -50,7 +50,8 @@ fn kdjv_file(m: &Workshop, target: &KdjvTarget) -> Result<(std::path::PathBuf, O
 struct KdjvEdit {
     #[serde(flatten)]
     target: KdjvTarget,
-    ops: Vec<super::lanes::Op>,
+    /// tracks.rs `Op`s, read once the project's format is known.
+    ops: Vec<serde_json::Value>,
     #[serde(default)]
     create: bool,
 }

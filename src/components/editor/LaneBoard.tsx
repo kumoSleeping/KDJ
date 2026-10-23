@@ -1,30 +1,35 @@
 /**
- * The lanes of a project in the editor (LaneEditor.tsx): the ruler with its markers, the titles
- * (when there are any), the branches, the picture and the songs, under one clock. Everything on
- * them is handled directly: a press chooses it (and puts the playhead there), a drag moves it, a
- * drag at either end pulls that end; in a VJ what is dragged lands on the song's beats unless Alt
- * is held. A clip pulled up into the branch lane branches there: let go past its end, its tail
- * carries on over the next clip (`out`); before its start, it comes in early over the one before
- * (`in`). A branch is pulled longer or shorter by its far end and dragged back down to go away.
- * A press anywhere else puts the playhead there, and dragging moves it along. The picture lane
- * shows each clip's frames. Library rows dropped here go where they belong (LaneEditor's
- * `onDropped`), whether the system carried them (the harmonic list) or the track table followed
- * the pointer by hand (lib/pointerTrackDrop.ts).
+ * The tracks of a project in the editor (LaneEditor.tsx): the ruler with its markers and the in
+ * and out points, the titles (when there are any), then every track in its order — picture tracks
+ * (the upper covers the lower) and sound tracks — under one clock. A track's name stands at its
+ * left with its keys: hidden or muted, fold it with the one below, take it out; the + keys under
+ * them add a track. Tracks folded together are one row that shows what is seen (an upper clip
+ * covers a lower one; nothing in them changes) until the fold is opened to adjust them.
+ *
+ * Everything on the tracks is handled directly: a press chooses a clip (and puts the playhead
+ * there), a drag moves it, a drag at either end pulls that end, the dots at its top corners pull
+ * its fades; in a project with songs what is dragged lands on their beats unless Alt is held or N
+ * turned that off. A clip dragged up or down out of its own track goes into the track it is held
+ * over, if that is a track of its kind; past the edge of a track (or over a track of the other
+ * kind) it makes a new track there. A picture never goes into a sound track, nor sound into a
+ * picture track. A press anywhere else puts the playhead there, and dragging moves it along.
+ * Library rows and search results dropped on the editor go where they belong (`landing`).
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { Eye, EyeOff, Volume2, VolumeX, X, Plus, ChevronDown, ChevronRight, Combine, Ungroup } from "lucide-react";
 import { api } from "../../lib/api";
 import { rulerStep } from "../../lib/aiTimeline";
 import { isImageTrack, isProjectTrack } from "../../lib/format";
-import { branchOps, fileLabel, isGap, LANE_END, laneClock, snapToBar, type BranchSide, type LaneClip, type LaneOp } from "../../lib/lanes";
+import { fileLabel, LANE_END, laneClock, snapToBar, trackName, type LaneClip, type LaneOp, type LaneTrack, type TrackKind } from "../../lib/lanes";
 import { activeTrackDragIds, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
 import { usePointerSearchDrop, usePointerTrackDrop } from "../../lib/pointerTrackDrop";
 import { activeSearchDrag, finishSearchDrop, isSearchDownloadDrag, readSearchDrop, type ActiveSearchDrag } from "../../lib/searchDrag";
 import { useEditorDownloads } from "../../lib/editorDownloads";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
-import { isSongTrack, songsOf, useLaneEditor, type LaneProject } from "../../stores/laneEditorStore";
+import { isSongTrack, songsOf, useLaneEditor, type LaneProject, type Placement } from "../../stores/laneEditorStore";
 
-/** How far the lanes can be drawn out: 1 is the whole project in view. */
+/** How far the tracks can be drawn out: 1 is the whole project in view. */
 export const ZOOM_MIN = 1;
 export const ZOOM_MAX = 64;
 export const clampZoom = (zoom: number) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom));
@@ -34,18 +39,19 @@ const round = (v: number) => Math.round(v * 1000) / 1000;
 const EDGE_PX = 7;
 /** How far a press has to travel before it is a drag. */
 const DRAG_PX = 3;
-/** The picture lane's frames: drawn this high (twice for sharp screens), 16:9 wide. */
+/** How near a track's edge (or past it) a clip held makes a new track there, in pixels. */
+const NEW_TRACK_PX = 7;
+/** The picture tracks' frames: drawn this high (twice for sharp screens), 16:9 wide. */
 const FRAME_PX = 40;
 const FRAME_W = Math.round(FRAME_PX * 16 / 9);
-/** The shortest branch a pull makes. */
-const MIN_BRANCH = 0.1;
 
-type Lane = "main" | "song" | "title" | "branch";
-type Grip = "move" | "in" | "out";
+type Grip = "move" | "in" | "out" | "fade_in" | "fade_out";
+/** Where a clip held would go: a track, or a new track made at an index of the track list. */
+type Destination = { track: string } | { newTrack: number };
 interface Drag {
-  lane: Lane; key: string; grip: Grip; x0: number; dt: number; moved: boolean; free: boolean;
-  /** A clip held over the branch lane, or a branch held off it: where it would branch, if anywhere. */
-  up: boolean; t: number;
+  kind: "clip" | "title"; key: string; grip: Grip; x0: number; dt: number; moved: boolean; free: boolean;
+  /** Where the pointer is now, for the clip's destination and the fade it pulls; where it was pressed. */
+  x: number; y: number; y0: number;
 }
 
 /** Every how many seconds the ruler names one, so that about a dozen names fit at this zoom. */
@@ -82,11 +88,14 @@ function draggedRows(ids: readonly number[]): Dragged {
 const draggedSearch = (payload: ActiveSearchDrag): Dragged =>
   payload.kind === "audio" || payload.request.audio_only ? { songs: 1, videos: 0, stills: 0 } : { songs: 0, videos: 1, stills: 0 };
 
-/** Where a drop lands in one lane: the mark drawn there meanwhile and what it says. */
-interface DropMark { lane: "song" | "main"; at: number; label: string }
+/** Where a drop lands in one track (a fold's row shows it too): the mark drawn there meanwhile and what it says. */
+interface DropMark { track: string; at: number; label: string }
 
-/** Where a drop goes: `at` for the editor (seconds, or LANE_END), `sound` for videos taken for their sound alone. */
-interface Landing { at: number; sound: boolean; marks: DropMark[]; label: string }
+/** Where a drop goes, for the editor (`Placement`), with its marks and the words on the drag's card. */
+interface Landing { place: Placement; marks: DropMark[]; label: string }
+
+/** One row of the board: a track, or tracks folded together (top first). */
+interface Row { key: string; kind: TrackKind; tracks: LaneTrack[]; fold: string | null; opened: boolean }
 
 /** A clip's frames along it, one every frame's width, each at the moment of its source it starts on. */
 function ClipFrames({ trackId, clip, width }: { trackId: number; clip: LaneClip; width: number }) {
@@ -106,7 +115,7 @@ function ClipFrames({ trackId, clip, width }: { trackId: number; clip: LaneClip;
   </span>;
 }
 
-/** Where an online song or video dropped on the lanes will go once downloaded, and how far along it is. */
+/** Where an online song or video dropped on the tracks will go once downloaded, and how far along it is. */
 function PendingDownloads({ path, lane, span, end }: { path: string | null; lane: "song" | "main"; span: number; end: number }) {
   const all = useEditorDownloads(state => state.pending);
   const tasks = useDownloadStore(state => state.tasks);
@@ -121,51 +130,49 @@ function PendingDownloads({ path, lane, span, end }: { path: string | null; lane
   })}</>;
 }
 
-/** Where what is dragged would land in one lane: a dashed line there, and what goes in. */
-function DropMarks({ marks, lane, span }: { marks: DropMark[] | null; lane: "song" | "main"; span: number }) {
-  return <>{(marks ?? []).filter(mark => mark.lane === lane).map(mark => {
+/** Where what is dragged would land in one row: a dashed line there, and what goes in. */
+function DropMarks({ marks, tracks, span }: { marks: DropMark[] | null; tracks: LaneTrack[]; span: number }) {
+  return <>{(marks ?? []).filter(mark => tracks.some(track => track.id === mark.track)).map(mark => {
     // Near the right end the words stand to the left of the line.
     const left = Math.min(mark.at, span) / span > 0.7;
-    return <span key={mark.lane} className="kd-lanes-drop" data-left={left || undefined} style={{ left: pct(Math.min(mark.at, span), span) }}>
+    return <span key={mark.track} className="kd-lanes-drop" data-left={left || undefined} style={{ left: pct(Math.min(mark.at, span), span) }}>
       <span className="kd-lanes-drop-tag">{mark.label}</span>
     </span>;
   })}</>;
 }
 
-export function LaneBoard({ area, project, zoom, onZoom, selected, select, playhead, seek, beatNear, edit, onDropped, onSearchDropped }: {
-  /** The whole editor: what is let go anywhere on it is taken (on a lane, there; elsewhere, each to its own lane's end). */
+export function LaneBoard({ area, project, zoom, onZoom, selected, select, playhead, seek, edit, onDropped, onSearchDropped }: {
+  /** The whole editor: what is let go anywhere on it is taken (on a track, there; elsewhere, each to the end of its kind of track). */
   area: RefObject<HTMLElement | null>;
   project: LaneProject; selected: string | null; select(id: string | null): void;
-  /** How far the lanes are drawn out (1: the whole project in view); a pinch or ⌥/Ctrl + wheel asks for another. */
+  /** How far the tracks are drawn out (1: the whole project in view); a pinch or ⌥/Ctrl + wheel asks for another. */
   zoom: number; onZoom(zoom: number): void;
   /** Where the project is playing, or null when it is not the one loaded. */
   playhead: number | null; seek(t: number): void;
-  /** One beat's length near `t`: how long a branch is when only pulled up. */
-  beatNear(t: number): number;
   edit(ops: LaneOp[]): void;
-  /** Library rows let go at `at`; `sound`: on the sound lane, where a video gives only its sound. */
-  onDropped(ids: readonly number[], at: number, sound: boolean): void;
-  /** An online song or video let go at `at`: downloaded, then put there. */
-  onSearchDropped(payload: ActiveSearchDrag, at: number, sound: boolean): void;
+  /** Library rows let go: where they go (laneEditorStore `placeTracks`). */
+  onDropped(ids: readonly number[], place: Placement): void;
+  /** An online song or video let go: downloaded, then put there. */
+  onSearchDropped(payload: ActiveSearchDrag, place: Placement): void;
 }) {
   const { doc, layout, grid } = project;
   const snapOn = useLaneEditor(state => state.snap);
   const range = useLaneEditor(state => state.ranges[project.path]);
   const board = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
-  const aux = useRef<HTMLDivElement>(null);
-  const mainLane = useRef<HTMLDivElement>(null);
-  const soundLane = useRef<HTMLDivElement>(null);
+  /** Each row's element, by its key, for where a pointer is. */
+  const rowNodes = useRef(new Map<string, HTMLDivElement>());
   const [boardWidth, setBoardWidth] = useState(0);
   const [drop, setDrop] = useState<DropMark[] | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const dragRef = useRef<Drag | null>(null);
   const [scrub, setScrub] = useState<number | null>(null);
+  /** Folds opened for a moment, to adjust what is in them (the fold stays). */
+  const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
   const span = Math.max(1, layout.duration);
   const vj = songsOf(doc).length > 0;
   const downbeats = useMemo(() => grid?.downbeats ?? [], [grid]);
   const beats = useMemo(() => grid?.beats ?? [], [grid]);
-  const songs = layout.songs ?? [];
   const titles = doc.titles ?? [];
   const markers = doc.markers ?? [];
 
@@ -178,6 +185,23 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     observer?.observe(node);
     return () => observer?.disconnect();
   }, []);
+
+  /** The rows: each track, or the tracks of a fold as one row while it is not opened. */
+  const rows = useMemo(() => {
+    const out: Row[] = [];
+    const folds = doc.folds ?? [];
+    for (const track of doc.tracks) {
+      const fold = folds.find(f => f.tracks.includes(track.id)) ?? null;
+      if (fold && !opened.has(fold.id)) {
+        const row = out.find(r => r.fold === fold.id);
+        if (row) { row.tracks.push(track); continue; }
+        out.push({ key: `fold:${fold.id}`, kind: track.kind, tracks: [track], fold: fold.id, opened: false });
+        continue;
+      }
+      out.push({ key: track.id, kind: track.kind, tracks: [track], fold: fold?.id ?? null, opened: Boolean(fold) });
+    }
+    return out;
+  }, [doc.tracks, doc.folds, opened]);
 
   const ruler = useMemo(() => {
     if (vj && downbeats.length > 1) {
@@ -200,12 +224,8 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     const box = node.getBoundingClientRect();
     return Math.max(0, Math.min(span, ((clientX - box.left) / box.width) * span));
   };
-  /** Whether a point is up in the branch lane (or above it). */
-  const overAux = (clientY: number) => {
-    const box = aux.current?.getBoundingClientRect();
-    return box ? clientY <= box.bottom + 2 : false;
-  };
-  // ---- zoom: a pinch, ⌥ or Ctrl + wheel about the pointer; Shift + wheel along the lanes ----
+
+  // ---- zoom: a pinch, ⌥ or Ctrl + wheel about the pointer; Shift + wheel along the tracks ----
   /** The second at the pointer, where it stood when the zoom began, until the new zoom is drawn. */
   const anchor = useRef<{ time: number; x: number } | null>(null);
   const shownZoom = useRef(zoom);
@@ -226,18 +246,18 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     const before = shownZoom.current;
     shownZoom.current = pendingZoom.current = zoom;
     if (!node || before === zoom) return;
-    const width = node.clientWidth;
+    const view = node.clientWidth;
     let at = anchor.current;
     anchor.current = null;
     if (!at) {
-      const head = playhead !== null ? playhead / span * width * before - node.scrollLeft : -1;
-      const x = head >= 0 && head <= width ? head : width / 2;
-      at = { time: (node.scrollLeft + x) / (width * before) * span, x };
+      const head = playhead !== null ? playhead / span * view * before - node.scrollLeft : -1;
+      const x = head >= 0 && head <= view ? head : view / 2;
+      at = { time: (node.scrollLeft + x) / (view * before) * span, x };
     }
-    node.scrollLeft = Math.max(0, at.time / span * width * zoom - at.x);
+    node.scrollLeft = Math.max(0, at.time / span * view * zoom - at.x);
   }, [zoom]); // eslint-disable-line react-hooks/exhaustive-deps
-  const gesture = useRef({ zoomAt, width: () => scroller.current?.clientWidth ?? 0 });
-  gesture.current = { zoomAt, width: () => scroller.current?.clientWidth ?? 0 };
+  const gesture = useRef({ zoomAt });
+  gesture.current = { zoomAt };
   useEffect(() => {
     const node = scroller.current;
     if (!node) return;
@@ -275,62 +295,90 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     };
   }, []);
 
-  /** The beat nearest `t` in a VJ (when not let free, and N has not turned it off), else `t`. */
+  /** The beat nearest `t` in a project with songs (when not let free, and N has not turned it off), else `t`. */
   const snap = (t: number, free: boolean) => {
     if (free || !snapOn || !vj || beats.length === 0) return Math.max(0, t);
     return beats.reduce((best, b) => (Math.abs(b - t) < Math.abs(best - t) ? b : best), beats[0]);
   };
 
-  // ---- what is dragged, and where it is drawn meanwhile ----
-  const clipOf = (id: string) => doc.main.find((item): item is LaneClip => !isGap(item) && item.id === id);
-  const placedClip = (id: string) => layout.main.find(item => item.id === id);
-  const placedOf = (lane: Lane, key: string) => {
-    if (lane === "main") { const m = placedClip(key); return m && { at: m.at, length: m.length }; }
-    if (lane === "song") { const s = songs[Number(key)]; return s && { at: s.at, length: s.length }; }
-    if (lane === "branch") { const b = layout.branches.find(x => `${x.clip}:${x.side}` === key); return b && { at: b.at, length: b.length }; }
-    const t = titles.find(title => title.id === key);
-    return t && { at: t.at, length: t.length };
+  // ---- where the pointer is among the rows ----
+  const trackIndex = (id: string) => doc.tracks.findIndex(track => track.id === id);
+  /** The row level with a point (its name beside it counts too), or null. */
+  const rowAt = (_x: number, y: number): { row: Row; box: DOMRect } | null => {
+    for (const row of rows) {
+      const box = rowNodes.current.get(row.key)?.getBoundingClientRect();
+      if (box && y >= box.top && y <= box.bottom) return { row, box };
+    }
+    return null;
   };
-  /** Where an item stands after `drag` so far: its start and length. */
-  const shownBy = (drag: Drag | null, lane: Lane, key: string, at: number, length: number) => {
-    if (!drag || !drag.moved || drag.lane !== lane || drag.key !== key || (lane === "main" && drag.up)) return { at, length };
-    if (drag.grip === "move") {
-      const start = lane === "song" ? at + drag.dt : snap(at + drag.dt, drag.free);
-      return { at: start, length };
+  /**
+   * Where the clip `id` held at (x, y) would go. In its own row it stays in its track. Over a row of
+   * its kind it goes into that row's track (a fold's top track). Near a row's top or bottom edge,
+   * between rows, over a row of the other kind or past every row, it makes a new track there: over
+   * or under the row held at, or above or below its own track when that row is of the other kind.
+   */
+  const destination = (id: string, x: number, y: number): Destination | null => {
+    const own = doc.tracks.find(track => track.clips.some(clip => clip.id === id));
+    if (!own) return null;
+    const ownRow = rows.find(row => row.tracks.includes(own));
+    const ownBox = ownRow ? rowNodes.current.get(ownRow.key)?.getBoundingClientRect() : undefined;
+    if (ownBox && y >= ownBox.top && y <= ownBox.bottom) return { track: own.id };
+    const below = ownBox ? y > ownBox.bottom : false;
+    const beside = { newTrack: trackIndex(own.id) + (below ? 1 : 0) };
+    const hit = rowAt(x, y);
+    if (!hit) {
+      // Past every row: a new track above the first, or below the last, row of its kind's side.
+      const first = rows[0] ? rowNodes.current.get(rows[0].key)?.getBoundingClientRect() : undefined;
+      if (first && y < first.top) return { newTrack: own.kind === "picture" ? 0 : beside.newTrack };
+      const last = rows.at(-1);
+      const lastBox = last ? rowNodes.current.get(last.key)?.getBoundingClientRect() : undefined;
+      if (lastBox && y > lastBox.bottom && own.kind === "sound") return { newTrack: doc.tracks.length };
+      return beside;
     }
-    if (drag.grip === "in") {
-      const start = Math.min(at + length - 0.1, snap(at + drag.dt, drag.free));
-      return { at: start, length: at + length - start };
-    }
-    const end = Math.max(at + 0.1, snap(at + length + drag.dt, drag.free));
-    return { at, length: end - at };
-  };
-  /** Where an item stands while it is dragged. */
-  const shown = (lane: Lane, key: string, at: number, length: number) => shownBy(drag, lane, key, at, length);
-  /** The branch a clip held up over the branch lane at `t` would make. */
-  const branchFrom = (id: string, t: number, free: boolean): { side: BranchSide; at: number; length: number } | null => {
-    const placed = placedClip(id);
-    if (!placed) return null;
-    const end = placed.at + placed.length;
-    const at = snap(t, free);
-    if (t >= placed.at + placed.length / 2) {
-      const length = round(Math.max(MIN_BRANCH, at - end > MIN_BRANCH / 2 ? at - end : beatNear(end)));
-      return { side: "out", at: end, length };
-    }
-    const length = round(Math.max(MIN_BRANCH, placed.at - at > MIN_BRANCH / 2 ? placed.at - at : beatNear(placed.at)));
-    return { side: "in", at: placed.at - length, length };
+    if (hit.row.kind !== own.kind) return beside;
+    const top = trackIndex(hit.row.tracks[0].id), bottom = trackIndex(hit.row.tracks.at(-1)!.id);
+    if (y - hit.box.top <= NEW_TRACK_PX) return { newTrack: top };
+    if (hit.box.bottom - y <= NEW_TRACK_PX) return { newTrack: bottom + 1 };
+    return { track: hit.row.tracks[0].id };
   };
 
-  const press = (lane: Lane, key: string) => (event: ReactPointerEvent<HTMLElement>) => {
+  // ---- what is dragged, and where it is drawn meanwhile ----
+  const clipById = (id: string) => {
+    for (const track of doc.tracks) {
+      const clip = track.clips.find(c => c.id === id);
+      if (clip) return { clip, track };
+    }
+    return null;
+  };
+  const lengthOf = (clip: LaneClip) => (clip.out - (clip.in ?? 0)) / (clip.speed ?? 1);
+  /** Where a clip or title stands after `drag` so far: its start and length. */
+  const shownBy = (now: Drag | null, kind: Drag["kind"], key: string, at: number, length: number) => {
+    if (!now || !now.moved || now.kind !== kind || now.key !== key || now.grip === "fade_in" || now.grip === "fade_out") return { at, length };
+    // Held straight up or down it keeps its time; moved along, it lands on the beat.
+    if (now.grip === "move") return { at: Math.abs(now.x - now.x0) <= DRAG_PX ? at : snap(at + now.dt, now.free), length };
+    if (now.grip === "in") {
+      const start = Math.min(at + length - 0.1, snap(at + now.dt, now.free));
+      return { at: start, length: at + length - start };
+    }
+    const end = Math.max(at + 0.1, snap(at + length + now.dt, now.free));
+    return { at, length: end - at };
+  };
+  /** The fade a corner dot pulled so far, in seconds of the project. */
+  const fadeBy = (now: Drag, clip: LaneClip) => {
+    const length = lengthOf(clip);
+    const t = timeAt(now.x);
+    const fade = now.grip === "fade_in" ? t - clip.at : clip.at + length - t;
+    return round(Math.max(0, Math.min(length, fade)));
+  };
+
+  const press = (kind: Drag["kind"], key: string, grip?: Grip) => (event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 0) return;
     event.stopPropagation();
     const box = event.currentTarget.getBoundingClientRect();
-    const grip: Grip = lane === "song" ? "move"
-      : lane === "branch" ? "out"
-        : event.clientX - box.left <= EDGE_PX && box.width > EDGE_PX * 3 ? "in"
-          : box.right - event.clientX <= EDGE_PX && box.width > EDGE_PX * 3 ? "out" : "move";
+    const chosen: Grip = grip ?? (event.clientX - box.left <= EDGE_PX && box.width > EDGE_PX * 3 ? "in"
+      : box.right - event.clientX <= EDGE_PX && box.width > EDGE_PX * 3 ? "out" : "move");
     event.currentTarget.setPointerCapture(event.pointerId);
-    const next: Drag = { lane, key, grip, x0: event.clientX, dt: 0, moved: false, free: event.altKey, up: lane === "branch", t: timeAt(event.clientX) };
+    const next: Drag = { kind, key, grip: chosen, x0: event.clientX, dt: 0, moved: false, free: event.altKey, x: event.clientX, y: event.clientY, y0: event.clientY };
     dragRef.current = next;
     setDrag(next);
   };
@@ -338,8 +386,9 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     const now = dragRef.current;
     if (!now) return;
     const dx = event.clientX - now.x0;
-    const up = now.lane === "main" ? overAux(event.clientY) : now.lane === "branch" ? overAux(event.clientY) : false;
-    const next = { ...now, dt: dx / width() * span, moved: now.moved || Math.abs(dx) > DRAG_PX || up !== now.up, free: event.altKey, up, t: timeAt(event.clientX) };
+    const dy = event.clientY - now.y0;
+    const next = { ...now, dt: dx / width() * span, moved: now.moved || Math.abs(dx) > DRAG_PX || Math.abs(dy) > DRAG_PX * 4,
+      free: event.altKey, x: event.clientX, y: event.clientY };
     dragRef.current = next;
     setDrag(next);
   };
@@ -360,72 +409,49 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
 
   /** The operations that make a drag stick. */
   const commit = (done: Drag): LaneOp[] => {
-    if (done.lane === "branch") {
-      const [clip, side] = done.key.split(":") as [string, BranchSide];
-      const branch = doc.branches?.find(b => b.clip === clip && b.side === side);
-      if (!done.up || !branch) return [{ op: "unbranch", clip, side }];
-      const placed = placedClip(clip);
-      if (!placed) return [];
-      const at = snap(done.t, done.free);
-      const length = round(Math.max(MIN_BRANCH, side === "out" ? at - (placed.at + placed.length) : placed.at - at));
-      const owner = clipOf(clip);
-      return Math.abs(length - branch.length) < 0.01 || !owner ? []
-        : branchOps(owner, side, length, vj, placed.at, project.lengths[owner.src], { opacity: branch.opacity, fade: branch.fade });
-    }
-    if (done.lane === "main" && done.up) {
-      const made = branchFrom(done.key, done.t, done.free);
-      const owner = clipOf(done.key);
-      const placed = placedClip(done.key);
-      if (!made || !owner || !placed) return [];
-      const kept = doc.branches?.find(b => b.clip === done.key && b.side === made.side);
-      return branchOps(owner, made.side, made.length, vj, placed.at, project.lengths[owner.src], { opacity: kept?.opacity, fade: kept?.fade });
-    }
-    const before = placedOf(done.lane, done.key);
-    if (!before) return [];
-    const after = shownBy(done, done.lane, done.key, before.at, before.length);
-    if (done.lane === "title") {
+    if (done.kind === "title") {
+      const title = titles.find(t => t.id === done.key);
+      if (!title) return [];
+      const after = shownBy(done, "title", done.key, title.at, title.length);
       return [{ op: "set_title", id: done.key, fields: { at: round(after.at), length: round(after.length) } }];
     }
-    if (done.lane === "song") {
-      const from = Number(done.key);
-      const middle = after.at + after.length / 2;
-      const to = songs.filter(s => s.index !== from && s.at + s.length / 2 < middle).length;
-      return to === from ? [] : [{ op: "move_song", from, to }];
+    const found = clipById(done.key);
+    if (!found) return [];
+    const { clip, track } = found;
+    const length = lengthOf(clip);
+    if (done.grip === "fade_in" || done.grip === "fade_out") {
+      const fade = fadeBy(done, clip);
+      return Math.abs(fade - (clip[done.grip] ?? 0)) < 0.01 ? [] : [{ op: "set", id: clip.id, fields: { [done.grip]: fade } }];
     }
-    const clip = clipOf(done.key);
-    if (!clip) return [];
+    const after = shownBy(done, "clip", done.key, clip.at, length);
     const speed = clip.speed ?? 1;
     if (done.grip === "move") {
-      // In a VJ it goes where it is let go, over whatever is there.
-      if (vj) return [{ op: "move_to", id: clip.id, at: round(after.at), over: true }];
-      const middle = after.at + after.length / 2;
-      const index = layout.main.filter(item => item.id !== clip.id && item.at + item.length / 2 < middle).length;
-      const now = layout.main.findIndex(item => item.id === clip.id);
-      return index === now ? [] : [{ op: "move", id: clip.id, index }];
+      const to = destination(clip.id, done.x, done.y) ?? { track: track.id };
+      const at = round(Math.max(0, after.at));
+      if ("track" in to) {
+        if (to.track === track.id && Math.abs(at - clip.at) < 0.001) return [];
+        return [{ op: "move", id: clip.id, at, ...(to.track === track.id ? {} : { track: to.track }) }];
+      }
+      return [{ op: "move", id: clip.id, at, new_track: to.newTrack }];
     }
     if (done.grip === "out") {
-      return [{ op: "trim", id: clip.id, out: round((clip.out ?? 0) + (after.length - before.length) * speed) }];
+      return [{ op: "trim", id: clip.id, out: round(clip.out + (after.length - length) * speed) }];
     }
-    // The start pulled: the source starts later (or earlier) by as much; in a VJ the end stays put.
-    const shift = after.at - before.at;
-    const trim: LaneOp = { op: "trim", id: clip.id, in: round(Math.max(0, (clip.in ?? 0) + shift * speed)) };
-    if (!vj) return [trim];
-    // Pulled earlier it goes over the end of what was before it.
-    const place: LaneOp = { op: "move_to", id: clip.id, at: round(after.at), over: true };
-    return shift > 0 ? [trim, place] : [place, trim];
+    // The start pulled: the source starts later (or earlier) by as much; the end stays put.
+    return [{ op: "trim", id: clip.id, in: round(Math.max(0, (clip.in ?? 0) + (after.at - clip.at) * speed)) }];
   };
 
-  const grip = (lane: Lane, key: string, id: string) => ({
-    onPointerDown: press(lane, key), onPointerMove: move, onPointerUp: release(id),
+  const grip = (kind: Drag["kind"], key: string, id: string, chosen?: Grip) => ({
+    onPointerDown: press(kind, key, chosen), onPointerMove: move, onPointerUp: release(id),
     onPointerCancel: () => { dragRef.current = null; setDrag(null); },
-    // The keyboard (and assistive technology) chooses with a click that no pointer pressed.
+    // A key (Enter on a focused clip) chooses it too.
     onClick: (event: { detail: number }) => { if (event.detail === 0) select(selected === id ? null : id); },
-    "data-dragging": drag?.moved && drag.lane === lane && drag.key === key ? "" : undefined,
   });
+  /** The clip being moved, where it would go (for the ghost drawn there). */
+  const held = drag?.moved && drag.kind === "clip" && drag.grip === "move" ? clipById(drag.key) : null;
+  const heldTo = held && drag ? destination(held.clip.id, drag.x, drag.y) : null;
 
-  // ---- a press anywhere else: the playhead goes there and follows the pointer ----
-  // Only the line follows the pointer; the player is sent there once, where it is let go: each
-  // seek makes the engine start its decks anew, and a seek on every move choked the app.
+  // ---- the playhead: a press anywhere else puts it there, a drag moves it along ----
   const scrubRef = useRef<{ pointer: number } | null>(null);
   const scrubDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || (event.target as Element).closest("button, input, textarea, [role=slider]")) return;
@@ -446,55 +472,51 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     seek(timeAt(event.clientX));
   };
 
-  /** The lane under (x, y): the picture (or the branch lane above it), the sound, or none. */
-  const laneAt = (x: number, y: number): "song" | "main" | null => {
-    const inside = (node: HTMLElement | null) => {
-      const box = node?.getBoundingClientRect();
-      return !!box && x >= box.left && x <= box.right && y >= box.top - 2 && y <= box.bottom + 2;
-    };
-    if (inside(soundLane.current)) return "song";
-    if (inside(mainLane.current) || inside(aux.current)) return "main";
-    return null;
-  };
-  const songsEnd = songs.length ? songs[songs.length - 1].at + songs[songs.length - 1].length : 0;
-
+  // ---- drops from the library and from search ----
+  const firstOf = (kind: TrackKind) => doc.tracks.find(track => track.kind === kind) ?? null;
+  const endOf = (track: LaneTrack | null) => track ? track.clips.reduce((end, c) => Math.max(end, c.at + lengthOf(c)), 0) : 0;
   /**
-   * Where what is dragged lands when let go at (x, y). Songs and pictures each go to their own lane:
-   * let go on a lane, at that time (a song between songs, in a VJ a picture at the bar); anywhere
-   * else on the editor, after the last thing in their lane. Only videos alone, let go on the sound
-   * lane on purpose, go there, for their sound; a song let go on the picture goes to the sound all
-   * the same, and a still never to the sound.
+   * Where what is dragged lands when let go at (x, y). Songs and pictures each go to a track of
+   * their own kind: let go on a track, at that time (in a project with songs a picture at the
+   * bar); anywhere else on the editor, after the last clip of the first track of their kind (one
+   * is made when there is none). Only videos alone, let go on a sound track on purpose, go there,
+   * for their sound; a song let go on a picture track goes to a sound track all the same, and a
+   * still never to sound.
    */
   const landing = (what: Dragged, x: number, y: number): Landing | null => {
     const pictures = what.videos + what.stills;
     if (what.songs + pictures === 0) return null;
-    const lane = laneAt(x, y);
+    const hit = rowAt(x, y);
+    const on = hit ? hit.row.tracks[0] : null;
     const t = timeAt(x);
-    const sound = lane === "song" && what.songs === 0 && what.videos > 0 && what.stills === 0;
-    const at = lane === null ? LANE_END : t;
+    const sound = on?.kind === "sound" && what.songs === 0 && what.videos > 0 && what.stills === 0;
+    const at = on ? t : LANE_END;
+    const songTrack = on?.kind === "sound" ? on : firstOf("sound");
+    const pictureTrack = on?.kind === "picture" ? on : firstOf("picture");
     const marks: DropMark[] = [];
     const songCount = what.songs + (sound ? what.videos : 0);
-    if (songCount) {
-      const index = songs.filter(s => s.at + s.length / 2 < at).length;
-      const count = songCount > 1 ? ` ×${songCount}` : "";
-      marks.push({ lane: "song", at: at >= LANE_END ? songsEnd : (songs[index]?.at ?? songsEnd), label: sound ? `只要声音${count}` : `音频${count}` });
+    const count = (n: number) => (n > 1 ? ` ×${n}` : "");
+    if (songCount && songTrack) {
+      marks.push({ track: songTrack.id, at: at >= LANE_END ? endOf(songTrack) : t, label: sound ? `只要声音${count(songCount)}` : `音频${count(songCount)}` });
     }
-    if (pictures && !sound) {
-      const placeAt = at >= LANE_END ? layout.main_end : vj ? snapToBar(downbeats, t) : t;
-      const kind = what.stills === 0 ? "视频" : what.videos === 0 ? "图片" : "画面";
-      marks.push({ lane: "main", at: placeAt, label: `${kind}${pictures > 1 ? ` ×${pictures}` : ""}` });
+    if (pictures && !sound && pictureTrack) {
+      const word = what.stills === 0 ? "视频" : what.videos === 0 ? "图片" : "画面";
+      marks.push({ track: pictureTrack.id, at: at >= LANE_END ? endOf(pictureTrack) : vj ? snapToBar(downbeats, t) : t, label: `${word}${count(pictures)}` });
     }
-    const label = songCount && pictures && !sound ? "音频放声音，画面放画面"
+    const label = songCount && pictures && !sound ? "音频放声音轨，画面放画面轨"
       : sound ? "只要声音"
-        : lane === null ? (songCount ? "接在声音最后" : "接在画面最后")
-          : songCount ? "放进声音" : "放进画面";
-    return { at, sound, marks, label };
+        : !on ? (songCount ? "接在声音轨最后" : "接在画面轨最后")
+          : songCount ? "放进声音轨" : "放进画面轨";
+    return {
+      place: { at, sound, picture: pictureTrack?.id, song: songTrack?.id },
+      marks, label,
+    };
   };
   const dropRows = (ids: readonly number[], x: number, y: number) => {
     setDrop(null);
     const where = landing(draggedRows(ids), x, y);
     // Projects alone open as pages of their own (the editor does that with whatever is dropped).
-    if (ids.length) onDropped(ids, where?.at ?? LANE_END, where?.sound ?? false);
+    if (ids.length) onDropped(ids, where?.place ?? { at: LANE_END });
   };
   const overRows = (ids: readonly number[], x: number, y: number) => {
     // Projects open as pages of their own; they do not go into this one.
@@ -505,8 +527,9 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
   };
   const dropSearch = (payload: ActiveSearchDrag, x: number, y: number) => {
     setDrop(null);
-    const where = landing(draggedSearch(payload), x, y);
-    if (where) onSearchDropped(payload, where.at, where.sound || draggedSearch(payload).songs > 0);
+    const what = draggedSearch(payload);
+    const where = landing(what, x, y);
+    if (where) onSearchDropped(payload, { ...where.place, sound: where.place.sound || what.songs > 0 });
   };
   const overSearch = (payload: ActiveSearchDrag, x: number, y: number) => {
     const where = landing(draggedSearch(payload), x, y);
@@ -558,36 +581,100 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     };
   }, [area]);
 
-  // The branch a drag is making or changing, drawn in the branch lane meanwhile.
-  const pending = (() => {
-    if (!drag?.moved || !drag.up) return null;
-    if (drag.lane === "main") {
-      const made = branchFrom(drag.key, drag.t, drag.free);
-      return made && { key: `${drag.key}:${made.side}`, ...made };
-    }
-    if (drag.lane !== "branch") return null;
-    const [clip, side] = drag.key.split(":") as [string, BranchSide];
-    const placed = placedClip(clip);
-    if (!placed) return null;
-    const at = snap(drag.t, drag.free);
-    const length = Math.max(MIN_BRANCH, side === "out" ? at - (placed.at + placed.length) : placed.at - at);
-    return { key: drag.key, side, at: side === "out" ? placed.at + placed.length : placed.at - length, length };
-  })();
-  const branchBlocks = [
-    ...layout.branches.filter(b => `${b.clip}:${b.side}` !== pending?.key && !(drag?.moved && drag.lane === "branch" && drag.key === `${b.clip}:${b.side}`)),
-    ...(pending ? [{ clip: pending.key.split(":")[0], side: pending.side, at: pending.at, length: pending.length, pending: true }] : []),
-  ];
+  // ---- the tracks' own keys ----
+  /** Folds `row`'s tracks with the row below it (into one fold with whatever either was folded with). */
+  const foldDown = (index: number) => {
+    const row = rows[index], next = rows[index + 1];
+    if (!row || !next || next.kind !== row.kind) return;
+    const ids = [...row.tracks, ...next.tracks].map(track => track.id);
+    const folds = doc.folds ?? [];
+    const members = new Set(ids);
+    for (const fold of folds) if (fold.tracks.some(id => members.has(id))) fold.tracks.forEach(id => members.add(id));
+    edit([{ op: "fold", tracks: doc.tracks.filter(track => members.has(track.id)).map(track => track.id) }]);
+  };
+  const toggleOpened = (fold: string) => setOpened(now => {
+    const next = new Set(now);
+    if (next.has(fold)) next.delete(fold); else next.add(fold);
+    return next;
+  });
+
   const pixels = (seconds: number) => (boardWidth / span) * seconds;
   const head = scrub ?? playhead;
+  const pictureEnd = endOf(firstOf("picture")), soundEnd = endOf(firstOf("sound"));
+
+  /** One clip on its row. In a fold's row the upper track's clips are drawn over the lower's. */
+  const clipBlock = (clip: LaneClip, track: LaneTrack, depth: number) => {
+    const length = lengthOf(clip);
+    const at = shownBy(drag, "clip", clip.id, clip.at, length);
+    const fading = drag?.moved && drag.kind === "clip" && drag.key === clip.id && (drag.grip === "fade_in" || drag.grip === "fade_out") ? drag : null;
+    const fadeIn = fading?.grip === "fade_in" ? fadeBy(fading, clip) : clip.fade_in ?? 0;
+    const fadeOut = fading?.grip === "fade_out" ? fadeBy(fading, clip) : clip.fade_out ?? 0;
+    const away = held?.clip.id === clip.id && heldTo !== null && !("track" in heldTo && heldTo.track === track.id);
+    const picture = track.kind === "picture";
+    return <button key={clip.id} type="button" className="kd-lanes-clip" data-kind={track.kind} aria-pressed={clip.id === selected}
+      data-away={away || undefined} data-hidden={track.hidden || undefined}
+      style={{ left: pct(at.at, span), width: pct(at.length, span), zIndex: 10 - depth }}
+      title={`${trackName(doc, track)} · ${fileLabel(clip.src)} · ${laneClock(at.at)}–${laneClock(at.at + at.length)}`} {...grip("clip", clip.id, clip.id)}>
+      {picture && project.trackId !== null && <ClipFrames trackId={project.trackId} clip={clip} width={pixels(at.length)} />}
+      {fadeIn > 0 && <span className="kd-lanes-fade" data-side="in" style={{ width: pct(fadeIn, at.length) }} aria-hidden="true" />}
+      {fadeOut > 0 && <span className="kd-lanes-fade" data-side="out" style={{ width: pct(fadeOut, at.length) }} aria-hidden="true" />}
+      <span className="kd-lanes-clip-name">{fileLabel(clip.src)}</span>
+      <span className="kd-lanes-fade-dot" data-side="in" style={{ left: pct(fadeIn, at.length) }} title={`淡入 ${fadeIn.toFixed(2)} 秒`}
+        {...grip("clip", clip.id, clip.id, "fade_in")} />
+      <span className="kd-lanes-fade-dot" data-side="out" style={{ right: pct(fadeOut, at.length) }} title={`淡出 ${fadeOut.toFixed(2)} 秒`}
+        {...grip("clip", clip.id, clip.id, "fade_out")} />
+    </button>;
+  };
+
+  /** The clip held, drawn where it would land: in another row, or on the line of a new track. */
+  const ghost = (row: Row) => {
+    if (!held || !heldTo || !drag) return null;
+    const into = "track" in heldTo ? row.tracks.some(track => track.id === heldTo.track) && heldTo.track !== held.track.id : false;
+    if (!into) return null;
+    const length = lengthOf(held.clip);
+    const at = shownBy(drag, "clip", held.clip.id, held.clip.at, length);
+    return <span className="kd-lanes-ghost" style={{ left: pct(at.at, span), width: pct(at.length, span) }} aria-hidden="true">{fileLabel(held.clip.src)}</span>;
+  };
+  /** Where a new track would be made: a line between rows (`edge`: above `row`, or below the last). */
+  const newTrackLine = (index: number) => {
+    if (!heldTo || "track" in heldTo || heldTo.newTrack !== index) return null;
+    return <div className="kd-lanes-new-track" aria-hidden="true"><span>新轨道</span></div>;
+  };
+  const rowLines = rows.map(row => trackIndex(row.tracks[0].id));
 
   return <div className="kd-lanes-frame">
-   {/* The lanes' names, level with them: the picture, its branches above it, the sound below. */}
-   <div className="kd-lanes-names" aria-hidden="true">
+   {/* The tracks' names and keys, level with their rows. */}
+   <div className="kd-lanes-names">
     <span className="kd-lanes-name" data-lane="ruler" />
     {titles.length > 0 && <span className="kd-lanes-name" data-lane="title">字幕</span>}
-    <span className="kd-lanes-name" data-lane="aux">辅线</span>
-    <span className="kd-lanes-name" data-lane="main">画面</span>
-    <span className="kd-lanes-name" data-lane="song">声音</span>
+    {rows.map((row, n) => {
+      const track = row.tracks[0];
+      const folded = row.fold !== null && !row.opened;
+      const next = rows[n + 1];
+      return <div key={row.key} className="kd-lanes-name" data-lane={row.kind} data-folded={row.fold ? "" : undefined}>
+        {row.fold && <button type="button" className="kd-lanes-name-key" onClick={() => toggleOpened(row.fold!)}
+          aria-label={folded ? "展开合并的轨道" : "收起"} title={folded ? "展开来调整（合并不变）" : "收起"}>
+          {folded ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+        </button>}
+        <span className="kd-lanes-name-text">{folded ? row.tracks.map(t => trackName(doc, t)).join(" + ") : trackName(doc, track)}</span>
+        {!folded && track.kind === "picture" && <button type="button" className="kd-lanes-name-key" aria-pressed={!track.hidden}
+          onClick={() => edit([{ op: "set_track", id: track.id, fields: { hidden: !track.hidden } }])}
+          aria-label={track.hidden ? "显示这条轨道" : "隐藏这条轨道"}>{track.hidden ? <EyeOff size={12} /> : <Eye size={12} />}</button>}
+        {!folded && <button type="button" className="kd-lanes-name-key" aria-pressed={!track.muted}
+          onClick={() => edit([{ op: "set_track", id: track.id, fields: { muted: !track.muted } }])}
+          aria-label={track.muted ? "打开这条轨道的声音" : "这条轨道静音"}>{track.muted ? <VolumeX size={12} /> : <Volume2 size={12} />}</button>}
+        {next && next.kind === row.kind && (!row.fold || row.fold !== next.fold) && <button type="button" className="kd-lanes-name-key"
+          onClick={() => foldDown(n)} aria-label="和下面一条合并" title="和下面一条合并（被盖住的都留着，随时展开）"><Combine size={12} /></button>}
+        {row.fold && <button type="button" className="kd-lanes-name-key" onClick={() => edit([{ op: "unfold", id: row.fold! }])}
+          aria-label="拆开合并" title="拆开合并"><Ungroup size={12} /></button>}
+        {!folded && <button type="button" className="kd-lanes-name-key" onClick={() => edit([{ op: "remove_track", id: track.id }])}
+          aria-label="删掉这条轨道" title={track.clips.length ? "删掉这条轨道和上面的片段（可撤销）" : "删掉这条轨道"}><X size={12} /></button>}
+      </div>;
+    })}
+    <div className="kd-lanes-add">
+      <button type="button" className="kd-lanes-name-key" onClick={() => edit([{ op: "add_track", kind: "picture" }])} aria-label="加一条画面轨"><Plus size={12} />画面</button>
+      <button type="button" className="kd-lanes-name-key" onClick={() => edit([{ op: "add_track", kind: "sound" }])} aria-label="加一条声音轨"><Plus size={12} />声音</button>
+    </div>
    </div>
    <div ref={scroller} className="kd-lanes-scroll">
     <div ref={board} className="kd-lanes-board" style={{ width: `${zoom * 100}%` }}
@@ -608,7 +695,7 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
       {titles.length > 0 && <div className="kd-lanes-lane" data-lane="title" aria-label="字幕">
         {titles.map(title => {
           const id = `title:${title.id}`;
-          const at = shown("title", title.id, title.at, title.length);
+          const at = shownBy(drag, "title", title.id, title.at, title.length);
           return <button key={title.id} type="button" className="kd-lanes-title-block" aria-pressed={id === selected}
             style={{ left: pct(at.at, span), width: pct(at.length, span) }}
             title={`${title.text} · ${laneClock(at.at)}–${laneClock(at.at + at.length)}`} {...grip("title", title.id, id)}>
@@ -616,56 +703,20 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
           </button>;
         })}
       </div>}
-      <div ref={aux} className="kd-lanes-lane" data-lane="aux" aria-label="辅线" data-drop={drag?.moved && drag.lane === "main" && drag.up || undefined}>
-        {branchBlocks.map(b => {
-          const key = `${b.clip}:${b.side}`;
-          const pendingBlock = "pending" in b;
-          return <button key={key} type="button" className="kd-lanes-branch-block"
-            data-side={b.side} data-pending={pendingBlock || undefined} aria-pressed={b.clip === selected}
-            style={{ left: pct(b.at, span), width: pct(b.length, span) }}
-            title={`${b.side === "out" ? "出分叉" : "入分叉"} · ${round(b.length)} 秒 · 拉它的头改长短，拖下去去掉`}
-            {...(pendingBlock ? {} : grip("branch", key, b.clip))} />;
-        })}
-      </div>
-      <svg className="kd-lanes-switches" data-titles={titles.length > 0 || undefined} viewBox="0 0 1000 40" preserveAspectRatio="none" aria-hidden="true">
-        {branchBlocks.map(b => {
-          // The points: from the clip on the picture up onto the branch, like railway points.
-          const edge = (b.side === "out" ? b.at : b.at + b.length) / span * 1000;
-          const far = (b.side === "out" ? b.at + Math.min(b.length, span / 50) : b.at + b.length - Math.min(b.length, span / 50)) / span * 1000;
-          return <path key={`${b.clip}:${b.side}`} d={`M ${edge} 40 L ${far} 0`} vectorEffect="non-scaling-stroke" />;
-        })}
-      </svg>
-      <div ref={mainLane} className="kd-lanes-lane" data-lane="main" aria-label="画面" data-drop={drop?.some(mark => mark.lane === "main") || undefined}>
-        {layout.main.map(item => {
-          // Where there is no picture the lane stays empty.
-          if (item.gap) return null;
-          const id = item.id ?? "";
-          const at = shown("main", id, item.at, item.length);
-          const clip = clipOf(id);
-          return <button key={id} type="button" className="kd-lanes-clip" aria-pressed={id === selected}
-            data-up={drag?.moved && drag.lane === "main" && drag.key === id && drag.up || undefined}
-            style={{ left: pct(at.at, span), width: pct(at.length, span) }}
-            title={`${fileLabel(item.src ?? "")} · ${laneClock(at.at)}–${laneClock(at.at + at.length)} · 往上拉进辅线做分叉`} {...grip("main", id, id)}>
-            {clip && project.trackId !== null && <ClipFrames trackId={project.trackId} clip={clip} width={pixels(at.length)} />}
-            <span className="kd-lanes-clip-name">{fileLabel(item.src ?? "")}</span>
-          </button>;
-        })}
-        <PendingDownloads path={project.path || null} lane="main" span={span} end={layout.main_end} />
-        <DropMarks marks={drop} lane="main" span={span} />
-      </div>
-      <div ref={soundLane} className="kd-lanes-lane" data-lane="song" aria-label="声音" data-drop={drop?.some(mark => mark.lane === "song") || undefined}>
-        {songs.map(song => {
-          const id = `song:${song.index}`;
-          const at = shown("song", String(song.index), song.at, song.length);
-          return <button key={`${song.index}:${song.src}`} type="button" className="kd-lanes-song" aria-pressed={id === selected}
-            style={{ left: pct(at.at, span), width: pct(at.length, span) }}
-            title={`${fileLabel(song.src)} · ${laneClock(song.at)}–${laneClock(song.at + song.length)}`} {...grip("song", String(song.index), id)}>
-            {fileLabel(song.src)}
-          </button>;
-        })}
-        <PendingDownloads path={project.path || null} lane="song" span={span} end={songsEnd} />
-        <DropMarks marks={drop} lane="song" span={span} />
-      </div>
+      {rows.map(row => <div key={row.key} className="kd-lanes-row-wrap">
+        {newTrackLine(rowLines[rows.indexOf(row)])}
+        <div ref={node => { if (node) rowNodes.current.set(row.key, node); else rowNodes.current.delete(row.key); }}
+          className="kd-lanes-lane" data-lane={row.kind} data-folded={row.fold && !row.opened ? "" : undefined}
+          aria-label={row.tracks.map(t => trackName(doc, t)).join(" + ")}
+          data-drop={drop?.some(mark => row.tracks.some(t => t.id === mark.track)) || (heldTo && "track" in heldTo && held && heldTo.track !== held.track.id && row.tracks.some(t => t.id === heldTo.track)) || undefined}>
+          {row.tracks.flatMap((track, depth) => track.clips.map(clip => clipBlock(clip, track, depth)))}
+          {ghost(row)}
+          {row.tracks[0] === firstOf("picture") && <PendingDownloads path={project.path || null} lane="main" span={span} end={pictureEnd} />}
+          {row.tracks[0] === firstOf("sound") && <PendingDownloads path={project.path || null} lane="song" span={span} end={soundEnd} />}
+          <DropMarks marks={drop} tracks={row.tracks} span={span} />
+        </div>
+      </div>)}
+      <div className="kd-lanes-row-wrap" data-end="">{newTrackLine(doc.tracks.length)}</div>
       {head !== null && <span className="kd-lanes-playhead" style={{ left: pct(head, span) }} />}
     </div>
    </div>

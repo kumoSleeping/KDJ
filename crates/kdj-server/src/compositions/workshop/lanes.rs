@@ -152,7 +152,7 @@ fn song_length(song: &Value) -> f64 {
 const SETTABLE: &[&str] = &["speed", "volume", "muted", "x", "y", "scale", "opacity", "fill", "crop"];
 
 /// A crop is the fractions taken off left, top, right and bottom; some picture has to stay.
-fn check_crop(value: &Value) -> Result<()> {
+pub(super) fn check_crop(value: &Value) -> Result<()> {
     let sides: Vec<f64> = value.as_array().map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
     if sides.len() != 4 || sides.iter().any(|v| !(0. ..=0.9).contains(v)) || sides[0] + sides[2] > 0.9 || sides[1] + sides[3] > 0.9 {
         bail!("crop 是 [左, 上, 右, 下] 四个 0–0.9 的比例，左右、上下各加起来不超过 0.9")
@@ -449,6 +449,15 @@ fn drop_orphans(doc: &mut Value) {
         .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string)).collect();
     if let Some(branches) = doc.get_mut("branches").and_then(Value::as_array_mut) {
         branches.retain(|b| b.get("clip").and_then(Value::as_str).is_some_and(|clip| ids.iter().any(|id| id == clip)));
+    }
+}
+
+/// The operations both formats share — the title, the markers and the titles (字幕) — applied to
+/// a document of either (tracks.rs runs them on format 3).
+pub(super) fn apply_shared(doc: &mut Value, op: &Op) -> Result<()> {
+    match op {
+        Op::Title { .. } | Op::Markers { .. } | Op::AddTitle { .. } | Op::SetTitle { .. } | Op::RemoveTitle { .. } => apply_one(doc, op),
+        _ => bail!("{} 不是两种格式共用的操作", op_name(op)),
     }
 }
 

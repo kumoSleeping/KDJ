@@ -1,5 +1,5 @@
 /**
- * The editor of `.kdjv` 2 projects (docs/kdjv.md, "格式 2"; LaneEditor.tsx), a drawer app. Several
+ * The editor of `.kdjv` 3 projects (docs/kdjv.md, "格式 3"; LaneEditor.tsx), a drawer app. Several
  * projects are open at once, one page of the drawer's title each. Each holds its document as the
  * server last saved it: every change is a list of operations sent to `/api/kdjv/edit`, which checks
  * the result as playing it would and only then writes it, so what is shown is always what is on
@@ -10,7 +10,7 @@ import { create } from "zustand";
 import { api } from "../lib/api";
 import { isImageTrack, isProjectTrack, isVideoTrack } from "../lib/format";
 import { refreshPlayingProject } from "../lib/kdjvPlay";
-import { alignedOps, isGap, LANE_END, snapToBar, type AlignPlan, type LaneClip, type LaneDocument, type LaneEdited, type LaneLayout, type LaneOp } from "../lib/lanes";
+import { alignedOps, clipLength, findClip, LANE_END, snapToBar, type AlignPlan, type LaneClip, type LaneDocument, type LaneEdited, type LaneLayout, type LaneOp, type NewClip } from "../lib/lanes";
 import { useSidePanels } from "../lib/sidePanels";
 import type { Track } from "../types";
 
@@ -81,14 +81,15 @@ interface LaneEditorState {
   /** Sends the operations to the project in view (or at `path`); false when they were refused (the reason is in `error`). */
   edit(ops: LaneOp[], path?: string): Promise<boolean>;
   /**
-   * Library rows dropped at `at` seconds of the project at `path` go where they belong: songs into
-   * the song lane at that slot, pictures there (in a VJ at the bar, over what is there); at
-   * `LANE_END` (let go anywhere but on a lane) each after the last thing in its own lane. A project
+   * Library rows dropped on the project at `path` go where they belong: songs into a sound track,
+   * pictures into a picture track (`place` names them, else the first of their kind, made when
+   * there is none), from `place.at` (in a project with songs a picture at the bar), one after
+   * another; at `LANE_END` (let go anywhere but on a track) after the last clip there. A project
    * among them opens as a page of its own. No project (`path` null, or one no longer open): they
-   * start a new one. `sound`: videos alone let go on the sound lane, where a video gives only its
-   * sound; with a song among them each goes to its own lane all the same.
+   * start a new one. `place.sound`: videos alone let go on a sound track, where a video gives only
+   * its sound; with a song among them each goes to its own kind of track all the same.
    */
-  placeTracks(path: string | null, tracks: Track[], at: number, sound?: boolean): Promise<void>;
+  placeTracks(path: string | null, tracks: Track[], place: Placement): Promise<void>;
   undo(): Promise<void>;
   redo(): Promise<void>;
   select(id: string | null): void;
@@ -129,12 +130,22 @@ export const isPictureTrack = (track: Pick<Track, "format">) => isVideoTrack(tra
 
 /** The whole file, its length when the library knows it, else measured by the server (no `out`). */
 const length = (track: Track) => (track.duration && track.duration > 0 ? { out: track.duration } : {});
-export const songOf = (track: Track) => ({ src: track.path, in: 0, ...length(track) });
-export const clipOf = (track: Track, muted: boolean) => ({ src: track.path, in: 0, ...length(track), muted, fill: true });
+export const songOf = (track: Track): NewClip => ({ src: track.path, in: 0, ...length(track) });
+export const clipOf = (track: Track, muted: boolean): NewClip => ({ src: track.path, in: 0, ...length(track), muted, fill: true });
 
-/** The songs of a document in order: `songs`, or the one `song`. */
-export function songsOf(doc: LaneDocument) {
-  return doc.songs ?? (doc.song ? [doc.song] : []);
+/** Where a drop goes (`placeTracks`): from `at` (LANE_END: after the last clip), into these tracks. */
+export interface Placement {
+  at: number;
+  /** Videos alone taken for their sound (let go on a sound track). */
+  sound?: boolean;
+  /** The picture track pictures go into, and the sound track songs go into. */
+  picture?: string;
+  song?: string;
+}
+
+/** The songs of a document: the clips of its first sound track that has any (where bar lines come from). */
+export function songsOf(doc: LaneDocument): LaneClip[] {
+  return doc.tracks.find(track => track.kind === "sound" && track.clips.length > 0)?.clips ?? [];
 }
 
 /** Every song's grid, each moved to where that song plays in the project. */
@@ -230,8 +241,7 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       // What was chosen stays chosen while it is still there: a clip, a title or a song.
       const doc = edited.document;
       const still = (id: string) => id.startsWith("title:") ? (doc.titles ?? []).some(t => `title:${t.id}` === id)
-        : id.startsWith("song:") ? Number(id.slice(5)) < songsOf(doc).length
-          : doc.main.some(item => "id" in item && item.id === id);
+        : findClip(doc, id) !== null;
       const selected = state.active === project.path && state.selected && still(state.selected) ? state.selected : null;
       return {
         open: true, busy: false, error: edited.problem ? `这个工程现在放不了：${edited.problem}` : null, active: project.path, selected,
@@ -292,7 +302,7 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
 
   /**
    * Files dropped together go in together; when that is refused, one file that cannot go in does
-   * not keep the others out: each goes on its own (the slots after a refused one move up), and the
+   * not keep the others out: each goes on its own, and the
    * ones refused are named with why. True when any went in.
    */
   const editEach = async (path: string, ops: LaneOp[]): Promise<boolean> => {
@@ -301,9 +311,8 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
     const refused: string[] = [];
     let any = false;
     for (const op of ops) {
-      const shifted = (op.op === "add" || op.op === "add_song") && op.index !== undefined ? { ...op, index: op.index - refused.length } : op;
-      if (await get().edit([shifted], path)) { any = true; continue; }
-      const src = op.op === "add" ? op.clip.src : op.op === "add_song" ? op.song.src : "";
+      if (await get().edit([op], path)) { any = true; continue; }
+      const src = op.op === "add" ? op.clip.src : "";
       refused.push(`${fileName(src)}：${get().error ?? ""}`);
     }
     set({ error: refused.length ? `没放进去：${refused.join("；")}` : null });
@@ -357,24 +366,26 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       const asSound = sound && !tracks.some(isSongTrack);
       const songs = tracks.filter(track => isSongTrack(track) || (asSound && isVideoTrack(track.format)));
       const pictures = tracks.filter(track => !songs.includes(track) && isPictureTrack(track));
-      if (songs.length) {
-        const title = `${songs[0].title || "未命名"} VJ`;
-        await create(songs[0].path, title, [
-          { op: "new", title, song: songOf(songs[0]) },
-          ...songs.slice(1).map(song => ({ op: "add_song" as const, song: songOf(song) })),
-        ]);
-        // The pictures go in once the songs are there and their lengths known, from the start.
-        const made = get().active;
-        if (pictures.length && made) await get().placeTracks(made, pictures, 0);
-      } else if (pictures.length) {
-        const title = `${pictures[0].title || "未命名"} 剪辑`;
-        const adds = pictures.map(picture => ({ op: "add" as const, clip: clipOf(picture, false) }));
-        if (await create(pictures[0].path, title, [{ op: "new", title }, ...adds]) || adds.length < 2) return;
+      const first = songs[0] ?? pictures[0];
+      if (!first) return;
+      const title = songs.length ? `${songs[0].title || "未命名"} VJ` : `${pictures[0].title || "未命名"} 剪辑`;
+      // Songs one after another in a sound track; pictures one after another in a picture track,
+      // without their own sound when there are songs.
+      const adds: LaneOp[] = [
+        ...songs.map(song => ({ op: "add" as const, clip: songOf(song), kind: "sound" as const })),
+        ...pictures.map(picture => ({ op: "add" as const, clip: clipOf(picture, songs.length > 0), kind: "picture" as const })),
+      ];
+      let made = await create(first.path, title, [{ op: "new", title }, ...adds]);
+      if (!made && adds.length > 1) {
         // One of them could not go in: the project is made without them, then each is put in on its own.
-        const made = await create(pictures[0].path, title, [{ op: "new", title }]);
+        made = await create(first.path, title, [{ op: "new", title }]);
         const path = get().active;
         if (made && path) await editEach(path, adds);
       }
+      // Each video put under songs is looked for in them, and moved there when it is found for sure.
+      const now = get().projects.find(p => p.path === get().active);
+      if (!made || !now || !songs.length || !pictures.length) return;
+      for (const track of now.doc.tracks.filter(t => t.kind === "picture")) for (const clip of track.clips) void get().calibrate(clip.id, true);
     },
     activate: path => set({ active: path, selected: null, error: null }),
     closeProject(path) {
@@ -402,59 +413,42 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
         }
       });
     },
-    async placeTracks(path, tracks, at, sound = false) {
+    async placeTracks(path, tracks, place) {
       // A project dropped in is opened, as a page of its own, not put inside another.
       for (const project of tracks.filter(track => isProjectTrack(track.format))) await get().openTrack(project);
       const rest = tracks.filter(track => !isProjectTrack(track.format));
       if (rest.length === 0) return;
-      // Songs and videos dropped together each go to their own lane: only videos alone, let go on
-      // the sound lane, are taken for their sound.
-      const asSound = sound && !rest.some(isSongTrack);
+      // Songs and videos dropped together each go to their own kind of track: only videos alone,
+      // let go on a sound track, are taken for their sound.
+      const asSound = Boolean(place.sound) && !rest.some(isSongTrack);
       const heard = (track: Track) => isSongTrack(track) || (asSound && isVideoTrack(track.format));
       const project = path ? get().projects.find(p => p.path === path) : undefined;
-      if (!project) { await get().createFrom(rest, sound); return; }
-      const { doc, layout, grid } = project;
+      if (!project) { await get().createFrom(rest, asSound); return; }
+      const { doc, grid } = project;
       const songs = rest.filter(heard), pictures = rest.filter(track => !heard(track) && isPictureTrack(track));
-      const placed = layout.songs ?? [];
-      // Songs and pictures at once: the songs first, then the pictures over the song lane as it is
-      // then, with every song's length known (the library may not have had it).
-      if (songs.length && pictures.length) {
-        await get().placeTracks(project.path, songs, at);
-        await get().placeTracks(project.path, pictures, at);
-        return;
-      }
+      const vj = songsOf(doc).length > 0 || songs.length > 0;
       const ops: LaneOp[] = [];
-      let index = placed.filter(s => s.at + s.length / 2 < at).length;
-      for (const song of songs) ops.push({ op: "add_song", song: songOf(song), index: index++ });
-      if (pictures.length) {
-        if (placed.length > 0) {
-          // In a VJ a picture goes in at the bar where it is let go, over whatever is there, as far
-          // as the songs reach.
-          const end = placed.reduce((sum, s) => sum + s.length, 0);
-          // At the end: after the last picture, not back at the last bar over it.
-          const from = at >= LANE_END ? layout.main_end : snapToBar(grid?.downbeats ?? [], at);
-          let place = Math.min(from, Math.max(0, end - 0.1));
-          if (end - place <= 0.05) { get().fail("画面已经铺到最后一首歌的结尾了"); return; }
-          for (const picture of pictures) {
-            // A picture whose length the library does not know runs to the end of the songs.
-            const out = Math.round(Math.min(picture.duration && picture.duration > 0 ? picture.duration : Infinity, end - place) * 1000) / 1000;
-            if (out <= 0.05) break;
-            ops.push({ op: "add", clip: { ...clipOf(picture, true), out }, at: Math.round(place * 1000) / 1000, over: true });
-            place += out;
-          }
-        } else {
-          let slot = layout.main.filter(item => item.at + item.length / 2 < at).length;
-          for (const picture of pictures) ops.push({ op: "add", clip: clipOf(picture, false), index: slot++ });
+      /** One after another from `from` (each where the one before ends, as far as the library knows its length). */
+      const run = (items: Track[], kind: "sound" | "picture", track: string | undefined, from: number | undefined, clip: (t: Track) => NewClip) => {
+        let at = from;
+        for (const item of items) {
+          ops.push({ op: "add", clip: clip(item), kind, ...(track ? { track } : {}), ...(at !== undefined ? { at: Math.round(at * 1000) / 1000 } : {}) });
+          // A length the library does not know: the next goes after the last clip there.
+          at = at !== undefined && item.duration && item.duration > 0 ? at + item.duration : undefined;
         }
-      }
+      };
+      const at = place.at >= LANE_END ? undefined : place.at;
+      run(songs, "sound", place.song, at, songOf);
+      // In a project with songs a picture goes in at the bar where it is let go, without its own sound.
+      run(pictures, "picture", place.picture, at !== undefined && vj ? snapToBar(grid?.downbeats ?? [], at) : at, picture => clipOf(picture, vj));
       if (ops.length === 0) return;
-      const before = new Set(doc.main.map(item => ("id" in item ? item.id : "")));
+      const before = new Set(doc.tracks.flatMap(track => track.clips.map(clip => clip.id)));
       if (!(await editEach(project.path, ops)) || !pictures.length) return;
-      // Each video dropped into a VJ is looked for in its song and moved there when it is found for sure.
+      // Each video put under songs is looked for in them, and moved there when it is found for sure.
       const now = get().projects.find(p => p.path === project.path);
       if (!now || songsOf(now.doc).length === 0 || get().active !== project.path) return;
-      for (const item of now.doc.main) {
-        if ("id" in item && !before.has(item.id)) void get().calibrate(item.id, true);
+      for (const track of now.doc.tracks.filter(t => t.kind === "picture")) {
+        for (const clip of track.clips) if (!before.has(clip.id)) void get().calibrate(clip.id, true);
       }
     },
     undo: () => inTurn(() => turnBack("past")),
@@ -474,7 +468,7 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
         const reply = await api.align(target.reference, before.src);
         set(state => ({ plans: { ...state.plans, [key]: { plans: reply.plans, reason: reply.reason } } }));
         const now = get().projects.find(p => p.path === project.path);
-        const still = now?.doc.main.find((item): item is LaneClip => !isGap(item) && item.id === clipId);
+        const still = now ? findClip(now.doc, clipId)?.clip : undefined;
         // A plan sure enough goes in by itself, unless the clip was changed meanwhile.
         if (auto && reply.plans[0]?.auto && still && still.in === before.in && still.out === before.out && get().active === project.path) {
           await get().applyPlan(clipId, reply.plans[0]);
@@ -489,7 +483,7 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       const project = get().projects.find(p => p.path === get().active);
       const target = project && songUnder(project, clipId);
       if (!target) return;
-      const ops = alignedOps(target.clip, plan, target.song);
+      const ops = alignedOps(target.clip, target.track, plan, target.song);
       if (ops.length && await get().edit(ops)) {
         set(state => {
           const { [alignKey(project.path, clipId, target.clip.src)]: _gone, ...plans } = state.plans;
@@ -502,15 +496,15 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
 
 /** A clip of the project with the song it starts over, and how to name that song to the aligner. */
 function songUnder(project: LaneProject, clipId: string) {
-  const clip = project.doc.main.find((item): item is LaneClip => !isGap(item) && item.id === clipId);
-  const placed = project.layout.main.find(item => item.id === clipId);
+  const found = findClip(project.doc, clipId);
   const songs = project.layout.songs ?? [];
-  if (!clip || !placed || songs.length === 0) return null;
-  const middle = placed.at + placed.length / 2;
+  if (!found || songs.length === 0) return null;
+  const { clip, track } = found;
+  const middle = clip.at + clipLength(clip) / 2;
   const n = songs.findIndex(song => middle < song.at + song.length);
   const song = songs[n === -1 ? songs.length - 1 : n];
   const id = project.songIds[song.index];
-  return { clip, song, reference: id !== null && id !== undefined ? String(id) : song.src };
+  return { clip, track: track.id, song, reference: id !== null && id !== undefined ? String(id) : song.src };
 }
 
 /** The project in view. */

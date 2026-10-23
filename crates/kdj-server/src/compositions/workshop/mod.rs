@@ -6,6 +6,7 @@ pub mod kdjv;
 pub mod lanes;
 mod render;
 pub mod routes;
+pub mod tracks;
 use super::media;
 use crate::state::AppState;
 use anyhow::{bail, Context, Result};

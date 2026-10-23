@@ -1,13 +1,17 @@
 /**
- * The editor's side of a `.kdjv` 2 project (docs/kdjv.md, "格式 2"): the document, the operations
- * the server applies to it (crates/kdj-server/src/compositions/workshop/lanes.rs) and where
- * everything in it sits. The editor never writes the file itself: every key sends operations,
- * and what comes back is the document as saved.
+ * The editor's side of a `.kdjv` 3 project (docs/kdjv.md, "格式 3"): free tracks. The document,
+ * the operations the server applies to it (crates/kdj-server/src/compositions/workshop/tracks.rs)
+ * and where everything in it sits. The editor never writes the file itself: every key sends
+ * operations, and what comes back is the document as saved.
  */
 
+export type TrackKind = "picture" | "sound";
+
+/** One clip of a track: `at` where it starts in the project, `in`/`out` the part of its file. */
 export interface LaneClip {
   id: string;
   src: string;
+  at: number;
   in?: number;
   out: number;
   speed?: number;
@@ -20,9 +24,23 @@ export interface LaneClip {
   fill?: boolean;
   /** Fractions taken off: left, top, right, bottom. */
   crop?: [number, number, number, number];
+  /** Seconds of the project it fades in and out over (over another track's clip: a crossfade). */
+  fade_in?: number;
+  fade_out?: number;
 }
-export type LaneItem = LaneClip | { gap: number };
-export type BranchSide = "out" | "in";
+/** A track: picture tracks cover the ones below them; every sound track is heard. */
+export interface LaneTrack {
+  id: string;
+  kind: TrackKind;
+  name?: string;
+  /** A picture track not shown. */
+  hidden?: boolean;
+  /** A track not heard. */
+  muted?: boolean;
+  clips: LaneClip[];
+}
+/** Tracks side by side shown as one row; nothing in them changes. */
+export interface LaneFold { id: string; tracks: string[] }
 export interface LaneMarker { at: number; name?: string }
 /** A title (字幕): its text, drawn as a picture (`src`), over the project from `at` for `length`. */
 export interface LaneTitle {
@@ -33,29 +51,24 @@ export interface LaneTitle {
 export interface ExportOptions {
   width?: number; height?: number; fps?: number; quality?: number; from?: number; to?: number; audio_only?: boolean;
 }
-export interface LaneBranch { clip: string; side: BranchSide; length: number; opacity?: number; fade?: boolean }
-export interface LaneSong { src: string; in?: number; out: number; volume?: number }
 export interface LaneDocument {
-  kdjv: 2;
+  kdjv: 3;
   title: string;
-  song?: LaneSong | null;
-  /** Several songs one after another (one song is written as `song`). */
-  songs?: LaneSong[];
-  main: LaneItem[];
-  branches?: LaneBranch[];
+  canvas?: { width: number; height: number; fps?: number };
+  tracks: LaneTrack[];
+  folds?: LaneFold[];
   markers?: LaneMarker[];
   titles?: LaneTitle[];
   [key: string]: unknown;
 }
 
-/** Where each stretch of the main lane and each branch is, in seconds of the project. */
+/** Where everything is, in seconds of the project. */
 export interface LaneLayout {
   duration: number;
-  main_end: number;
-  main: Array<{ index: number; at: number; length: number; gap?: true; id?: string; src?: string }>;
-  branches: Array<{ clip: string; side: BranchSide; at: number; length: number }>;
-  /** The song lane: each song's place in the project and where in its file it starts. */
-  songs?: Array<{ index: number; at: number; length: number; src: string; in: number }>;
+  tracks: Array<{ index: number; id: string; kind: TrackKind; clips: Array<{ id: string; src: string; at: number; length: number; in: number; out: number }> }>;
+  folds: LaneFold[];
+  /** The songs the bar lines come from: the first sound track's clips. */
+  songs: Array<{ index: number; at: number; length: number; src: string; in: number }>;
 }
 
 export interface LaneEdited {
@@ -63,7 +76,7 @@ export interface LaneEdited {
   track_id: number | null;
   /** The first song's own library row (its bar lines), when it is in the library. */
   song_track_id: number | null;
-  /** Each song's library row, in the order of the song lane. */
+  /** Each song's library row, in the order of `layout.songs`. */
   song_track_ids?: Array<number | null>;
   document: LaneDocument;
   layout: LaneLayout;
@@ -74,35 +87,51 @@ export interface LaneEdited {
   problem?: string | null;
 }
 
-/** One operation (lanes.rs `Op`). */
+/** A clip as it is put in: no id yet, and `out` may be left to the server, which measures the file. */
+export type NewClip = Partial<Omit<LaneClip, "id" | "at">> & { src: string };
+
+/** One operation (tracks.rs `Op`). */
 export type LaneOp =
-  | { op: "new"; title: string; song?: NewLaneSong | null; canvas?: { width: number; height: number; fps?: number } }
+  | { op: "new"; title: string; canvas?: { width: number; height: number; fps?: number } }
   | { op: "title"; title: string }
-  | { op: "add"; clip: Partial<LaneClip> & { src: string; out?: number }; at?: number; index?: number; over?: boolean }
-  | { op: "remove"; id: string }
-  | { op: "move"; id: string; index: number }
+  | { op: "add_track"; kind: TrackKind; index?: number; name?: string }
+  | { op: "remove_track"; id: string }
+  | { op: "move_track"; id: string; index: number }
+  | { op: "set_track"; id: string; fields: { name?: string | null; hidden?: boolean; muted?: boolean } }
+  | { op: "add"; clip: NewClip; track?: string; new_track?: number; kind?: TrackKind; at?: number }
+  | { op: "move"; id: string; at: number; track?: string; new_track?: number }
+  | { op: "remove"; id: string; ripple?: boolean }
   | { op: "trim"; id: string; in?: number; out?: number }
   | { op: "split"; id: string; at: number }
-  | { op: "set"; id: string; fields: Partial<Pick<LaneClip, "speed" | "volume" | "muted" | "x" | "y" | "scale" | "opacity" | "fill" | "crop">> }
-  | { op: "move_to"; id: string; at: number; over?: boolean }
+  | { op: "set"; id: string; fields: Partial<Pick<LaneClip, "speed" | "volume" | "muted" | "x" | "y" | "scale" | "opacity" | "fill" | "crop" | "fade_in" | "fade_out">> }
+  | { op: "fold"; tracks: string[] }
+  | { op: "unfold"; id: string }
   | { op: "restore"; document: LaneDocument }
   | { op: "markers"; markers: LaneMarker[] }
   | { op: "add_title"; title: Omit<LaneTitle, "id"> }
   | { op: "set_title"; id: string; fields: Partial<Omit<LaneTitle, "id">> }
-  | { op: "remove_title"; id: string }
-  | { op: "gap"; index: number; length: number }
-  | { op: "branch"; clip: string; side: BranchSide; length: number; opacity?: number; fade?: boolean }
-  | { op: "unbranch"; clip: string; side: BranchSide }
-  | { op: "add_song"; song: NewLaneSong; index?: number }
-  | { op: "remove_song"; index: number }
-  | { op: "move_song"; from: number; to: number }
-  | { op: "set_song"; index: number; fields: { volume?: number } };
+  | { op: "remove_title"; id: string };
 
-/** A song (or a clip) put in without `out` is given its file's whole length by the server, which
- *  measures the file: the library does not always know it. */
-export type NewLaneSong = Omit<LaneSong, "out"> & { out?: number };
+/** Every clip of a document with the track it is in. */
+export function allClips(doc: LaneDocument): Array<{ clip: LaneClip; track: LaneTrack }> {
+  return doc.tracks.flatMap(track => track.clips.map(clip => ({ clip, track })));
+}
 
-export const isGap = (item: LaneItem): item is { gap: number } => "gap" in item;
+/** The clip `id` and its track, if it is there. */
+export function findClip(doc: LaneDocument, id: string | null): { clip: LaneClip; track: LaneTrack } | null {
+  if (!id) return null;
+  return allClips(doc).find(found => found.clip.id === id) ?? null;
+}
+
+/** How long a clip lasts in the project. */
+export const clipLength = (clip: Pick<LaneClip, "in" | "out" | "speed">) => (clip.out - (clip.in ?? 0)) / (clip.speed ?? 1);
+
+/** A track's name as the editor shows it: its own, else 画面 1, 声音 2… by its place among its kind. */
+export function trackName(doc: LaneDocument, track: LaneTrack): string {
+  if (track.name) return track.name;
+  const n = doc.tracks.filter(t => t.kind === track.kind).indexOf(track) + 1;
+  return `${track.kind === "sound" ? "声音" : "画面"} ${n}`;
+}
 
 /** Where something let go anywhere but on a lane goes: after the last thing in its own lane. */
 export const LANE_END = Number.MAX_SAFE_INTEGER;
@@ -140,35 +169,6 @@ export function fileLabel(src: string): string {
   return name.replace(/\.[^.]+$/, "");
 }
 
-/**
- * The operations that branch `clip` on `side` for `length` seconds. A branch plays more of the
- * clip's file than the clip does (after its out, or before its in); when the file has not that
- * much more, the clip gives it up: it is cut back by as much, and the branch plays what was cut.
- * In a VJ a clip whose start is cut back also starts later by as much, so that its picture stays
- * on the song's beat. `sourceLength` is the file's length, when known.
- */
-export function branchOps(clip: LaneClip, side: BranchSide, length: number, vj: boolean, at: number,
-  sourceLength: number | undefined, keep: { opacity?: number; fade?: boolean } = {}): LaneOp[] {
-  const speed = clip.speed ?? 1;
-  const need = length * speed;
-  const r = (value: number) => Math.round(value * 1000) / 1000;
-  const branch: LaneOp = { op: "branch", clip: clip.id, side, length: r(length), ...keep };
-  if (side === "out") {
-    const spare = sourceLength === undefined ? Infinity : sourceLength - clip.out;
-    if (spare + 0.05 >= need) return [branch];
-    const out = r(clip.out - (need - Math.max(0, spare)));
-    if (out - (clip.in ?? 0) <= 0.1) return [branch];
-    return [{ op: "trim", id: clip.id, out }, branch];
-  }
-  const spare = clip.in ?? 0;
-  if (spare + 1e-6 >= need) return [branch];
-  const from = r(need);
-  if (clip.out - from <= 0.1) return [branch];
-  const ops: LaneOp[] = [{ op: "trim", id: clip.id, in: from }];
-  if (vj) ops.push({ op: "move_to", id: clip.id, at: r(at + (from - spare) / speed) });
-  return [...ops, branch];
-}
-
 /** One way a video lies in a song, as `/api/cli/align` answers it: ref = ref_at + (video - video_in) / speed. */
 export interface AlignPlan {
   id: string;
@@ -181,10 +181,10 @@ export interface AlignPlan {
 
 /**
  * The operations that put `clip` where `plan` says it lies in the song placed at `song`: the clip
- * leaves its place and each matched stretch goes in at its time, kept inside that song.
+ * leaves its place and each matched stretch goes into its track at its time, kept inside that song.
  */
-export function alignedOps(clip: LaneClip, plan: AlignPlan, song: { at: number; in: number; length: number }): LaneOp[] {
-  const { id: _id, in: _in, out: _out, speed: _speed, ...keep } = clip;
+export function alignedOps(clip: LaneClip, track: string, plan: AlignPlan, song: { at: number; in: number; length: number }): LaneOp[] {
+  const { id: _id, at: _at, in: _in, out: _out, speed: _speed, ...keep } = clip;
   const ops: LaneOp[] = [{ op: "remove", id: clip.id }];
   for (const segment of plan.segments) {
     const speed = segment.speed > 0 ? segment.speed : 1;
@@ -195,8 +195,7 @@ export function alignedOps(clip: LaneClip, plan: AlignPlan, song: { at: number; 
     if (end > limit) to -= (end - limit) * speed;
     if ((to - from) / speed <= 0.05) continue;
     const round = (value: number) => Math.round(value * 1000) / 1000;
-    ops.push({ op: "add", clip: { ...keep, src: clip.src, in: round(from), out: round(to), speed: Math.round(speed * 10000) / 10000 }, at: round(at) });
+    ops.push({ op: "add", clip: { ...keep, src: clip.src, in: round(from), out: round(to), speed: Math.round(speed * 10000) / 10000 }, track, at: round(at) });
   }
   return ops.length > 1 ? ops : [];
 }
-

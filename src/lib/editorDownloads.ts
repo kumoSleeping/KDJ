@@ -124,7 +124,7 @@ async function place(item: EditorDownload, task: DownloadTask): Promise<void> {
   const project = item.path ? useLaneEditor.getState().projects.find(p => p.path === item.path) : undefined;
   const songs = project?.layout.songs ?? [];
   const slot = songs.filter(s => s.at + s.length / 2 < item.at).length;
-  await editor.placeTracks(project ? project.path : null, [track], item.at, item.lane === "song");
+  await editor.placeTracks(project ? project.path : null, [track], { at: item.at, sound: item.lane === "song" });
   // The rest of the drop goes after it: into the project it went into (or started), past it.
   const into = project ? project.path : useLaneEditor.getState().active;
   const now = useLaneEditor.getState().projects.find(p => p.path === into)?.layout.songs ?? [];
