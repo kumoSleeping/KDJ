@@ -266,6 +266,17 @@
   cursor: pointer;
 }
 .kd-lanes-marker:focus-visible { outline: 1px solid var(--kd-text); outline-offset: 2px; }
+/* The edge a dragged clip or title is aligned to, across every track. */
+.kd-lanes-guide {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  margin-left: -0.5px;
+  background: var(--kd-text);
+  opacity: 0.5;
+  pointer-events: none;
+}
 .kd-lanes-playhead, .kd-lanes-drop {
   position: absolute;
   top: 0;

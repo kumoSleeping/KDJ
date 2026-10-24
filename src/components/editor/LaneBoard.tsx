@@ -8,8 +8,9 @@
  *
  * Everything on the tracks is handled directly: a press chooses a clip (the playhead stays where
  * it is), a drag moves it, a drag at either end pulls that end, the dots at its top corners pull
- * its fades; in a project with songs what is dragged lands on their beats unless Alt is held or N
- * turned that off. A clip dragged up or down out of its own track goes into the track it is held
+ * its fades. What is dragged lines up: its start or end, near another clip's or title's start or end
+ * on any track, a marker, the playhead or the in and out points, lands on it (always, a line shows
+ * where); else, in a project with songs, on their beats unless N turned that off. Alt lets it free. A clip dragged up or down out of its own track goes into the track it is held
  * over, if that is a track of its kind; past the edge of a track (or over a track of the other
  * kind) it makes a new track there. A picture never goes into a sound track, nor sound into a
  * picture track. A press anywhere else puts the playhead there, and dragging moves it along.
@@ -41,6 +42,8 @@ const EDGE_PX = 7;
 const DRAG_PX = 3;
 /** How near a track's edge (or past it) a clip held makes a new track there, in pixels. */
 const NEW_TRACK_PX = 7;
+/** A dragged clip's or title's start or end this close to another edge, in pixels, lands on it. */
+const SNAP_PX = 8;
 /** The picture tracks' frames: drawn this high (twice for sharp screens), 16:9 wide. */
 const FRAME_PX = 40;
 const FRAME_W = Math.round(FRAME_PX * 16 / 9);
@@ -368,17 +371,49 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     return null;
   };
   const lengthOf = (clip: LaneClip) => (clip.out - (clip.in ?? 0)) / (clip.speed ?? 1);
-  /** Where a clip or title stands after `drag` so far: its start and length. */
-  const shownBy = (now: Drag | null, kind: Drag["kind"], key: string, at: number, length: number) => {
-    if (!now || !now.moved || now.kind !== kind || now.key !== key || now.grip === "fade_in" || now.grip === "fade_out") return { at, length };
-    // Held straight up or down it keeps its time; moved along, it lands on the beat.
-    if (now.grip === "move") return { at: Math.abs(now.x - now.x0) <= DRAG_PX ? at : snap(at + now.dt, now.free), length };
-    if (now.grip === "in") {
-      const start = Math.min(at + length - 0.1, snap(at + now.dt, now.free));
-      return { at: start, length: at + length - start };
+  /**
+   * The edge within SNAP_PX of one of `points` that a dragged clip or title meets: another clip's
+   * or title's start or end on any track, a marker, the playhead, the in and out points, 0. Always
+   * on (Alt lets it free); `by` is the shift that lands on it.
+   */
+  const meet = (points: number[], kind: Drag["kind"], key: string, free: boolean): { by: number; at: number } | null => {
+    if (free) return null;
+    const edges = [0, ...markers.map(m => m.at)];
+    for (const track of doc.tracks) for (const c of track.clips) {
+      if (kind !== "clip" || c.id !== key) edges.push(c.at, c.at + lengthOf(c));
     }
-    const end = Math.max(at + 0.1, snap(at + length + now.dt, now.free));
-    return { at, length: end - at };
+    for (const t of titles) if (kind !== "title" || t.id !== key) edges.push(t.at, t.at + t.length);
+    if (playhead !== null) edges.push(playhead);
+    if (range?.in !== undefined) edges.push(range.in);
+    if (range?.out !== undefined) edges.push(range.out);
+    const reach = SNAP_PX / width() * span;
+    let best: { by: number; at: number } | null = null;
+    for (const edge of edges) for (const point of points) {
+      const by = edge - point;
+      if (Math.abs(by) <= reach && (!best || Math.abs(by) < Math.abs(best.by))) best = { by, at: edge };
+    }
+    return best;
+  };
+  /**
+   * Where a clip or title stands after `drag` so far: its start and length, and the edge it is
+   * aligned to, if any. An edge in reach comes first, else the beat.
+   */
+  const shownBy = (now: Drag | null, kind: Drag["kind"], key: string, at: number, length: number): { at: number; length: number; edge?: number } => {
+    if (!now || !now.moved || now.kind !== kind || now.key !== key || now.grip === "fade_in" || now.grip === "fade_out") return { at, length };
+    if (now.grip === "move") {
+      // Held straight up or down it keeps its time; moved along, its start or its end meets an edge, else the beat.
+      if (Math.abs(now.x - now.x0) <= DRAG_PX) return { at, length };
+      const moved = at + now.dt, edge = meet([moved, moved + length], kind, key, now.free);
+      return edge ? { at: Math.max(0, moved + edge.by), length, edge: edge.at } : { at: snap(moved, now.free), length };
+    }
+    if (now.grip === "in") {
+      const pulled = at + now.dt, edge = meet([pulled], kind, key, now.free);
+      const start = Math.min(at + length - 0.1, edge ? edge.at : snap(pulled, now.free));
+      return { at: start, length: at + length - start, ...(edge ? { edge: edge.at } : {}) };
+    }
+    const pulled = at + length + now.dt, edge = meet([pulled], kind, key, now.free);
+    const end = Math.max(at + 0.1, edge ? edge.at : snap(pulled, now.free));
+    return { at, length: end - at, ...(edge ? { edge: edge.at } : {}) };
   };
   /** The fade a corner dot pulled so far, in seconds of the project. */
   const fadeBy = (now: Drag, clip: LaneClip) => {
@@ -463,6 +498,16 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     // A key (Enter on a focused clip) chooses it too.
     onClick: (event: { detail: number }) => { if (event.detail === 0) select(selected === id ? null : id); },
   });
+  /** The edge what is dragged is aligned to, drawn across the tracks while it is. */
+  const guide = (() => {
+    if (!drag?.moved) return undefined;
+    if (drag.kind === "title") {
+      const title = titles.find(t => t.id === drag.key);
+      return title ? shownBy(drag, "title", drag.key, title.at, title.length).edge : undefined;
+    }
+    const found = clipById(drag.key);
+    return found ? shownBy(drag, "clip", drag.key, found.clip.at, lengthOf(found.clip)).edge : undefined;
+  })();
   /** The clip being moved, where it would go (for the ghost drawn there). */
   const held = drag?.moved && drag.kind === "clip" && drag.grip === "move" ? clipById(drag.key) : null;
   const heldTo = held && drag ? destination(held.clip.id, drag.x, drag.y) : null;
@@ -738,6 +783,7 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
       </div>)}
       <div className="kd-lanes-row-wrap" data-end="">{newTrackLine(doc.tracks.length)}</div>
       {head !== null && <span className="kd-lanes-playhead" style={{ left: pct(head, span) }} />}
+      {guide !== undefined && <span className="kd-lanes-guide" style={{ left: pct(guide, span) }} />}
     </div>
    </div>
   </div>;
