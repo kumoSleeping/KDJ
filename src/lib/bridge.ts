@@ -255,6 +255,10 @@ async function createTauriBridge(): Promise<KdjBridge> {
       const picked = await tauriInvoke<unknown>("pick_folders");
       return Array.isArray(picked) ? picked.filter((p): p is string => typeof p === "string") : [];
     },
+    pickMediaFiles: desktop ? async () => {
+      const picked = await tauriInvoke<unknown>("pick_media_files");
+      return Array.isArray(picked) ? picked.filter((p): p is string => typeof p === "string") : [];
+    } : undefined,
     onMediaDrop: desktop ? async handler => {
       const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
       return getCurrentWebviewWindow().listen<import("./mediaDrop").NativeMediaDrop>("kdj:media-drop", e => handler(e.payload));

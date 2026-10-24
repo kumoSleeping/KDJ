@@ -1195,6 +1195,8 @@ export interface KdjBridge {
   installMediaTools?: (action: "download" | "archive" | "folder") => Promise<boolean>;
   mediaToolsProgress?: () => Promise<FfmpegInstallProgress>;
   pickFolders: () => Promise<string[]>;
+  /** 桌面：选音频/视频文件直接入库；取消返回 `[]`。手机和浏览器没有这个入口。 */
+  pickMediaFiles?: () => Promise<string[]>;
   /** 桌面主窗口接收系统拖入的文件和文件夹（src/lib/mediaDrop.ts）。 */
   onMediaDrop?: (handler: (drop: import("./lib/mediaDrop").NativeMediaDrop) => void) => Promise<() => void>;
   /** 安卓：媒体读取权限（READ_MEDIA_AUDIO）是否已授予；桌面恒为 true。 */

@@ -1071,6 +1071,39 @@ async fn pick_folders(app: tauri::AppHandle) -> Vec<String> {
     }
 }
 
+/// 选音频/视频文件直接入库。Windows 的选文件夹对话框不列文件，用户停在歌所在的
+/// 目录里只看见"没有与搜索条件匹配的项"，以为 KDJ 认不出这首歌；这里给的是
+/// 能看见文件的那个对话框。后缀表与曲库扫描同一份，取消返回 `[]`。
+#[cfg(desktop)]
+#[tauri::command]
+async fn pick_media_files(app: tauri::AppHandle) -> Vec<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let extensions: Vec<&str> = kdj_providers::tags::AUDIO_EXTENSIONS
+        .iter()
+        .chain(kdj_providers::tags::VIDEO_EXTENSIONS)
+        .copied()
+        .collect();
+    app.dialog()
+        .file()
+        .add_filter("音乐", &extensions)
+        .pick_files(move |picked| {
+            let _ = tx.send(picked);
+        });
+    let selected: Vec<String> = rx
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|file| file.into_path().ok())
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    for path in &selected {
+        app.state::<Bridge>().grant_picked_path(Path::new(path));
+    }
+    selected
+}
+
 /// 移动端可写、可扫的曲库候选根目录。
 #[cfg(any(target_os = "android", target_os = "ios"))]
 fn mobile_library_roots(app: &tauri::AppHandle) -> Vec<String> {
@@ -2343,6 +2376,7 @@ pub fn run() {
         media_tools::media_tools_progress,
         pick_folder,
         pick_folders,
+        pick_media_files,
         window_control,
         set_window_background,
         set_desktop_lyrics,

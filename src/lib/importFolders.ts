@@ -22,3 +22,8 @@ export async function importFolders(paths: string[]): Promise<void> {
 export async function pickAndScanFolders(): Promise<void> {
   await importFolders(await window.kdj?.pickFolders() ?? []);
 }
+
+/** 选中的文件只入库，不登记成曲库根；不在任何根下的歌在「全部曲目」里。 */
+export async function pickAndScanFiles(): Promise<void> {
+  await importFolders(await window.kdj?.pickMediaFiles?.() ?? []);
+}

@@ -14,6 +14,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  FileMusic,
   Folder,
   FolderDown,
   FolderInput,
@@ -37,7 +38,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../../lib/api";
-import { pickAndScanFolders } from "../../lib/importFolders";
+import { pickAndScanFiles, pickAndScanFolders } from "../../lib/importFolders";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import {
   FOLDER_DROP_PATH_ATTR,
@@ -1099,8 +1100,21 @@ export function NarrowFolderRail({
           void pickAndScanFolders().catch((reason: unknown) => setError((reason as Error).message));
         }}
       >
-        <RailContent icon={<FolderPlus {...RAIL_ICON} />} label="添加音乐" />
+        <RailContent icon={<FolderPlus {...RAIL_ICON} />} label="添加文件夹" />
       </button>
+      {window.kdj?.pickMediaFiles && (
+        <button
+          type="button"
+          title={error || "添加音乐文件"}
+          aria-label="添加音乐文件"
+          onClick={() => {
+            setError("");
+            void pickAndScanFiles().catch((reason: unknown) => setError((reason as Error).message));
+          }}
+        >
+          <RailContent icon={<FileMusic {...RAIL_ICON} />} label="添加文件" />
+        </button>
+      )}
       <button
         type="button"
         {...{ [SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR]: "" }}
@@ -1620,6 +1634,14 @@ export function FolderTree({
       await pickAndScanFolders();
     } catch (error) {
       setNotice(`添加文件夹失败：${(error as Error).message}`);
+    }
+  };
+  const addFiles = async () => {
+    setNotice("");
+    try {
+      await pickAndScanFiles();
+    } catch (error) {
+      setNotice(`添加文件失败：${(error as Error).message}`);
     }
   };
   // 扫描结束（scan.progress 到 done → refreshFolders）后清掉"导入中"标记
@@ -2665,7 +2687,7 @@ export function FolderTree({
           suppressRootClickRef.current = false;
         }}
       >
-        {/* 添加是固定入口；其余根项都在下面按用户保存的顺序渲染。 */}
+        {/* 添加文件夹 / 文件是固定入口；其余根项都在下面按用户保存的顺序渲染。 */}
         <button
           type="button"
           className="kd-folder kd-folder-action kd-folder-add"
@@ -2678,8 +2700,24 @@ export function FolderTree({
           <span className="kd-folder-icon">
             <FolderInput {...ROW_ICON} />
           </span>
-          <span className="kd-folder-name kd-truncate">添加</span>
+          <span className="kd-folder-name kd-truncate">添加文件夹</span>
         </button>
+        {window.kdj?.pickMediaFiles && (
+          <button
+            type="button"
+            className="kd-folder kd-folder-action kd-folder-add"
+            style={depthStyle(0)}
+            disabled={scanning}
+            title="选磁盘上的歌曲文件加进曲库，不在曲库文件夹里的歌在「全部曲目」里"
+            onClick={() => void addFiles()}
+          >
+            <span className="kd-folder-caret" />
+            <span className="kd-folder-icon">
+              <FileMusic {...ROW_ICON} />
+            </span>
+            <span className="kd-folder-name kd-truncate">添加文件</span>
+          </button>
+        )}
         {orderedRootItems.map((item) => (
           <div
             key={item.id}
