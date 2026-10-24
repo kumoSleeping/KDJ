@@ -400,7 +400,8 @@ export function VideoPipHost() {
   const localSwap = useLocalVideoSwap({
     // WebKit PiP is bound to the concrete source <video>. While it is open, keep that element
     // stable and use the single-video seek fallback instead of swapping it out from underneath PiP.
-    enabled: Boolean(isLocal && hostActive && !systemPip),
+    // A live project has no video of its own here: its seeks are not prepared on these elements.
+    enabled: Boolean(isLocal && hostActive && !systemPip && !live),
     trackId: session?.source === "local" ? session.trackId : null,
     desiredPlayingRef,
     getRate: () => {
@@ -754,8 +755,14 @@ export function VideoPipHost() {
         : desiredPlayingRef.current || next.source === "network" || next.autoPlay;
     desiredPlayingRef.current = shouldPlay;
     useVideoPip.getState().setError("");
-    // A live project follows the player's clock by itself; there is no video here to start.
-    if (liveProject(next)) return;
+    // A live project follows the player's clock by itself; there is no video here to start, and
+    // the one played before it is let go (useLocalVideoSwap `unload`).
+    if (liveProject(next)) {
+      pauseHostVideos();
+      localSwap.unload();
+      loadedKeyRef.current = null;
+      return;
+    }
     if (next.source === "network" && shouldUsePlatformPlayer(next)) {
       if (loadedKeyRef.current !== nextKey) {
         youtubeEmbedRef.current?.dispose();
@@ -1143,7 +1150,7 @@ export function VideoPipHost() {
       cancelAnimationFrame(frame);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, hostLifecycle, panelReady]);
+  }, [key, hostLifecycle, panelReady, Boolean(live)]);
 
   // The official player is a sibling native WKWebView, not a remote iframe inside the privileged
   // React renderer. Keep its one allowed rectangle aligned with the black slot while the KDJ
@@ -1330,6 +1337,7 @@ export function VideoPipHost() {
     const apply = () => {
       const pip = useVideoPip.getState();
       if (!pip.active || pip.mode !== "float" || pip.session?.source !== "local" || pip.session.trackId !== trackId) return;
+      if (liveProject(pip.session)) return;
       const video = activeVideo();
       if (!video || localSwap.isHoldingPosition()) return;
       const clock = getLocalVideoClock(trackId);
@@ -1459,7 +1467,8 @@ export function VideoPipHost() {
     if (isPlatformPlayer) return;
     const video = activeVideo();
     if (!video) return;
-    const stillActive = () => localSwap.isActiveVideo(video);
+    // A live project's picture is KdjvLivePicture's: these elements say nothing about it.
+    const stillActive = () => localSwap.isActiveVideo(video) && !liveProject(useVideoPip.getState().session);
     const onSize = () => {
       if (!stillActive() || !(video.videoWidth > 0) || !(video.videoHeight > 0)) return;
       const ratio = video.videoWidth / video.videoHeight;

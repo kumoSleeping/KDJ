@@ -93,9 +93,12 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     setDuration(track.duration ?? 0);
     scrubPosition.current = null;
   }, [track.id]);
+  // A project playing from its sound is drawn live (KdjvLivePicture): there is no file to load,
+  // and these elements neither prepare its seeks nor follow its clock.
+  const live = useKdjvLive(state => state.live[track.id]);
   const localSwap = useLocalVideoSwap({
-    enabled: !hidden,
-    trackId: hidden ? null : track.id,
+    enabled: !hidden && !live,
+    trackId: hidden || live ? null : track.id,
     desiredPlayingRef,
     getRate: () => getLocalVideoClock(track.id)?.rate ?? getLatestPlayerSync(track.id)?.rate ?? 1,
     onActivate: (video) => {
@@ -161,12 +164,10 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     [],
   );
 
-  // A project playing from its sound is drawn live (KdjvLivePicture): there is no file to load.
-  const live = useKdjvLive(state => state.live[track.id]);
   useEffect(() => {
-    if (live) { setDuration(live.duration); return; }
+    if (live) { localSwap.unload(); setDuration(live.duration); return; }
     localSwap.load(`local:${track.id}`, api.videoUrl(track.id));
-  }, [localSwap.load, track.id, live]);
+  }, [localSwap.load, localSwap.unload, track.id, live]);
 
   useEffect(() => {
     const onFocus = (event: Event) => {
@@ -178,7 +179,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   }, []);
 
   useEffect(() => {
-    if (hidden || !usesLocalVideoDeviceClock()) return;
+    if (hidden || live || !usesLocalVideoDeviceClock()) return;
     const apply = () => {
       const video = activeVideo();
       if (!video || localSwap.isHoldingPosition()) return;
@@ -193,7 +194,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     video?.addEventListener("seeked", apply);
     apply();
     return () => { unsubscribe(); video?.removeEventListener("loadeddata", apply); video?.removeEventListener("seeked", apply); };
-  }, [track.id, hidden, localSwap.activeSlot]);
+  }, [track.id, hidden, Boolean(live), localSwap.activeSlot]);
 
   useEffect(() => {
     const onMediaSync = (event: Event) => {
