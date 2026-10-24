@@ -122,6 +122,8 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
     cues: new WeakMap<HTMLVideoElement, Cue>(),
     // When a cued element was started (performance.now).
     started: new WeakMap<HTMLVideoElement, number>(),
+    // Elements started on their first frame just before their cut (no cue): shown at the cut.
+    primed: new WeakSet<HTMLVideoElement>(),
     // What this window's decoders take, learned as they go, in seconds: a seek to land, a start
     // to show moving frames.
     lead: { seek: 0.3, play: 0.05 },
@@ -158,7 +160,7 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
     };
     window.addEventListener(MEDIA_SYNC_EVENT, onSync);
     const sync = engine.current!;
-    const { seeks, running, revealed, motion, targets, wanted, cues, started, lead } = decoders.current;
+    const { seeks, running, revealed, motion, targets, wanted, cues, started, primed, lead } = decoders.current;
     let frame = 0, lastAlign = -Infinity, lastReport = -Infinity, shown = "";
     const seek = (video: HTMLVideoElement, target: number) => { void sync.seek(video, target).catch(() => undefined); };
     // A shown clip drifting a little is left to run: a seek would freeze and jump it on screen.
@@ -171,6 +173,7 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
     };
     const reveal = (node: HTMLVideoElement, n: number, local: number, now: number) => {
       revealed.set(node, true);
+      primed.delete(node);
       // waitMs: how long the picture of now was missing; lateMs: how far into the clip that was.
       const waited = Math.round(now - (wanted.get(node) ?? now));
       if (waited > 50) tracePlayback("kdjv-reveal", { track: trackId, clip: n, waitMs: waited, lateMs: Math.round(local * 1000) });
@@ -240,12 +243,13 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
           node.style.opacity = revealed.get(node) ? String(holding ? c.opacity : clipAlpha(c, local)) : "0";
           continue;
         }
-        if (holding) {
-          // The clip before a cut that is still settling: its last frame, still.
+        if (holding || local >= c.length) {
+          // The clip before a cut that is still settling: its last frame, still. One just ended
+          // (kept a moment, kdjvLive.ts LINGER_SEC) is out of sight and left where it stopped.
           if (!node.paused) node.pause();
           if (running.get(node)) sync.releaseClock(node);
           running.set(node, false);
-          node.style.opacity = revealed.get(node) ? String(c.opacity) : "0";
+          node.style.opacity = holding && revealed.get(node) ? String(c.opacity) : "0";
           continue;
         }
         const target = Math.max(0, sourceTime(c, local));
@@ -254,7 +258,21 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
         // Before its cut a clip runs muted and transparent on the same clock, from where its
         // source allows; one that cannot start early waits on its first frame.
         const early = local < 0 && c.in + local * speed >= 0;
-        const shouldPlay = t.playing && (local >= 0 || early) && local < c.length;
+        // One whose source starts at its in point waits paused on that first frame, and is started
+        // just before its cut by the start delay learned (lead.play): it comes in moving, where a
+        // cue at the cut held a still frame further on and sought it there.
+        const before = -lead.play * t.rate;
+        if (!t.playing || local < before - 0.25 || revealed.get(node)) primed.delete(node);
+        else if (local < 0 && !early && local >= before && !primed.has(node) && !node.seeking
+          && node.readyState >= 2 && Math.abs(node.currentTime - target) <= SETTLED_PAUSED_SEC) {
+          primed.add(node);
+          sync.setBaseRate(node, t.rate * speed);
+          started.set(node, now);
+          running.set(node, true);
+          void node.play().catch(() => undefined);
+        }
+        const leading = local < 0 && primed.has(node);
+        const shouldPlay = t.playing && (local >= 0 || early || leading) && local < c.length;
         const since = started.get(node);
         const starting = since !== undefined && now - since < START_SETTLE_MS;
         if (since !== undefined && !starting) {
@@ -274,7 +292,9 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
         if (!revealed.get(node) && local >= 0 && local < c.length) {
           if (!wanted.has(node)) wanted.set(node, now);
           const step = motion.get(node)!;
-          const settled = !node.seeking && node.readyState >= 2 && (shouldPlay
+          const settled = !node.seeking && node.readyState >= 2 && (primed.has(node)
+            ? Math.abs(target - node.currentTime) <= VISIBLE_DRIFT_SEC
+            : shouldPlay
             ? !node.paused && step.ticks >= SETTLED_TICKS && Math.abs(target - node.currentTime) <= SETTLED_PLAYING_SEC
             : Math.abs(target - node.currentTime) <= SETTLED_PAUSED_SEC);
           if (settled) reveal(node, n, local, now);

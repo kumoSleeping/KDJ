@@ -16,13 +16,23 @@ export const PREWARM_SEC = 5;
 export const HOLD_SEC = 4;
 /** Upcoming clips prepared per track. */
 const PREWARM_CLIPS = 2;
+/**
+ * While playing, a clip that has ended keeps its decoder this long: letting it go unloads the
+ * element, which on the frame of the cut itself held up the clip coming in.
+ */
+export const LINGER_SEC = 1.5;
 
-/** The clips to hold a decoder for at `t`: those on screen, and while playing the next few. */
+/**
+ * The clips to hold a decoder for at `t`: those on screen, and while playing the next few and
+ * the ones just ended.
+ */
 export function preparedClips(project: KdjvLive, t: number, playing: boolean): number[] {
   const out: number[] = [];
   const upcoming = new Map<number, number[]>();
   project.clips.forEach((c, n) => {
-    if (t >= c.at && t < c.at + c.length) out.push(n);
+    const end = c.at + c.length;
+    if (t >= c.at && t < end) out.push(n);
+    else if (playing && t >= end && t < end + LINGER_SEC) out.push(n);
     else if (playing && c.at > t && c.at <= t + PREWARM_SEC) {
       const next = upcoming.get(c.track) ?? [];
       next.push(n);

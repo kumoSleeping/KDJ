@@ -23,6 +23,9 @@ test("a decoder is held for the clips on screen and, while playing, the next two
   assert.deepEqual(preparedClips(p, 0.5, true), [0, 1, 4], "the next cut within the prewarm, nothing further");
   assert.deepEqual(preparedClips(p, 4.9, true), [0, 1, 2, 4], "two upcoming at most on a track");
   assert.deepEqual(preparedClips(p, 4, false), [0, 4], "a paused picture holds only what is shown");
+  assert.deepEqual(preparedClips(p, 5.5, true), [0, 1, 2, 3, 4], "the clip just ended is kept past the cut");
+  assert.deepEqual(preparedClips(p, 6.6, true), [1, 2, 3, 4], "and let go a moment later");
+  assert.deepEqual(preparedClips(p, 5.5, false), [1, 4], "a paused picture keeps no ended clip");
 });
 
 test("a clip sits where the render puts it: fitted, filled, scaled and kept on the canvas", () => {
