@@ -898,6 +898,8 @@ export function VideoPipHost() {
     let video = activeVideo();
     if (!video) return;
     video.muted = next.source === "local";
+    // The swap binds both elements picture-only (muted attribute included) before any source.
+    video.defaultMuted = video.muted;
     if (next.source === "network") video.volume = currentNetworkVolume();
     if (!hasLoadedSessionSource(loadedKeyRef.current, nextKey, next)) {
       localSynchronizerRef.current?.reset(video);

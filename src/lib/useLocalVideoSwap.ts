@@ -157,10 +157,20 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
     (video: HTMLVideoElement) => activeVideo() === video,
     [activeVideo],
   );
-  const bindVideo = useCallback((slot: Slot) => (video: HTMLVideoElement | null) => {
-    if (video) configurePictureVideo(video);
-    videoRefs.current[slot] = video;
-  }, []);
+  // One ref callback per slot for the hook's life. A new one each render makes React bind the
+  // element again on every render, and binding mutes it: the floating window re-renders on each
+  // timeupdate, so a network video it had unmuted went silent a moment after it started.
+  const slotBinders = useRef<[(video: HTMLVideoElement | null) => void, (video: HTMLVideoElement | null) => void]>([
+    (video) => {
+      if (video) configurePictureVideo(video);
+      videoRefs.current[0] = video;
+    },
+    (video) => {
+      if (video) configurePictureVideo(video);
+      videoRefs.current[1] = video;
+    },
+  ]);
+  const bindVideo = useCallback((slot: Slot) => slotBinders.current[slot], []);
 
   const cancelPending = useCallback(() => {
     transitionRef.current.clear();
