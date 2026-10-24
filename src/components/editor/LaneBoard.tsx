@@ -6,8 +6,8 @@
  * them add a track. Tracks folded together are one row that shows what is seen (an upper clip
  * covers a lower one; nothing in them changes) until the fold is opened to adjust them.
  *
- * Everything on the tracks is handled directly: a press chooses a clip (and puts the playhead
- * there), a drag moves it, a drag at either end pulls that end, the dots at its top corners pull
+ * Everything on the tracks is handled directly: a press chooses a clip (the playhead stays where
+ * it is), a drag moves it, a drag at either end pulls that end, the dots at its top corners pull
  * its fades; in a project with songs what is dragged lands on their beats unless Alt is held or N
  * turned that off. A clip dragged up or down out of its own track goes into the track it is held
  * over, if that is a track of its kind; past the edge of a track (or over a track of the other
@@ -409,15 +409,14 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     dragRef.current = next;
     setDrag(next);
   };
-  const release = (id: string) => (event: ReactPointerEvent<HTMLElement>) => {
+  const release = (id: string) => () => {
     const done = dragRef.current;
     dragRef.current = null;
     setDrag(null);
     if (!done) return;
     if (!done.moved) {
-      // A press chooses it and puts the playhead where it was pressed.
+      // A press only chooses it: the playhead stays where it plays.
       select(selected === id ? null : id);
-      seek(timeAt(event.clientX));
       return;
     }
     const ops = commit(done);
