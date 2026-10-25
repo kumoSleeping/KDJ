@@ -110,6 +110,14 @@ export type VideoPipSession =
       project?: boolean;
     };
 
+/** Both sessions show the same video, the one the host keeps loaded (VideoPipHost `sessionKey`). */
+function sameVideo(a: VideoPipSession | null, b: VideoPipSession | null): boolean {
+  if (a?.source === "network" && b?.source === "network") {
+    return a.platform === b.platform && a.bvid === b.bvid && a.page === b.page;
+  }
+  return a?.source === "local" && b?.source === "local" && a.trackId === b.trackId;
+}
+
 function isMode(value: string | null): value is VideoPreviewMode {
   return value === "panel" || value === "float";
 }
@@ -232,14 +240,15 @@ export const useVideoPip = create<VideoPipState>((set, get) => ({
   },
   setSession(session) {
     rememberLocalPresentation(session);
+    // Opening the video that is already on screen keeps its source loaded and playing, so no
+    // loadedmetadata or play comes to fill these in again: a zero duration left the scrubber dead.
+    const same = sameVideo(get().session, session);
     set({
       session,
       active: session !== null,
       failed: false,
       error: "",
-      position: 0,
-      duration: 0,
-      playing: false,
+      ...(same ? {} : { position: 0, duration: 0, playing: false }),
       systemPip: false,
     });
   },
