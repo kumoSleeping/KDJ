@@ -337,49 +337,113 @@ fn written(file: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
     Some((meta.len(), meta.modified().ok()?))
 }
 
-/// An export leaves the list of those under way however its request ends.
-struct Listed<'a>(&'a Workshop, String);
-impl Drop for Listed<'_> {
-    fn drop(&mut self) {
-        self.0.exports.lock().unwrap().remove(&self.1);
+/// What an export started from: the file as it was written then and the render that version
+/// makes. A write is looked at once; only one that changes the render counts as a change.
+struct Watched {
+    file: std::path::PathBuf,
+    options: kdjv::RenderOptions,
+    key: String,
+    seen: Mutex<Option<(u64, std::time::SystemTime)>>,
+}
+impl Watched {
+    /// Whether the project now renders something else than when the export started (or can no
+    /// longer be read, or is gone: renamed or deleted).
+    async fn changed(&self, m: &Workshop) -> bool {
+        let now = written(&self.file);
+        if now.is_none() {
+            return true;
+        }
+        if *self.seen.lock().unwrap() == now {
+            return false;
+        }
+        let key = m.kdjv_render_key(&self.file, &self.options, &CancellationToken::new()).await;
+        if key.as_ref().is_ok_and(|key| *key == self.key) {
+            *self.seen.lock().unwrap() = now;
+            return false;
+        }
+        true
     }
 }
 
-/// The project written out as one file beside it (the export queue's 剪辑 tasks): rendered as
-/// for playing, or with the options given (size, frame rate, quality, a stretch, the sound
-/// alone), then copied to `<project>.mp4` (`.wav`), or `<project> 2.mp4`… — an existing file is
-/// never replaced. It stops at once, and is not made again, when the project is written while
-/// it runs (an edit in the editor or by the AI, a rename): `kdjv_project_changed`. It stops too
-/// when cancelled by its id or when its caller goes away: `kdjv_export_stopped`.
+/// An export under way, or ended a little while ago, by the id its caller gave it: what stops
+/// it and its answer once there is one. It runs on its own: a caller that went away (the window
+/// reloaded) asks for the same id again and gets this one, not a new render from the start.
+pub(super) struct Exporting {
+    cancel: CancellationToken,
+    answer: tokio::sync::watch::Receiver<Option<ApiResult<serde_json::Value>>>,
+}
+
+/// How long an ended export's answer is kept for a caller that comes back for it.
+const EXPORT_KEPT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// The project written out as one file beside it (the export queue's 剪辑 tasks): `export_project`
+/// under the caller's id. Asked again for an id under way it waits for that export; for one that
+/// ended well it answers what it made; for one that failed or was stopped it starts again.
 async fn kdjv_export(
     Extension(m): Extension<Arc<Workshop>>,
     Json(export): Json<KdjvExport>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let (file, track_id) = kdjv_file(&m, &export.target)?;
-    let extension = if export.options.audio_only { "wav" } else { "mp4" };
-    let name = export.id.unwrap_or_else(id);
-    let cancel = CancellationToken::new();
-    {
+    let name = export.id.clone().unwrap_or_else(id);
+    let mut answer = {
         let mut exports = m.exports.lock().unwrap();
-        if exports.contains_key(&name) {
-            return Err(ApiError::new(StatusCode::CONFLICT, "这个导出已经在进行"));
+        let reusable = exports.get(&name).filter(|e| e.answer.borrow().as_ref().is_none_or(|a| a.is_ok()));
+        match reusable {
+            Some(running) => running.answer.clone(),
+            None => {
+                let (tell, answer) = tokio::sync::watch::channel(None);
+                let cancel = CancellationToken::new();
+                exports.insert(name.clone(), Exporting { cancel: cancel.clone(), answer: answer.clone() });
+                tokio::spawn({
+                    let (m, name, answer) = (m.clone(), name.clone(), answer.clone());
+                    async move {
+                        let result = export_project(&m, export, name.clone(), cancel).await;
+                        let _ = tell.send(Some(result));
+                        tokio::time::sleep(EXPORT_KEPT).await;
+                        let mut exports = m.exports.lock().unwrap();
+                        if exports.get(&name).is_some_and(|e| e.answer.same_channel(&answer)) {
+                            exports.remove(&name);
+                        }
+                    }
+                });
+                answer
+            }
         }
-        exports.insert(name.clone(), cancel.clone());
-    }
-    let _listed = Listed(&m, name.clone());
-    // A caller that went away (the window closed or reloaded) would never hear of it.
-    let _stop = cancel.clone().drop_guard();
-    let changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    };
+    let ended = answer.wait_for(Option::is_some).await.map_err(|_| anyhow::anyhow!("导出中断"))?;
+    ended.clone().expect("waited for an answer").map(Json)
+}
+
+/// Renders the project as for playing, or with the options given (size, frame rate, quality, a
+/// stretch, the sound alone), then copies it to `<project>.mp4` (`.wav`), or `<project> 2.mp4`…
+/// — an existing file is never replaced. It stops at once, and is not made again, when the
+/// project is written while it runs in a way that changes what it renders (an edit in the editor
+/// or by the AI): `kdjv_project_changed`; a write that changes nothing rendered leaves it
+/// running. It stops too when cancelled by its id: `kdjv_export_stopped`.
+async fn export_project(
+    m: &Arc<Workshop>,
+    export: KdjvExport,
+    name: String,
+    cancel: CancellationToken,
+) -> ApiResult<serde_json::Value> {
+    let (file, track_id) = kdjv_file(m, &export.target)?;
+    let extension = if export.options.audio_only { "wav" } else { "mp4" };
     let before = written(&file);
+    let watched = Arc::new(Watched {
+        key: m.kdjv_render_key(&file, &export.options, &cancel).await?,
+        file: file.clone(),
+        options: export.options.clone(),
+        seen: Mutex::new(before),
+    });
+    let changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     tokio::spawn({
-        let (file, changed, cancel) = (file.clone(), changed.clone(), cancel.clone());
+        let (m, watched, changed, cancel) = (m.clone(), watched.clone(), changed.clone(), cancel.clone());
         async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = tokio::time::sleep(EXPORT_WATCH) => {}
                 }
-                if written(&file) != before {
+                if watched.changed(&m).await {
                     changed.store(true, std::sync::atomic::Ordering::SeqCst);
                     cancel.cancel();
                     return;
@@ -387,11 +451,14 @@ async fn kdjv_export(
             }
         }
     });
+    // The watch above ends with the export, however it ends.
+    let _stop = cancel.clone().drop_guard();
     let was_changed = || changed.load(std::sync::atomic::Ordering::SeqCst);
     let project_changed = || {
         ApiError::new(StatusCode::CONFLICT, "工程在导出时被改动，导出已停止").coded("kdjv_project_changed").expected()
     };
-    let (job, _) = spawn_render(&m, file.clone(), track_id, export.options, cancel.clone(), Some(name));
+    let own_render = !export.options.is_default();
+    let (job, _) = spawn_render(m, file.clone(), track_id, export.options, cancel.clone(), Some(name));
     let rendered = job.await.map_err(|error| anyhow::anyhow!("渲染中断：{error}"))?;
     if was_changed() {
         return Err(project_changed());
@@ -402,6 +469,7 @@ async fn kdjv_export(
     let render = rendered?;
     let exported = tokio::task::spawn_blocking({
         let file = file.clone();
+        let render = render.clone();
         move || -> Result<std::path::PathBuf> {
             let folder = file.parent().context("工程没有所在的文件夹")?;
             let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "工程".into());
@@ -410,7 +478,10 @@ async fn kdjv_export(
                 let path = folder.join(name);
                 // create_new: two exports at once never take the same name.
                 let Ok(mut out) = std::fs::OpenOptions::new().write(true).create_new(true).open(&path) else { continue };
-                let copied = std::fs::File::open(&render).and_then(|mut from| std::io::copy(&mut from, &mut out));
+                // On disk before it is announced: a crash right after leaves the whole file.
+                let copied = std::fs::File::open(&render)
+                    .and_then(|mut from| std::io::copy(&mut from, &mut out))
+                    .and_then(|_| out.sync_all());
                 if let Err(error) = copied {
                     drop(out);
                     let _ = std::fs::remove_file(&path);
@@ -423,12 +494,17 @@ async fn kdjv_export(
     })
     .await
     .map_err(|error| anyhow::anyhow!("导出中断：{error}"))??;
+    // A render made with options of its own is this export's alone: kept in the cache it would
+    // only push out the renders projects play from.
+    if own_render {
+        let _ = std::fs::remove_file(&render);
+    }
     // Written while it was being copied: what was copied is the version before.
-    if was_changed() || written(&file) != before {
+    if was_changed() || watched.changed(m).await {
         let _ = std::fs::remove_file(&exported);
         return Err(project_changed());
     }
-    Ok(Json(serde_json::json!({"path": exported, "track_id": track_id})))
+    Ok(serde_json::json!({"path": exported, "track_id": track_id}))
 }
 
 #[derive(Deserialize)]
@@ -442,7 +518,9 @@ async fn kdjv_export_cancel(
     Extension(m): Extension<Arc<Workshop>>,
     Json(target): Json<KdjvExportId>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let running = m.exports.lock().unwrap().get(&target.id).cloned();
+    let running = m.exports.lock().unwrap().get(&target.id)
+        .filter(|e| e.answer.borrow().is_none())
+        .map(|e| e.cancel.clone());
     if let Some(cancel) = &running {
         cancel.cancel();
     }

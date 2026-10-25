@@ -11,8 +11,9 @@ import { deleteProjectExport, loadProjectExports, projectExportActive, projectEx
  * /api/kdjv/export), one at a time, each under the task's id so it can be paused
  * (/api/kdjv/export/cancel). Every export of a project goes through here — the editor's 导出 and
  * the library's 导出 MP4 — so each one is listed in 下载 → 导出 and can be stopped there. A
- * project written while its export runs stops it at once (the server watches the file); it is
- * not made again by itself.
+ * project written while its export runs in a way that changes what it renders stops it at once
+ * (the server watches the file); it is not made again by itself. A window reloaded mid-export
+ * finds the same export again (the server keeps it under the task's id).
  */
 interface State {
   tasks: ProjectExportTask[];
@@ -102,10 +103,12 @@ export const useProjectExportStore = create<State>((set, get) => ({
     if (!mediaProductionAvailable()) return Promise.resolve();
     if (!initializing) initializing = loadProjectExports().then(tasks => {
       const live = new Map(get().tasks.map(task => [task.id, task]));
-      // An export left running when the window went away was stopped by the server with it.
+      // An export left running when the window went away goes on in the server: asked for
+      // under the same id it is found again, or made again when the app itself was restarted.
       const stored = tasks.filter(task => !live.has(task.id)).map(task => projectExportActive(task)
-        ? { ...task, phase: "paused" as const, progress: 0, status: "上次导出已中断", error: "" } : task);
+        ? { ...task, phase: "queued" as const, progress: 0, status: "等待导出", error: "" } : task);
       set({ tasks: [...stored, ...live.values()].sort((a, b) => a.createdAt - b.createdAt) });
+      if (stored.some(task => task.phase === "queued")) void pump().catch(report);
     }).catch(error => { initializing = undefined; report(error); throw error; });
     return initializing;
   },

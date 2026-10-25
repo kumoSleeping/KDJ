@@ -34,8 +34,8 @@ pub struct Workshop {
     /// Preview proxies are made one at a time (proxy.rs); these are being made or waiting.
     proxy_slots: tokio::sync::Semaphore,
     proxies_wanted: Mutex<std::collections::HashSet<PathBuf>>,
-    /// The exports under way, by the id their caller gave them: what stops each (routes.rs).
-    exports: Mutex<HashMap<String, CancellationToken>>,
+    /// The exports under way or just ended, by the id their caller gave them (routes.rs).
+    exports: Mutex<HashMap<String, routes::Exporting>>,
     /// Itself, for the work it starts in the background.
     me: std::sync::Weak<Workshop>,
 }

@@ -144,11 +144,16 @@ UTF-8 JSON，扩展名 `.kdjv`，`"kdjv": 1`。字段说明写给 AI 看，在�
   `<名字>.mp4`，同名时 `<名字> 2.mp4`…，从不覆盖；曲库右键「导出 MP4」；导出完的气泡写着放进了哪个文件夹，带「打开所在文件夹」）。
   编辑器的「导出」和曲库的「导出 MP4」都不直接调它，而是在「下载 → 导出」队列里加一个「剪辑」任务（`stores/projectExportStore.ts`，
   记录存在 IndexedDB `kdj-project-export-queue-v1`）：一次一个，带任务 `id` 请求，`kdjv.progress` 事件带 `export` 回报进度；
-  暂停 = `POST /api/kdjv/export/cancel {id}`（回 `kdjv_export_stopped`），再开始从头渲染工程当时的样子。导出进行中工程文件被写过
-  （编辑器或 AI 的任何一次改动、改名）就立刻停下，回 `kdjv_project_changed`，任务停在「工程已改动，已停止」，不自动重来；
-  请求断开（窗口关闭或重载）也会停下。曲库的 `/api/library/audio/{id}` 遇到工程时换成
+  暂停 = `POST /api/kdjv/export/cancel {id}`（回 `kdjv_export_stopped`），再开始从头渲染工程当时的样子。导出进行中工程文件被写过，
+  且写入改变了渲染的内容（画面、声音、画布、画质；按渲染缓存的键比较，标题、改名、原样再存都不算）就立刻停下，回
+  `kdjv_project_changed`，任务停在「工程已改动，已停止」，不自动重来；工程被改名或删掉也停。导出是服务端按任务 `id` 独立跑的：
+  请求断开（窗口重载）不停，队列用同一个 `id` 再请求就接上它（已成功的直接回结果，失败或已停止的才重来，结束后的结果留 10 分钟）。曲库的 `/api/library/audio/{id}` 遇到工程时换成
   渲染或混音，`/api/library/video/{id}` 换成渲染，都还没有时回 409。CLI：`kdj project check|render <path>`。
 - **画面渲染**（`render.rs`）：每个视频输入用 `-ss` + `-t` 只读片段那一段；画面滤镜图用一半的核心（最多 4 个），给播放留出余量。
+  临时目录必须叫 `.kdj-composition-…`（`acceleration::STAGE_PREFIX`）：只有这样硬件编码（macOS 上 VideoToolbox）才会启用，
+  10-19 到 10-25 之间它叫 `.kdjv-…`，每次渲染都悄悄退回了 CPU。硬件编码的码率按画布和画质算（1080p30、CRF 20 为 12 Mbps，
+  画质每低 6 档减半）；退回 CPU 时 x264 用一半的核心（2–8 个线程）。一次渲染只在 5 分钟没有进展时算超时，不限总时长；
+  渲染中的 FFmpeg 记在 `<data>/cache/renders/<pid>.json`，下次启动时停掉主人已不在的那些，并删掉残留的临时目录。
 - **窗口**（`src/lib/kdjvPlay.ts`）：`playTrack` 遇到工程先要它的混音（缓存里有就立即，没有一般几秒，慢时右下角出一个任务气泡
   显示进度），然后播放同一行（路径换成混音文件，id、标题、「工程」标记不变），视频面板和小窗（`LocalVideoPlayer`、
   `VideoPipHost`）看到 `useKdjvLive` 里有这一行就画实时预览，不加载视频文件；工程行还没有它（窗口在播放中重新载入）时

@@ -1193,6 +1193,15 @@ impl Workshop {
         Ok((name, path))
     }
 
+    /// What a render of `file` with `options` is keyed by as the file is now. An export compares
+    /// it with the key it started from: a write that changes nothing it renders (the title, a
+    /// rename, the same document saved again) leaves it running.
+    pub async fn kdjv_render_key(&self, file: &Path, options: &RenderOptions, cancel: &CancellationToken) -> Result<String> {
+        let mut p = self.kdjv_project(file, cancel).await?;
+        options.apply(&mut p)?;
+        Ok(self.kdjv_cache_with(&p, options)?.0)
+    }
+
     fn kdjv_cache(&self, p: &CompositionProject) -> Result<(String, PathBuf)> {
         let name = format!("kdjv-{}", key(&(&p.sources, &p.layers, &p.canvas))?);
         let path = self.cache.join(format!("{name}.mp4"));
