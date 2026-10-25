@@ -13,8 +13,8 @@
  * (a cue, `cueClip`). WebKit holds a seek's first frame for hundreds of milliseconds and starts
  * late, so a clip shown at its cut regardless flashed black or a wrong frame and then jumped, and
  * one chased with seeks while running took seconds to come. Before its cut a clip may seek freely
- * (preparing); while it is shown it is never seeked for a small drift, and cued again for one too
- * large to watch. A clip not yet shown at its cut leaves the clip before it on its last frame
+ * (preparing); while it is shown it is never sought: a small drift is caught up by its tempo
+ * (VideoPlaybackEngine `trimPhase`), one too large to watch is cued again. A clip not yet shown at its cut leaves the clip before it on its last frame
  * (heldClips): the picture waits, it never jumps.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -32,7 +32,7 @@ import { clipAlpha, clipBox, clipSpeed, heldClips, preparedClips, sourceTime, ty
 import { tracePlayback } from "../../lib/playbackTrace";
 import type { KdjvLive } from "../../types";
 
-/** A shown clip is seeked while playing only when it is this far off the clock. */
+/** A shown clip is cued again while playing only when it is this far off the clock. */
 const VISIBLE_DRIFT_SEC = 0.35;
 /** A clip already running near the clock at its cut shows once its frames advance this many ticks. */
 const SETTLED_TICKS = 2;
@@ -116,7 +116,6 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
     // Whether each element has been shown; once shown it stays shown for as long as it lives.
     revealed: new WeakMap<HTMLVideoElement | HTMLImageElement, boolean>(),
     motion: new WeakMap<HTMLVideoElement, { at: number; ticks: number }>(),
-    targets: new WeakMap<HTMLVideoElement, number>(),
     // When each element was first wanted on screen (performance.now), for the reveal's trace.
     wanted: new WeakMap<HTMLVideoElement, number>(),
     cues: new WeakMap<HTMLVideoElement, Cue>(),
@@ -160,17 +159,9 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
     };
     window.addEventListener(MEDIA_SYNC_EVENT, onSync);
     const sync = engine.current!;
-    const { seeks, running, revealed, motion, targets, wanted, cues, started, primed, lead } = decoders.current;
+    const { seeks, running, revealed, motion, wanted, cues, started, primed, lead } = decoders.current;
     let frame = 0, lastAlign = -Infinity, lastReport = -Infinity, shown = "";
     const seek = (video: HTMLVideoElement, target: number) => { void sync.seek(video, target).catch(() => undefined); };
-    // A shown clip drifting a little is left to run: a seek would freeze and jump it on screen.
-    const alignShown = (video: HTMLVideoElement) => {
-      const target = targets.get(video);
-      if (target !== undefined && Math.abs(target - video.currentTime) > VISIBLE_DRIFT_SEC) {
-        tracePlayback("kdjv-realign", { track: trackId, error: Math.round((target - video.currentTime) * 1000) });
-        seek(video, target);
-      }
-    };
     const reveal = (node: HTMLVideoElement, n: number, local: number, now: number) => {
       revealed.set(node, true);
       primed.delete(node);
@@ -253,7 +244,6 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
           continue;
         }
         const target = Math.max(0, sourceTime(c, local));
-        targets.set(node, target);
         const speed = clipSpeed(c);
         // Before its cut a clip runs muted and transparent on the same clock, from where its
         // source allows; one that cannot start early waits on its first frame.
@@ -302,6 +292,7 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
         // A shown clip running far off the clock (the project was seeked) is cued again.
         const thrown = revealed.get(node) === true && running.get(node) === true && !starting && !node.seeking
           && node.readyState >= 2 && Math.abs(target - node.currentTime) > VISIBLE_DRIFT_SEC;
+        if (thrown) tracePlayback("kdjv-realign", { track: trackId, clip: n, error: Math.round((target - node.currentTime) * 1000) });
         if (shouldPlay && local >= 0 && (cues.has(node) || !revealed.get(node) || thrown)) {
           if (cueClip(node, n, c, local, speed, t.rate, now)) {
             node.style.opacity = revealed.get(node) ? String(clipAlpha(c, local)) : "0";
@@ -321,9 +312,12 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
           // Just started by its cue: left to run until its frames come.
         } else if (shouldPlay && t.clock) {
           const clock: LocalVideoClock = { ...t.clock, position: target, rate: t.clock.rate * speed };
-          // Unseen, it prepares: aligned as soon as it drifts. Shown, only a large drift aligns it.
-          const shownNow = revealed.get(node) === true;
-          sync.followClock(node, clock, seek, shownNow ? alignShown : undefined, !shownNow);
+          // Unseen, it prepares: sought as soon as it drifts. Shown, it is never sought (a seek
+          // froze it while its source decoded from a keyframe, again and again over the first
+          // seconds of playing): it is caught up by its tempo, and a jump too large for that is
+          // cued again (`thrown`).
+          if (revealed.get(node) === true) sync.trimPhase(node, clock);
+          else sync.followClock(node, clock, seek, undefined, true);
         } else if (shouldPlay) {
           sync.sync(node, target, "heartbeat", t.rate * speed, seek);
         } else {

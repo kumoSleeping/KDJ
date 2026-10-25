@@ -21,6 +21,11 @@ const VIDEO_LIVE_PHASE_OBSERVATION_MS = 2500;
 const VIDEO_LIVE_PHASE_SETTLE_MS = 2000;
 
 const VIDEO_SYNC_RATE_EPSILON = 0.001;
+/** trimPhase: off by more than this (or a frame) it is caught up, by at most this tempo change, over about this long. */
+const TRIM_PHASE_ENTER_SEC = 0.03;
+const TRIM_PHASE_DONE_SEC = 0.008;
+const TRIM_PHASE_MAX_DELTA = 0.12;
+const TRIM_PHASE_CLOSE_SEC = 0.8;
 const VIDEO_SYNC_CORRECTION_INTERVAL_MS = 500;
 const VIDEO_SYNC_CORRECTION_ENTER_SEC = 0.04;
 const VIDEO_SYNC_CORRECTION_EXIT_SEC = 0.015;
@@ -282,6 +287,7 @@ export class VideoPlaybackEngine {
   private policies = new WeakMap<HTMLVideoElement, VideoSyncPolicyState>();
   private deviceOwners = new WeakMap<HTMLVideoElement, string>();
   private stableClocks = new WeakMap<HTMLVideoElement, StableVideoClockState>();
+  private phaseTrims = new WeakMap<HTMLVideoElement, { errors: number[]; rate: number | null }>();
   private observations = new WeakMap<HTMLVideoElement, { clock: LocalVideoClock; at: number }>();
   private aligning = new WeakSet<HTMLVideoElement>();
   private liveFeedback = new Map<HTMLVideoElement, LiveVideoFeedback>();
@@ -707,6 +713,41 @@ export class VideoPlaybackEngine {
     }
   }
 
+  /**
+   * A picture on screen kept on the clock without a seek (a seek freezes it for as long as its
+   * source takes to decode from a keyframe, which can be seconds of frames). More than a frame off
+   * for three readings in a row, it runs up to TRIM_PHASE_MAX_DELTA faster or slower — set once —
+   * until it is back within TRIM_PHASE_DONE_SEC or past it, then at its tempo again. A jump too
+   * large to catch up this way is the caller's (a cue). `clock` is in the video's own seconds.
+   */
+  trimPhase(video: HTMLVideoElement, clock: LocalVideoClock): void {
+    const base = normalizedRate(clock.rate);
+    const state = this.phaseTrims.get(video) ?? { errors: [], rate: null };
+    this.phaseTrims.set(video, state);
+    if (video.paused || video.seeking || video.readyState < 2 || !clock.playing || clock.fresh === false) {
+      state.errors = []; state.rate = null; this.applyRate(video, base); return;
+    }
+    const measured = this.liveFrameError(video, clock);
+    const error = measured ?? clock.position - video.currentTime;
+    state.errors.push(error);
+    if (state.errors.length > 3) state.errors.shift();
+    if (state.rate !== null) {
+      // Caught up, or passed it: back to its tempo.
+      if (Math.abs(error) <= TRIM_PHASE_DONE_SEC || (state.rate - base) * error <= 0) {
+        state.rate = null; state.errors = []; this.applyRate(video, base);
+      }
+      return;
+    }
+    this.applyRate(video, base);
+    const frame = this.liveFeedback.get(video)?.frame?.interval ?? 1 / 30;
+    const off = Math.max(TRIM_PHASE_ENTER_SEC, frame);
+    if (state.errors.length < 3 || !state.errors.every(e => Math.abs(e) > off && Math.sign(e) === Math.sign(error))) return;
+    const ordered = [...state.errors].sort((a, b) => a - b);
+    const delta = Math.max(-TRIM_PHASE_MAX_DELTA, Math.min(TRIM_PHASE_MAX_DELTA, ordered[1] / TRIM_PHASE_CLOSE_SEC));
+    state.rate = normalizedRate(base * (1 + delta));
+    this.applyRate(video, state.rate);
+  }
+
   /** A prepared slot is already at its decoded landing; do not seek it a second time on adoption. */
   adoptClock(video: HTMLVideoElement, clock: LocalVideoClock): void {
     this.stableClocks.delete(video);
@@ -722,6 +763,7 @@ export class VideoPlaybackEngine {
     this.deviceOwners.delete(video);
     this.policies.delete(video);
     this.stableClocks.delete(video);
+    this.phaseTrims.delete(video);
   }
 
   sync(
@@ -774,6 +816,7 @@ export class VideoPlaybackEngine {
     this.policies = new WeakMap();
     this.deviceOwners = new WeakMap();
     this.stableClocks = new WeakMap();
+    this.phaseTrims = new WeakMap();
     if (video) this.applyRate(video, 1);
   }
 
@@ -785,6 +828,7 @@ export class VideoPlaybackEngine {
     this.policies = new WeakMap();
     this.deviceOwners = new WeakMap();
     this.stableClocks = new WeakMap();
+    this.phaseTrims = new WeakMap();
   }
 
   private applyRate(video: HTMLVideoElement, rate: number): void {
