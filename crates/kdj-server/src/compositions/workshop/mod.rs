@@ -54,6 +54,10 @@ impl Workshop {
                 let _ = std::fs::remove_file(path);
             }
         }
+        // What renders an earlier run left: its FFmpeg first, then their staging (`.kdjv-` is
+        // the name renders and sound mixes staged under before).
+        super::running::track(state.config.data_dir.join("cache").join("renders"));
+        super::running::clean_stages(&cache, &[super::acceleration::STAGE_PREFIX, ".kdjv-"]);
         Ok(Arc::new_cyclic(|me| Self {
             me: me.clone(),
             state,

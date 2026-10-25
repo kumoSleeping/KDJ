@@ -94,6 +94,8 @@ pub(super) async fn render(
         .kill_on_drop(true)
         .spawn()
         .context("启动透明图层合成失败")?;
+    let _running = super::running::Running::note(child.id(), args.last().map_or("", String::as_str));
+    let liveness = super::running::Liveness::new();
     let mut input = child.stdin.take().context("缺少透明帧输入管道")?;
     let mut stdout = BufReader::new(child.stdout.take().context("缺少导出进度管道")?).lines();
     let stderr = child.stderr.take().context("缺少导出错误管道")?;
@@ -139,6 +141,7 @@ pub(super) async fn render(
                 input.write_all(frame.bytes()).await.context("写入透明帧失败")?;
                 writing += write_started.elapsed();
                 written += 1;
+                liveness.moved();
                 // After the final production, the receiver may already be gone.
                 let _ = buffers_tx.try_send(frame.recycle());
             }
@@ -166,10 +169,9 @@ pub(super) async fn render(
     let result = tokio::select! {
         biased;
         _ = cancel.cancelled() => Err(anyhow::anyhow!("可视化导出已取消")),
-        result = tokio::time::timeout(kdj_providers::ffmpeg::FFMPEG_TIMEOUT, work) => match result {
-            Ok(result) => result,
-            Err(_) => Err(anyhow::anyhow!("可视化导出超时")),
-        },
+        result = work => result,
+        // Stuck, however long it has run: frames still arriving keep a long export going.
+        _ = liveness.stalled() => Err(anyhow::anyhow!("可视化导出超时：{} 分钟没有进展", super::running::STALL.as_secs() / 60)),
     };
     stopped.cancel();
     drop(frames_rx);

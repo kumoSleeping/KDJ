@@ -412,15 +412,22 @@ pub async fn render(
         .args(args)
         .spawn()
         .context("启动合成失败")?;
+    let _running = super::running::Running::note(child.id(), args.last().map_or("", String::as_str));
     let mut stdout = BufReader::new(child.stdout.take().context("缺少进度管道")?).lines();
     let stderr = child.stderr.take().context("缺少错误管道")?;
+    let liveness = super::running::Liveness::new();
     let work = async {
         let read = async {
+            let mut reached = f64::NEG_INFINITY;
             while let Some(line) = stdout.next_line().await? {
                 if let Some(value) = line
                     .strip_prefix("out_time_us=")
                     .and_then(|v| v.parse::<f64>().ok())
                 {
+                    if value > reached {
+                        reached = value;
+                        liveness.moved();
+                    }
                     progress((value / (duration as f64 * 1000.)).clamp(0., 0.99));
                 }
             }
@@ -437,7 +444,9 @@ pub async fn render(
     tokio::select! {
         biased;
         _=cancel.cancelled()=> { let _=child.kill().await; bail!("合成已取消"); }
-        result=tokio::time::timeout(kdj_providers::ffmpeg::FFMPEG_TIMEOUT,work)=>match result { Ok(result)=>result,Err(_)=>{let _=child.kill().await;bail!("合成超时");} }
+        result=work=>result,
+        // Stuck, however long it has run: a long render that keeps moving is left to finish.
+        _=liveness.stalled()=>{let _=child.kill().await;bail!("合成超时：{} 分钟没有进展", super::running::STALL.as_secs()/60);}
     }
 }
 

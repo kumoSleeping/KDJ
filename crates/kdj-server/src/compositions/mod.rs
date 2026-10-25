@@ -2,6 +2,7 @@
 //! export, over shared FFmpeg probing and encoder selection.
 mod acceleration;
 mod frame_pipe;
+pub mod running;
 pub mod audio_visualizer;
 pub mod workshop;
 pub(crate) mod media;
