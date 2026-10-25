@@ -190,6 +190,8 @@ surface:
      tools: <button …/>,              // optional compact actions before the close button
      closePage: id => …,              // optional: each page word gets its own ×, long words end in
                                       // an ellipsis (剪辑: one page per open project)
+     renamePage: (id, name) => …,     // optional: a double-click on a page word (or F2) writes it
+                                      // in place; Enter or leaving it keeps the name, Esc the old one
      titleDrop: { label, drop },      // optional: library rows dropped on the title row, drop(ids);
                                       // dropSearch(payload) takes search results too, labelFor(ids)
                                       // names the drop by what is dragged (剪辑: songs start another

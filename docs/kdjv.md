@@ -51,6 +51,12 @@ UTF-8 JSON，扩展名 `.kdjv`，`"kdjv": 1`。字段说明写给 AI 看，在�
   `move`（`at`，可带 `track` 或 `new_track`；画面片段不能进声音轨，反过来也不能）、`remove`（`ripple` 时这条轨道后面的跟上）、
   `trim`（`in` 改开头时结尾在成片里不动）、`split`、`set`（`speed`、`volume`、`muted`、`x`、`y`、`scale`、`opacity`、`fill`、`crop`、
   `fade_in`、`fade_out`）、`fold`、`unfold`、`restore`、`markers`、`add_title`、`set_title`、`remove_title`。
+- **新工程放哪、叫什么**（`laneEditorStore.ts` `createFrom`）：第一个文件在曲库的文件夹里，就放在它旁边；不在（别的 App 自己的
+  文件夹，比如 QQ 把收到的视频按哈希放在它的沙盒里），就放进默认下载文件夹，否则工程和它旁边导出的 MP4 都在没人看得见的地方。
+  名字是歌名加「VJ」或文件名加「剪辑」；文件名是 App 起的（一长串十六进制、UUID）时改用「剪辑 2026-10-25」。
+- **改名**（`POST /api/kdjv/rename`，`track_id` 或 `path` 加 `name`；编辑器里双击标题栏上工程的名字）：同一个文件夹里改文件名
+  （不覆盖已有的文件，素材按工程文件夹写的相对路径不变），曲库那一行跟着搬（分析、评分、备注都留着），标题改成同一个名字；
+  回答和 `/api/kdjv/edit` 一样，编辑器换到新路径。曲库那一行没搬成时文件改回原名。
 - **旧格式**：编辑器打开格式 1、2 的工程时按格式 3 显示（只读，不写文件），第一次编辑时写成格式 3。格式 2 换算：主线是
   画面轨 1（空档不留），分叉是它上面的画面轨 2（带淡入淡出和透明度），歌是声音轨 1，一首接一首。格式 1：每条轨道照旧，
   只放声音文件的是声音轨。不认识的字段都留着。旧版本的 KDJ 打不开格式 3（「工程格式版本 3 需要更新的 KDJ」），升级就好。
@@ -134,7 +140,7 @@ UTF-8 JSON，扩展名 `.kdjv`，`"kdjv": 1`。字段说明写给 AI 看，在�
   `GET /api/kdjv/source/{track}/{n}`（实时预览读的第 n 个素材）、`GET /api/kdjv/frame?track_id&src&t&h`（编辑器画面线的缩略帧：
   工程列出的素材在 `t` 秒的一帧，`h` 像素高的 JPEG，ffmpeg 抽一次后放在渲染缓存里）、`POST /api/kdjv/render`（渲染或找到缓存，`kdjv.progress` 事件报
   进度）、`POST /api/kdjv/check`（只检查：时长、画布、素材，或不能播放的原因）、`POST /api/kdjv/export`（渲染后复制成工程旁的
-  `<名字>.mp4`，同名时 `<名字> 2.mp4`…，从不覆盖；曲库右键「导出 MP4」）。曲库的 `/api/library/audio/{id}` 遇到工程时换成
+  `<名字>.mp4`，同名时 `<名字> 2.mp4`…，从不覆盖；曲库右键「导出 MP4」；导出完的气泡写着放进了哪个文件夹，带「打开所在文件夹」）。曲库的 `/api/library/audio/{id}` 遇到工程时换成
   渲染或混音，`/api/library/video/{id}` 换成渲染，都还没有时回 409。CLI：`kdj project check|render <path>`。
 - **画面渲染**（`render.rs`）：每个视频输入用 `-ss` + `-t` 只读片段那一段；画面滤镜图用一半的核心（最多 4 个），给播放留出余量。
 - **窗口**（`src/lib/kdjvPlay.ts`）：`playTrack` 遇到工程先要它的混音（缓存里有就立即，没有一般几秒，慢时右下角出一个任务气泡
