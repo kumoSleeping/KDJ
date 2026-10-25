@@ -12,6 +12,7 @@ import { isImageTrack, isProjectTrack, isVideoTrack } from "../lib/format";
 import { refreshPlayingProject } from "../lib/kdjvPlay";
 import { alignedOps, allClips, clipLength, findClip, LANE_END, snapToBar, type AlignPlan, type LaneClip, type LaneDocument, type LaneEdited, type LaneLayout, type LaneOp, type NewClip, type TrackKind } from "../lib/lanes";
 import { useSidePanels } from "../lib/sidePanels";
+import { useVideoPip } from "../lib/videoPip";
 import type { Track } from "../types";
 
 export const LANE_EDITOR_APP = "lane-editor";
@@ -139,6 +140,7 @@ interface LaneEditorState {
   select(id: string | null): void;
   /** Says what could not be done, in the editor's status line. */
   fail(reason: string): void;
+  /** Puts the editor away, and with it the video window while that shows one of its projects. */
   close(): void;
   /** Finds where a clip of the project in view lies in the song under it; `auto` applies a sure plan at once. */
   calibrate(clipId: string, auto?: boolean): Promise<void>;
@@ -552,7 +554,12 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
     redo: () => inTurn(() => turnBack("future")),
     select: id => set({ selected: id }),
     fail: reason => set({ error: reason }),
-    close: () => set({ open: false, selected: null, error: null }),
+    close: () => {
+      const pip = useVideoPip.getState();
+      const shown = pip.session?.source === "local" ? pip.session.trackId : null;
+      if (shown !== null && get().projects.some(p => p.trackId === shown)) pip.close();
+      set({ open: false, selected: null, error: null });
+    },
     async calibrate(clipId, auto = false) {
       const project = get().projects.find(p => p.path === get().active);
       const target = project && songUnder(project, clipId);
