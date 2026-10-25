@@ -649,7 +649,6 @@ export function PlayerBar() {
   // 双击/下一首是否由双 Deck 接手。此前这里只把续播 UI 点亮、却把混音硬编码关闭，
   // 所以所有显式换歌都必然退化为普通换源。
   const autoAdvance = useDjConfig((state) => state.enabled);
-  const djEnabled = autoAdvance && !mobileNative;
   const djBars = useDjConfig((state) => state.bars);
   const applyInOutPoints = useDjConfig((state) => state.applyInOutPoints);
   const autoBeatSync = useDjConfig((state) => state.autoBeatSync);
@@ -779,6 +778,10 @@ export function PlayerBar() {
     () => getPlayingTrack() ?? readPublishedStreamTrack(),
   );
   const [restoredStreamPlayback] = useState(() => readPublishedStreamPlayback());
+  // A project playing is being made: nothing is mixed into it near its end, and it stops there
+  // (continueAfterEnded) instead of going on to the next song.
+  const projectPlaying = Boolean(track && isProjectTrack(track.format));
+  const djEnabled = autoAdvance && !mobileNative && !projectPlaying;
   const activeStreamTrackId = track && isStreamTrack(track) ? track.id : 0;
   const subscribeActiveStreamMeta = useCallback(
     (listener: () => void) => subscribeStreamMeta(activeStreamTrackId, listener),
@@ -2746,7 +2749,7 @@ export function PlayerBar() {
         commitPlaying(otherStillPlaying);
         return;
       }
-      if (!autoAdvanceRef.current) {
+      if (!autoAdvanceRef.current || (finished && isProjectTrack(finished.format))) {
         commitPlaying(false);
         return;
       }
