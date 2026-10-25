@@ -101,9 +101,12 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
   // (an edit refreshes the one playing) an index is kept only while it still names a clip of the
   // same file, until the new project's own are picked: never a clip it does not have.
   const [picked, setPicked] = useState<{ project: KdjvLive | null; clips: number[] }>({ project: null, clips: [] });
+  // A source's preview proxy once it is made (proxy.rs), else the source itself. Part of the
+  // element's identity: the proxy coming is a new element, never a file swapped under one.
+  const sourceUrl = (p: KdjvLive, n: number) => (p.sources[n]?.proxy ? api.kdjvProxyUrl(trackId, n) : api.kdjvSourceUrl(trackId, n));
   const sourceOf = (p: KdjvLive, n: number) => {
     const c = p.clips[n];
-    return c ? `${api.kdjvSourceUrl(trackId, c.source)}|${p.sources[c.source]?.file ?? ""}` : null;
+    return c ? `${sourceUrl(p, c.source)}|${p.sources[c.source]?.file ?? ""}` : null;
   };
   const prepared = picked.project === project ? picked.clips
     : picked.project ? picked.clips.filter(n => sourceOf(project, n) !== null && sourceOf(project, n) === sourceOf(picked.project!, n)) : [];
@@ -391,7 +394,7 @@ export function KdjvLivePicture({ trackId, project, onTransport }: {
             left: `${at.left}%`, top: `${at.top}%`, width: `${at.width}%`, height: `${at.height}%`, clipPath: at.clip,
             zIndex: (tracks - c.track) * 10_000 + n, opacity: 0,
           };
-          const src = api.kdjvSourceUrl(trackId, c.source);
+          const src = sourceUrl(project, c.source);
           // Keyed by the file too: the same source number turned into another file is a new element.
           const id = `${n}:${sourceOf(project, n)}`;
           return project.sources[c.source]?.kind === "video"

@@ -962,8 +962,11 @@ export interface KdjvLive {
   duration: number;
   width: number;
   height: number;
-  /** `file` names the file (and its signature): a source number may be another file after an edit. */
-  sources: Array<{ kind: "video" | "image" | "gif" | "audio"; width: number; height: number; fps: number; file?: string }>;
+  /**
+   * `file` names the file (and its signature): a source number may be another file after an edit.
+   * `proxy`: its preview proxy is made, loaded from `/api/kdjv/proxy/{track}/{n}` (proxy.rs).
+   */
+  sources: Array<{ kind: "video" | "image" | "gif" | "audio"; width: number; height: number; fps: number; file?: string; proxy?: boolean }>;
   /** Picture clips; `track` 0 is the top one, `source` numbers `/api/kdjv/source/{track}/{n}`. */
   clips: Array<{
     source: number; track: number; at: number; in: number; out: number; length: number;
@@ -1005,6 +1008,8 @@ export type WsEvent =
   | { type: "library.folders.updated"; payload: Record<string, never> }
   | { type: "account.changed"; payload: Account }
   | { type: "kdjv.progress"; payload: KdjvProgress }
+  /** A source's preview proxy is made (proxy.rs). */
+  | { type: "kdjv.proxy"; payload: { source: string } }
   | { type: "ai.event"; payload: import("./types/ai").PiEvent }
   | { type: "ai.status"; payload: import("./types/ai").AiStatus };
 

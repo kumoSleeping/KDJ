@@ -4,6 +4,7 @@
 mod frames;
 pub mod kdjv;
 pub mod lanes;
+mod proxy;
 mod render;
 pub mod routes;
 pub mod tracks;
@@ -30,6 +31,11 @@ pub struct Workshop {
     preview_slots: tokio::sync::Semaphore,
     frame_slots: tokio::sync::Semaphore,
     export_slots: tokio::sync::Semaphore,
+    /// Preview proxies are made one at a time (proxy.rs); these are being made or waiting.
+    proxy_slots: tokio::sync::Semaphore,
+    proxies_wanted: Mutex<std::collections::HashSet<PathBuf>>,
+    /// Itself, for the work it starts in the background.
+    me: std::sync::Weak<Workshop>,
 }
 impl Workshop {
     /// Prepares the render cache only. No user file is read or written here: the old editing
@@ -46,7 +52,8 @@ impl Workshop {
                 let _ = std::fs::remove_file(path);
             }
         }
-        Ok(Arc::new(Self {
+        Ok(Arc::new_cyclic(|me| Self {
+            me: me.clone(),
             state,
             cache,
             cache_locks: Mutex::new(HashMap::new()),
@@ -58,6 +65,8 @@ impl Workshop {
             ),
             frame_slots: tokio::sync::Semaphore::new(2),
             export_slots: tokio::sync::Semaphore::new(1),
+            proxy_slots: tokio::sync::Semaphore::new(1),
+            proxies_wanted: Mutex::new(Default::default()),
         }))
     }
 }

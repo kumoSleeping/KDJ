@@ -16,6 +16,7 @@ pub fn router(manager: Arc<Workshop>) -> Router<Arc<AppState>> {
         .route("/api/kdjv/edit", post(kdjv_edit))
         .route("/api/kdjv/preview", post(kdjv_preview))
         .route("/api/kdjv/source/{track_id}/{n}", get(kdjv_source))
+        .route("/api/kdjv/proxy/{track_id}/{n}", get(kdjv_proxy))
         .route("/api/kdjv/frame", get(kdjv_frame))
         .route("/api/kdjv/render", post(kdjv_render))
         .route("/api/kdjv/export", post(kdjv_export))
@@ -110,7 +111,23 @@ async fn kdjv_source(
 ) -> ApiResult<Response> {
     let (file, _) = kdjv_file(&m, &KdjvTarget { path: None, track_id: Some(track_id), stream: false })?;
     let path = kdjv::source(&file, n).ok_or_else(|| crate::error::ApiError::not_found("工程里没有这个素材"))?;
-    let total = tokio::fs::metadata(&path)
+    serve_file(&path, &headers).await
+}
+/// A video source's preview proxy (proxy.rs), once made: what the live preview loads instead of
+/// the source when the project says `proxy`.
+async fn kdjv_proxy(
+    Extension(m): Extension<Arc<Workshop>>,
+    AxumPath((track_id, n)): AxumPath<(i64, usize)>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let (file, _) = kdjv_file(&m, &KdjvTarget { path: None, track_id: Some(track_id), stream: false })?;
+    let source = kdjv::source(&file, n).ok_or_else(|| crate::error::ApiError::not_found("工程里没有这个素材"))?;
+    let path = m.kdjv_proxy(&source).ok_or_else(|| crate::error::ApiError::not_found("预览代理还没做好"))?;
+    serve_file(&path, &headers).await
+}
+/// A file with Range for seeking, typed by its extension.
+async fn serve_file(path: &std::path::Path, headers: &HeaderMap) -> ApiResult<Response> {
+    let total = tokio::fs::metadata(path)
         .await
         .map_err(|err| crate::error::ApiError::not_found(format!("读不到素材：{err}")))?
         .len();
@@ -127,7 +144,7 @@ async fn kdjv_source(
         _ => "application/octet-stream",
     };
     let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok()).filter(|v| !v.trim().is_empty());
-    crate::routes::audio_response(&path, total, mime.into(), range).await
+    crate::routes::audio_response(path, total, mime.into(), range).await
 }
 /// One frame of a project's source, for the editor's picture lane.
 #[derive(Deserialize)]

@@ -149,9 +149,10 @@ fn media_path_allowed(path: &str) -> bool {
         segments.as_slice(),
         ["api", "video", "youtube", "hls", ticket] if !ticket.is_empty()
     ) || matches!(
-        // A project's live preview: only the files that project names (kdjv.rs `source`).
+        // A project's live preview: only the files that project names (kdjv.rs `source`), or
+        // their preview proxies (proxy.rs).
         segments.as_slice(),
-        ["api", "kdjv", "source", id, n] if !id.is_empty() && !n.is_empty()
+        ["api", "kdjv", "source" | "proxy", id, n] if !id.is_empty() && !n.is_empty()
     ) || matches!(
         // The editor's frames of those same files (routes.rs `kdjv_frame`).
         segments.as_slice(),
@@ -543,6 +544,10 @@ mod auth_tests {
         ));
         assert!(request_authorized(
             &request(Method::GET, "/api/kdjv/source/7/0?kdj_media_token=media-token", None),
+            &auth
+        ));
+        assert!(request_authorized(
+            &request(Method::GET, "/api/kdjv/proxy/7/0?kdj_media_token=media-token", None),
             &auth
         ));
         assert!(request_authorized(

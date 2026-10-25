@@ -945,6 +945,8 @@ export const api = {
   previewKdjv: (trackId: number) => post<import("../types").KdjvPreview>("/kdjv/preview", { track_id: trackId }),
   /** The n-th source file of a project's live preview, with Range. */
   kdjvSourceUrl: (trackId: number, n: number) => authenticatedGetUrl(`${bridge().baseUrl}/api/kdjv/source/${trackId}/${n}`),
+  /** The source's preview proxy, once the project says it is made (`proxy`). */
+  kdjvProxyUrl: (trackId: number, n: number) => authenticatedGetUrl(`${bridge().baseUrl}/api/kdjv/proxy/${trackId}/${n}`),
   /** A small JPEG of a project's source (`src` as its document names it) at `t` seconds, `h` pixels high. */
   kdjvFrameUrl: (trackId: number, src: string, t: number, h: number) =>
     authenticatedGetUrl(`${bridge().baseUrl}/api/kdjv/frame?track_id=${trackId}&src=${encodeURIComponent(src)}&t=${t.toFixed(1)}&h=${h}`),

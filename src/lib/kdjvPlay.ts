@@ -109,6 +109,20 @@ export async function refreshPlayingProject(trackId: number, live?: KdjvLive | n
   requestPlayerCommand({ type: "resound", trackId, path: preview.render ?? preview.sound });
 }
 
+/**
+ * A source's preview proxy is made: the projects drawn live that use it get their picture again,
+ * which now loads the proxy. Only the picture: the sound playing is not touched.
+ */
+export function handleKdjvProxy(source: string): void {
+  for (const [id, project] of Object.entries(useKdjvLive.getState().live)) {
+    if (!project.sources.some(s => s.file?.startsWith(`${source}#`) && !s.proxy)) continue;
+    const trackId = Number(id);
+    void api.previewKdjv(trackId).then(preview => {
+      if (!preview.render && useKdjvLive.getState().live[trackId]) showLive(trackId, preview.project);
+    }).catch(() => undefined);
+  }
+}
+
 const exportId = (trackId: number) => `kdjv-export:${trackId}`;
 /** Rows being exported, by id, with their titles. */
 const exporting = new Map<number, string>();

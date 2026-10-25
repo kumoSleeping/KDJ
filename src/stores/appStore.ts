@@ -685,5 +685,9 @@ export function connectEvents(): () => void {
       const payload = event.payload;
       void import("../lib/kdjvPlay").then(module => module.handleKdjvProgress(payload));
     }
+    if (event.type === "kdjv.proxy") {
+      const payload = event.payload;
+      void import("../lib/kdjvPlay").then(module => module.handleKdjvProxy(payload.source));
+    }
   });
 }

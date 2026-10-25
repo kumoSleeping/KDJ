@@ -784,6 +784,8 @@ pub struct LiveSource {
     pub fps: f64,
     /// The file and its signature: the same source number may be another file after an edit.
     pub file: String,
+    /// Its preview proxy is made (proxy.rs): the window loads `/api/kdjv/proxy/{track}/{n}`.
+    pub proxy: bool,
 }
 /// One picture clip, in seconds as in the document.
 #[derive(Debug, Serialize)]
@@ -810,7 +812,7 @@ pub struct LiveClip {
 
 /// The live preview's view of a project: every picture clip and what its source is. Pure.
 pub fn live(p: &CompositionProject) -> Live {
-    let sources = p.sources.iter().map(|s| LiveSource { kind: s.kind.clone(), width: s.width, height: s.height, fps: s.fps, file: format!("{}#{}", s.path, s.signature) }).collect();
+    let sources = p.sources.iter().map(|s| LiveSource { kind: s.kind.clone(), width: s.width, height: s.height, fps: s.fps, file: format!("{}#{}", s.path, s.signature), proxy: false }).collect();
     let mut clips = vec![];
     for (track, layer) in p.layers.iter().enumerate() {
         for c in &layer.clips {
@@ -1075,7 +1077,7 @@ impl Workshop {
             "document": after, "layout": tracks::layout(&after), "duration": duration,
             "lengths": lengths, "problem": problem,
             // The live preview's clips at once: the picture follows the edit without waiting for the sound.
-            "live": project.as_ref().map(live),
+            "live": project.as_ref().map(|p| self.live_shown(p)),
         }))
     }
 
@@ -1148,7 +1150,7 @@ impl Workshop {
         drop(guard);
         remember(file, Made::Sound, &cached);
         progress(1., "");
-        Ok(Preview { sound: cached, render, project: live(&p) })
+        Ok(Preview { sound: cached, render, project: self.live_shown(&p) })
     }
 
     /// Where a render with these options is kept: the playing render's own place for none, else
