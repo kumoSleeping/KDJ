@@ -352,6 +352,7 @@ fn layout(args: &[String]) -> Option<Layout> {
                 | "-pix_fmt:v:0"
                 | "-c:a"
                 | "-b:a"
+                | "-ar"
                 | "-t"
                 | "-max_interleave_delta"
                 | "-progress"

@@ -637,6 +637,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
         <div className="kd-viz-row"><span>画质</span><Segmented label="画质" options={qualities} value={p.output.quality ?? "standard"} onChange={quality => edit(n => { n.output.quality = quality; })} /></div>
         {duration > 0 && <div className="kd-viz-row"><span>预计大小</span><output>约 {formatBytes(studioExportBytes(p.scene.canvas.width, p.scene.canvas.height, p.output.fps, duration, p.output.quality))}</output></div>}
         <Row label="文件名"><input value={p.output.filename} onChange={e => edit(n => { n.output.filename = e.target.value; })} /></Row>
+        <Toggle label="48 kHz 音频" checked={p.output.audio48k !== false} onChange={v => edit(n => { n.output.audio48k = v; })} />
         <Toggle label="水印" checked={p.output.watermark !== false} onChange={v => edit(n => { n.output.watermark = v; })} />
       </Group>}
     </>}</fieldset>

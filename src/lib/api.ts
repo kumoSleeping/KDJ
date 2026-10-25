@@ -1294,7 +1294,7 @@ export const visualizerApi = {
     if (!response.ok) throw new ApiError("读取封面失败", response.status);
     const blob = await response.blob(); return blob.size ? blob : null;
   },
-  start: (body: { track_id: number; signature: string; duration: number; output_path: string; width: number; height: number; fps: number; acceleration: string; pixel_format?: "rgba" | "yuv420p" | "h264"; chunk_frames?: number; video_bitrate?: number }) => request<VisualizerJobStatus>("/visualizer/export", { method: "POST", body: JSON.stringify(body) }),
+  start: (body: { track_id: number; signature: string; duration: number; output_path: string; width: number; height: number; fps: number; acceleration: string; pixel_format?: "rgba" | "yuv420p" | "h264"; chunk_frames?: number; video_bitrate?: number; audio_48k?: boolean }) => request<VisualizerJobStatus>("/visualizer/export", { method: "POST", body: JSON.stringify(body) }),
   poll: (id: string, since: number, signal?: AbortSignal) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}?since=${since}`, { signal, headers: { "X-KDJ-Activity-Recorded": "1" } }),
   // Blob, not ArrayBuffer: Chromium serializes an ArrayBuffer body inside fetch(), which
   // stalls the thread that draws the next frame for about twice as long (17 vs 9 ms at 1080p).

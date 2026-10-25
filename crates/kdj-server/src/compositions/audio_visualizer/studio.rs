@@ -345,8 +345,18 @@ struct Export {
     #[serde(default)] chunk_frames: u32,
     /// What a hardware encoder is held to, from the project's quality; 0 leaves it to the canvas.
     #[serde(default)] video_bitrate: u64,
+    /// Video sites offer their high-quality audio tiers only for 48 kHz uploads.
+    /// Off keeps the song's own rate.
+    #[serde(default = "yes")] audio_48k: bool,
 }
+fn yes() -> bool { true }
 impl Export {
+    /// Output audio options, placed before `-t`.
+    fn audio(&self) -> Vec<String> {
+        let mut args: Vec<String> = ["-c:a", "aac", "-b:a", "256k"].into_iter().map(str::to_string).collect();
+        if self.audio_48k { args.extend(["-ar".into(), "48000".into()]); }
+        args
+    }
     fn frames(&self) -> u64 { (self.duration * self.fps as f64).ceil() as u64 }
     fn frame_bytes(&self) -> usize {
         let pixels = self.width as usize * self.height as usize;
@@ -435,7 +445,8 @@ fn mux_args(p: &Export, audio: &std::path::Path, stage: &std::path::Path) -> Vec
     // The bare bitstream carries no timestamps and FFmpeg derives them in microseconds
     // (30 fps becomes 1000000/33333): number the packets at the exact frame rate instead.
     let stream = format!("h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0,setts=ts=N/({fps}*TB):duration=1/({fps}*TB)", fps = p.fps);
-    args.extend(["-map", "0:v:0", "-map", "[aout]", "-map_metadata", "-1", "-map_chapters", "-1", "-c:v:0", "copy", "-bsf:v:0", &stream, "-c:a", "aac", "-b:a", "256k", "-t"].into_iter().map(str::to_string));
+    args.extend(["-map", "0:v:0", "-map", "[aout]", "-map_metadata", "-1", "-map_chapters", "-1", "-c:v:0", "copy", "-bsf:v:0", &stream].into_iter().map(str::to_string));
+    args.extend(p.audio()); args.push("-t".into());
     args.extend([format!("{:.9}", p.duration), "-movflags".into(), "+faststart".into(), stage.join("render.mp4").to_string_lossy().into_owned()]); args
 }
 fn render_args(p: &Export, audio: &std::path::Path, stage: &std::path::Path) -> Vec<String> {
@@ -450,7 +461,8 @@ fn render_args(p: &Export, audio: &std::path::Path, stage: &std::path::Path) -> 
     // Parallel editor renderers keep the software encoder busy: two x264 threads ran
     // flat out at about 86 frames/s at 1080p. Hardware encoders ignore this option.
     let threads = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 8)).to_string();
-    args.extend(["-map", "[vout]", "-map", "[aout]", "-map_metadata", "-1", "-map_chapters", "-1", "-c:v:0", "libx264", "-preset", "veryfast", "-crf", "19", "-threads:v:0", &threads, "-pix_fmt:v:0", "yuv420p", "-c:a", "aac", "-b:a", "256k", "-t"].into_iter().map(str::to_string));
+    args.extend(["-map", "[vout]", "-map", "[aout]", "-map_metadata", "-1", "-map_chapters", "-1", "-c:v:0", "libx264", "-preset", "veryfast", "-crf", "19", "-threads:v:0", &threads, "-pix_fmt:v:0", "yuv420p"].into_iter().map(str::to_string));
+    args.extend(p.audio()); args.push("-t".into());
     args.extend([format!("{:.9}", p.duration), "-movflags".into(), "+faststart".into(), stage.join("render.mp4").to_string_lossy().into_owned()]); args
 }
 async fn render(p: &Export, audio: &std::path::Path, output: &std::path::Path, job: Arc<Job>) -> Result<()> {
@@ -535,7 +547,7 @@ mod tests {
     }
     #[test]
     fn studio_canvas_limits() {
-        let mut p = Export { track_id: 1, signature: String::new(), duration: 3., output_path: String::new(), width: 1920, height: 840, fps: 60, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::default(), chunk_frames: 0, video_bitrate: 0 };
+        let mut p = Export { track_id: 1, signature: String::new(), duration: 3., output_path: String::new(), width: 1920, height: 840, fps: 60, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::default(), chunk_frames: 0, video_bitrate: 0, audio_48k: true };
         assert!(p.validate().is_ok()); p.width = 1921; assert!(p.validate().is_err()); p.width = 1920;
         p.video_bitrate = 8_000_000; assert!(p.validate().is_ok()); p.video_bitrate = 900_000; assert!(p.validate().is_err(), "a bitrate no encoder holds a picture at"); p.video_bitrate = 0;
         p.duration = f64::NAN; assert!(p.validate().is_err());
@@ -608,7 +620,7 @@ mod tests {
     }
     #[test]
     fn studio_graph_uses_only_argv_paths_and_no_overwrite() {
-        let p = Export { track_id: 1, signature: String::new(), duration: 2., output_path: String::new(), width: 320, height: 180, fps: 30, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::default(), chunk_frames: 0, video_bitrate: 0 };
+        let p = Export { track_id: 1, signature: String::new(), duration: 2., output_path: String::new(), width: 320, height: 180, fps: 30, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::default(), chunk_frames: 0, video_bitrate: 0, audio_48k: true };
         let args = render_args(&p, std::path::Path::new("odd ' [audio].wav"), std::path::Path::new("stage"));
         assert!(!args.contains(&"-y".into())); assert_eq!(args.windows(2).filter(|a| a[0] == "-i" && a[1] == "pipe:0").count(), 1);
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1]; assert!(!graph.contains("odd"));
@@ -632,7 +644,7 @@ mod tests {
         bytes
     }
     fn h264(duration: f64, chunk_frames: u32) -> Export {
-        Export { track_id: 1, signature: String::new(), duration, output_path: String::new(), width: 1920, height: 1080, fps: 30, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::H264, chunk_frames, video_bitrate: 0 }
+        Export { track_id: 1, signature: String::new(), duration, output_path: String::new(), width: 1920, height: 1080, fps: 30, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::H264, chunk_frames, video_bitrate: 0, audio_48k: true }
     }
     #[test]
     fn studio_h264_gops_are_counted_and_must_open_with_their_parameter_sets() {
@@ -681,5 +693,15 @@ mod tests {
         assert!(args.iter().any(|a| a.contains("matrix_coefficients=1") && a.contains("video_full_range_flag=0")), "the copied stream must be tagged BT.709 limited range");
         assert!(args.iter().any(|a| a.ends_with("setts=ts=N/(30*TB):duration=1/(30*TB)")), "packets must be timed at exactly the frame rate");
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1]; assert!(!graph.contains("odd"));
+    }
+    #[test]
+    fn studio_audio_is_48k_unless_turned_off() {
+        let request: Export = serde_json::from_value(serde_json::json!({ "track_id": 1, "signature": "s", "duration": 2.0, "output_path": "/o.mp4", "width": 1920, "height": 1080, "fps": 30 })).unwrap();
+        let rate = |args: Vec<String>| args.windows(2).find(|a| a[0] == "-ar").map(|a| a[1].clone());
+        let (audio, stage) = (std::path::Path::new("audio.wav"), std::path::Path::new("stage"));
+        assert_eq!(rate(render_args(&request, audio, stage)).as_deref(), Some("48000"), "older editors get 48 kHz");
+        assert_eq!(rate(mux_args(&request, audio, stage)).as_deref(), Some("48000"));
+        let off = Export { audio_48k: false, ..request };
+        assert_eq!((rate(render_args(&off, audio, stage)), rate(mux_args(&off, audio, stage))), (None, None));
     }
 }

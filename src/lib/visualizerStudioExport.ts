@@ -50,7 +50,7 @@ export async function runStudioExport(draft: VisualizerDraft, outputPath: string
       try {
         job = await visualizerApi.start({ track_id: draft.project.track.id, signature: analysis.signature,
           duration: studioDuration(analysis.timeline), width, height, fps, video_bitrate: studioVideoBitrate(width, height, fps, quality),
-          acceleration: draft.project.output.acceleration, output_path: outputPath, pixel_format: producer.format,
+          acceleration: draft.project.output.acceleration, output_path: outputPath, pixel_format: producer.format, audio_48k: draft.project.output.audio48k !== false,
           ...(producer.chunkFrames ? { chunk_frames: producer.chunkFrames } : {}) });
         status = await pumpFrames(job, producer, signal, onStatus);
       } catch (error) {

@@ -11,7 +11,7 @@ export interface VisualizerProject {
   track: Pick<TrackSummary, "id" | "path" | "title" | "artist" | "album" | "filename"> & Partial<StudioBeatGrid>;
   scene: AudioVisualizerScene;
   leftContent?: { x: number; y: number; scale: number };
-  output: { fps: 30 | 60; quality?: StudioQuality; acceleration: "auto" | "software"; directory: string; directoryMode?: "download" | "custom"; filename: string; watermark?: boolean };
+  output: { fps: 30 | 60; quality?: StudioQuality; acceleration: "auto" | "software"; directory: string; directoryMode?: "download" | "custom"; filename: string; watermark?: boolean; audio48k?: boolean };
   text: { visible: boolean; showAlbum?: boolean; title: string; artist: string; album: string; subtitle: string; collaboration: string; credit: string; scale: number; font: "sans" | "serif"; progress: boolean };
   look: { leftFit?: "auto" | "cover" | "contain"; rightFit?: "auto" | "cover" | "contain"; leftRotationRpm?: number; leftReflection?: number; mist?: number; accentMode?: "image" | "manual"; traceSpeed?: number; accent: string; leftVeil: number; mainSpectrum: boolean; smallSpectrum: "off" | "bars" | "line" | "mixed"; energyLine: boolean; spectrumGain: number; motion: number; glow: number; particles: number };
   lyrics: { mode: "off" | "subtitle" | "scroll" | "ring"; lrc: string; translation: string; showTranslation?: boolean; offset: number; size: number };
@@ -36,7 +36,7 @@ export function createVisualizerProject(track: TrackSummary): VisualizerProject 
   scene.spectrum = { bands: 64, length: 0.105, sensitivity: 1, smoothing: 0.72, color: [72, 223, 241, 255] };
   return {
     version: 1, track: { id: track.id, path: track.path, title: track.title, artist: track.artist, album: track.album, filename: track.filename, ...studioBeatGrid(track) }, scene,
-    output: { fps: 30, acceleration: "auto", watermark: true, directory: "", directoryMode: "download", filename: `${safeVisualizerName(track.title || track.filename)}-可视化.mp4` },
+    output: { fps: 30, acceleration: "auto", watermark: true, audio48k: true, directory: "", directoryMode: "download", filename: `${safeVisualizerName(track.title || track.filename)}-可视化.mp4` },
     text: { visible: true, showAlbum: false, title: track.title || track.filename, artist: track.artist || "", album: track.album || "", subtitle: "", collaboration: "", credit: "", scale: 1, font: "sans", progress: true },
     look: { leftFit: "cover", rightFit: "auto", leftRotationRpm: .35, leftReflection: .42, mist: .38, accentMode: "image", traceSpeed: 7, accent: "#45dce8", leftVeil: DEFAULT_STUDIO_LEFT_VEIL, mainSpectrum: true, smallSpectrum: "mixed", energyLine: true, spectrumGain: 1, motion: 0.65, glow: 0.38, particles: 0.35 },
     lyrics: { mode: "off", lrc: "", translation: "", showTranslation: true, offset: 0, size: 1 },
@@ -58,6 +58,7 @@ export function validateVisualizerProject(p: VisualizerProject): void {
   if (p.output.directoryMode !== undefined && !["download", "custom"].includes(p.output.directoryMode)) throw new Error("导出目录模式无效");
   if (p.output.watermark !== undefined && typeof p.output.watermark !== "boolean") throw new Error("水印参数无效");
   if (p.output.quality !== undefined && !["high", "standard", "low"].includes(p.output.quality)) throw new Error("画质参数无效");
+  if (p.output.audio48k !== undefined && typeof p.output.audio48k !== "boolean") throw new Error("音频采样率参数无效");
   if (p.text.showAlbum !== undefined && typeof p.text.showAlbum !== "boolean") throw new Error("专辑信息开关无效");
   const finite = (v: number, lo: number, hi: number) => Number.isFinite(v) && v >= lo && v <= hi;
   if (p.leftContent !== undefined && (!p.leftContent || !finite(p.leftContent.x, -.4, .4) || !finite(p.leftContent.y, -.4, .4) || !finite(p.leftContent.scale, .5, 1.5))) throw new Error("左侧内容布局无效");
