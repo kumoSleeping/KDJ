@@ -51,6 +51,10 @@ UTF-8 JSON，扩展名 `.kdjv`，`"kdjv": 1`。字段说明写给 AI 看，在�
   `move`（`at`，可带 `track` 或 `new_track`；画面片段不能进声音轨，反过来也不能）、`remove`（`ripple` 时这条轨道后面的跟上）、
   `trim`（`in` 改开头时结尾在成片里不动）、`split`、`set`（`speed`、`volume`、`muted`、`x`、`y`、`scale`、`opacity`、`fill`、`crop`、
   `fade_in`、`fade_out`）、`fold`、`unfold`、`restore`、`markers`、`add_title`、`set_title`、`remove_title`。
+- **编辑器里拖进来**（`LaneBoard.tsx` `landing`，`laneEditorStore.ts` `placeTracks`）：画面轨上的视频进来就是静音的（`muted`），要它的声音在
+  「声音」里打开。松手在一条轨道中间：放进这条，盖住那里原来的；松手在轨道的上下边缘或两条轨道之间（最后一条下面一点也算）：
+  在那里新建一条同类的轨道放进去（先 `add_track`，后面的 `add` 用它的 id）。搜索结果下载好才放，不新建轨道。
+  按住轨道名上下拖，整条轨道（合并的连同整个合并）换到同类轨道之间的另一个位置（`move_track`），不会插进别的合并中间。
 - **新工程放哪、叫什么**（`laneEditorStore.ts` `createFrom`）：第一个文件在曲库的文件夹里，就放在它旁边；不在（别的 App 自己的
   文件夹，比如 QQ 把收到的视频按哈希放在它的沙盒里），就放进默认下载文件夹，否则工程和它旁边导出的 MP4 都在没人看得见的地方。
   名字是歌名加「VJ」或文件名加「剪辑」；文件名是 App 起的（一长串十六进制、UUID）时改用「剪辑 2026-10-25」。

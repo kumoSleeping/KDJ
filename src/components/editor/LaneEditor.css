@@ -59,7 +59,11 @@
 .kd-lanes-name[data-lane="title"] { height: 16px; }
 .kd-lanes-name[data-lane="picture"] { height: 48px; }
 .kd-lanes-name[data-lane="sound"] { height: 26px; }
+.kd-lanes-name[data-lane="tempo"] { height: 12px; }
 .kd-lanes-name { gap: 2px; }
+/* A track's name is held to move the track up or down. */
+.kd-lanes-name[data-lane="picture"], .kd-lanes-name[data-lane="sound"] { cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+.kd-lanes-name[data-moving] { cursor: grabbing; opacity: 0.5; }
 .kd-lanes-name-text { max-width: 7rem; overflow: hidden; text-overflow: ellipsis; padding-right: 2px; }
 /* A folded track keeps its place in the fold: its name a little in. */
 .kd-lanes-name[data-folded] .kd-lanes-name-text { font-weight: 500; }

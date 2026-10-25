@@ -14,7 +14,9 @@
  * over, if that is a track of its kind; past the edge of a track (or over a track of the other
  * kind) it makes a new track there. A picture never goes into a sound track, nor sound into a
  * picture track. A press anywhere else puts the playhead there, and dragging moves it along.
- * Library rows and search results dropped on the editor go where they belong (`landing`).
+ * A track's name held and dragged up or down moves the track among those of its kind.
+ * Library rows and search results dropped on the editor go where they belong (`landing`): on a
+ * track into it, at a track's edge or between two tracks into a new track made there.
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { Eye, EyeOff, Volume2, VolumeX, X, Plus, ChevronDown, ChevronRight, Combine, Ungroup } from "lucide-react";
@@ -42,6 +44,11 @@ const EDGE_PX = 7;
 const DRAG_PX = 3;
 /** How near a track's edge (or past it) a clip held makes a new track there, in pixels. */
 const NEW_TRACK_PX = 7;
+/** How near a row's top or bottom edge (or between two rows) a drop from the library makes a new track there, in pixels. */
+const NEW_TRACK_DROP_PX = 10;
+/** The room between two rows (`.kd-lanes-board` gap), and how far under the last row a drop still makes a track below it. */
+const ROW_GAP_PX = 4;
+const BELOW_LAST_PX = 16;
 /** A dragged clip's or title's start or end this close to another edge, in pixels, lands on it. */
 const SNAP_PX = 8;
 /** What is dragged lands on a beat only this near one, in seconds: no songs there, no beats to land on. */
@@ -96,8 +103,11 @@ const draggedSearch = (payload: ActiveSearchDrag): Dragged =>
 /** Where a drop lands in one track (a fold's row shows it too): the mark drawn there meanwhile and what it says. */
 interface DropMark { track: string; at: number; label: string }
 
+/** A line between rows where a new track would be made (`index` in the track list), with what it says, at `at`. */
+interface TrackLine { index: number; label: string; at: number }
+
 /** Where a drop goes, for the editor (`Placement`), with its marks and the words on the drag's card. */
-interface Landing { place: Placement; marks: DropMark[]; label: string }
+interface Landing { place: Placement; marks: DropMark[]; label: string; line?: TrackLine }
 
 /** One row of the board: a track, or tracks folded together (top first). */
 interface Row { key: string; kind: TrackKind; tracks: LaneTrack[]; fold: string | null; opened: boolean }
@@ -185,6 +195,10 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
   const rowNodes = useRef(new Map<string, HTMLDivElement>());
   const [boardWidth, setBoardWidth] = useState(0);
   const [drop, setDrop] = useState<DropMark[] | null>(null);
+  /** The new track a drop would make, drawn as a line between the rows. */
+  const [dropLine, setDropLine] = useState<TrackLine | null>(null);
+  /** A track's name held to move it: the row and where it would go. */
+  const [reorder, setReorder] = useState<{ row: string; pointer: number; y0: number; moved: boolean; to: number | null } | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const dragRef = useRef<Drag | null>(null);
   const [scrub, setScrub] = useState<number | null>(null);
@@ -465,8 +479,8 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     setDrag(null);
     if (!done) return;
     if (!done.moved) {
-      // A press only chooses it: the playhead stays where it plays.
-      select(selected === id ? null : id);
+      // A press only chooses it (pressed again it stays chosen; Esc lets it go): the playhead stays where it plays.
+      select(id);
       return;
     }
     const ops = commit(done);
@@ -511,7 +525,7 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     onPointerDown: press(kind, key, chosen), onPointerMove: move, onPointerUp: release(id),
     onPointerCancel: () => { dragRef.current = null; setDrag(null); },
     // A key (Enter on a focused clip) chooses it too.
-    onClick: (event: { detail: number }) => { if (event.detail === 0) select(selected === id ? null : id); },
+    onClick: (event: { detail: number }) => { if (event.detail === 0) select(id); },
   });
   /** The edge what is dragged is aligned to, drawn across the tracks while it is. */
   const guide = (() => {
@@ -551,69 +565,107 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
   // ---- drops from the library and from search ----
   const firstOf = (kind: TrackKind) => doc.tracks.find(track => track.kind === kind) ?? null;
   const endOf = (track: LaneTrack | null) => track ? track.clips.reduce((end, c) => Math.max(end, c.at + lengthOf(c)), 0) : 0;
+  /** Whether place `g` of the track list lies inside a fold (between two of its tracks): no track goes in there. */
+  const insideFold = (g: number) => g > 0 && (doc.folds ?? []).some(f => f.tracks.includes(doc.tracks[g - 1]?.id) && f.tracks.includes(doc.tracks[g]?.id));
+  /**
+   * Where between the rows a drop at `y` makes a new track: near a row's top or bottom edge, in the
+   * room between two rows, or just under the last one. The index it would have in the track list,
+   * and the kinds of the rows beside it (a new track takes a kind of its neighbours).
+   */
+  const newTrackAt = (y: number): { index: number; kinds: TrackKind[] } | null => {
+    for (let n = 0; n < rows.length; n++) {
+      const row = rows[n];
+      const box = rowNodes.current.get(row.key)?.getBoundingClientRect();
+      if (!box) continue;
+      const edge = Math.min(NEW_TRACK_DROP_PX, box.height / 4);
+      const before = rows[n - 1], after = rows[n + 1];
+      const top = trackIndex(row.tracks[0].id), bottom = trackIndex(row.tracks.at(-1)!.id) + 1;
+      if (y >= box.top - ROW_GAP_PX && y < box.top + edge && !insideFold(top)) {
+        return { index: top, kinds: [...new Set([row.kind, ...(before ? [before.kind] : [])])] };
+      }
+      if (y > box.bottom - edge && y <= box.bottom + (after ? ROW_GAP_PX : BELOW_LAST_PX) && !insideFold(bottom)) {
+        return { index: bottom, kinds: [...new Set([row.kind, ...(after ? [after.kind] : [])])] };
+      }
+    }
+    return null;
+  };
   /**
    * Where what is dragged lands when let go at (x, y). Songs and pictures each go to a track of
    * their own kind: let go on a track, at that time (in a project with songs a picture at the
-   * bar); anywhere else on the editor, after the last clip of the first track of their kind (one
-   * is made when there is none). Only videos alone, let go on a sound track on purpose, go there,
-   * for their sound; a song let go on a picture track goes to a sound track all the same, and a
-   * still never to sound.
+   * bar), over what is there; let go at a track's top or bottom edge or between two tracks, into a
+   * new track made there (`fresh`; search results, placed only once downloaded, do not); anywhere
+   * else on the editor, after the last clip of the first track of their kind (one is made when
+   * there is none). Only videos alone, let go on a sound track (or a new one among sound tracks)
+   * on purpose, go there, for their sound; a song let go on a picture track goes to a sound track
+   * all the same, and a still never to sound.
    */
-  const landing = (what: Dragged, x: number, y: number): Landing | null => {
+  const landing = (what: Dragged, x: number, y: number, fresh = true): Landing | null => {
     const pictures = what.videos + what.stills;
     if (what.songs + pictures === 0) return null;
-    const hit = rowAt(x, y);
+    const made = fresh ? newTrackAt(y) : null;
+    const hit = made ? null : rowAt(x, y);
     const on = hit ? hit.row.tracks[0] : null;
     const t = timeAt(x);
-    const sound = on?.kind === "sound" && what.songs === 0 && what.videos > 0 && what.stills === 0;
-    const at = on ? t : LANE_END;
+    const onlyVideos = what.songs === 0 && what.videos > 0 && what.stills === 0;
+    const sound = onlyVideos && (on?.kind === "sound" || Boolean(made?.kinds.includes("sound") && !made.kinds.includes("picture")));
+    const at = on || made ? t : LANE_END;
+    const songCount = what.songs + (sound ? what.videos : 0);
+    const newSong = made?.kinds.includes("sound") && songCount ? made.index : undefined;
+    const newPicture = made?.kinds.includes("picture") && pictures && !sound ? made.index : undefined;
     const songTrack = on?.kind === "sound" ? on : firstOf("sound");
     const pictureTrack = on?.kind === "picture" ? on : firstOf("picture");
     const marks: DropMark[] = [];
-    const songCount = what.songs + (sound ? what.videos : 0);
     const count = (n: number) => (n > 1 ? ` ×${n}` : "");
-    if (songCount && songTrack) {
-      marks.push({ track: songTrack.id, at: at >= LANE_END ? endOf(songTrack) : t, label: sound ? `只要声音${count(songCount)}` : `音频${count(songCount)}` });
+    const songWord = sound ? `只要声音${count(songCount)}` : `音频${count(songCount)}`;
+    const pictureWord = `${what.stills === 0 ? "视频" : what.videos === 0 ? "图片" : "画面"}${count(pictures)}`;
+    const pictureAt = at >= LANE_END ? endOf(pictureTrack) : vj ? snapToBar(downbeats, t) : t;
+    if (songCount && songTrack && newSong === undefined) {
+      marks.push({ track: songTrack.id, at: at >= LANE_END ? endOf(songTrack) : t, label: songWord });
     }
-    if (pictures && !sound && pictureTrack) {
-      const word = what.stills === 0 ? "视频" : what.videos === 0 ? "图片" : "画面";
-      marks.push({ track: pictureTrack.id, at: at >= LANE_END ? endOf(pictureTrack) : vj ? snapToBar(downbeats, t) : t, label: `${word}${count(pictures)}` });
+    if (pictures && !sound && pictureTrack && newPicture === undefined) {
+      marks.push({ track: pictureTrack.id, at: pictureAt, label: pictureWord });
     }
-    const label = songCount && pictures && !sound ? "音频放声音轨，画面放画面轨"
-      : sound ? "只要声音"
-        : !on ? (songCount ? "接在声音轨最后" : "接在画面轨最后")
-          : songCount ? "放进声音轨" : "放进画面轨";
+    const madeWords = [newPicture !== undefined ? pictureWord : "", newSong !== undefined ? songWord : ""].filter(Boolean);
+    const line = made && madeWords.length ? { index: made.index, at: newPicture !== undefined ? pictureAt : t, label: `${madeWords.join("、")} · 新轨道` } : undefined;
+    const label = line ? (marks.length ? `${line.label}，其余放进原来的轨道` : `放进新轨道`)
+      : songCount && pictures && !sound ? "音频放声音轨，画面放画面轨"
+        : sound ? "只要声音"
+          : !on ? (songCount ? "接在声音轨最后" : "接在画面轨最后")
+            : songCount ? "放进声音轨" : "放进画面轨";
     return {
-      place: { at, sound, picture: pictureTrack?.id, song: songTrack?.id },
-      marks, label,
+      place: { at, sound, picture: pictureTrack?.id, song: songTrack?.id, newPicture, newSong },
+      marks, label, line,
     };
   };
   const dropRows = (ids: readonly number[], x: number, y: number) => {
     setDrop(null);
+    setDropLine(null);
     const where = landing(draggedRows(ids), x, y);
     // Projects alone open as pages of their own (the editor does that with whatever is dropped).
     if (ids.length) onDropped(ids, where?.place ?? { at: LANE_END });
   };
   const overRows = (ids: readonly number[], x: number, y: number) => {
     // Projects open as pages of their own; they do not go into this one.
-    if (onlyProjects(ids)) { setDrop(null); return "打开工程"; }
+    if (onlyProjects(ids)) { setDrop(null); setDropLine(null); return "打开工程"; }
     const where = landing(draggedRows(ids), x, y);
     setDrop(where?.marks ?? null);
+    setDropLine(where?.line ?? null);
     return where?.label ?? null;
   };
   const dropSearch = (payload: ActiveSearchDrag, x: number, y: number) => {
     setDrop(null);
     const what = draggedSearch(payload);
-    const where = landing(what, x, y);
+    const where = landing(what, x, y, false);
     if (where) onSearchDropped(payload, { ...where.place, sound: where.place.sound || what.songs > 0 });
   };
   const overSearch = (payload: ActiveSearchDrag, x: number, y: number) => {
-    const where = landing(draggedSearch(payload), x, y);
+    const where = landing(draggedSearch(payload), x, y, false);
     setDrop(where?.marks ?? null);
     return where ? `下载后${where.label}` : null;
   };
-  usePointerTrackDrop(area, { over: overRows, leave: () => setDrop(null), drop: dropRows });
-  usePointerSearchDrop(area, { over: overSearch, leave: () => setDrop(null), drop: dropSearch });
+  const leaveDrop = () => { setDrop(null); setDropLine(null); };
+  usePointerTrackDrop(area, { over: overRows, leave: leaveDrop, drop: dropRows });
+  usePointerSearchDrop(area, { over: overSearch, leave: leaveDrop, drop: dropSearch });
 
   // What the system carries (the harmonic list, a search result) is taken by the whole editor too.
   const native = useRef({ overRows, dropRows, overSearch, dropSearch });
@@ -632,7 +684,7 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
       const payload = activeSearchDrag();
       if (payload) native.current.overSearch(payload, event.clientX, event.clientY);
     };
-    const leave = (event: DragEvent) => { if (!node.contains(event.relatedTarget as Node | null)) setDrop(null); };
+    const leave = (event: DragEvent) => { if (!node.contains(event.relatedTarget as Node | null)) { setDrop(null); setDropLine(null); } };
     const dropped = (event: DragEvent) => {
       if (isTrackDrag(event)) {
         event.preventDefault();
@@ -645,7 +697,7 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
       const payload = event.dataTransfer ? readSearchDrop(event.dataTransfer) : null;
       finishSearchDrop();
       if (payload) native.current.dropSearch(payload, event.clientX, event.clientY);
-      else setDrop(null);
+      else { setDrop(null); setDropLine(null); }
     };
     node.addEventListener("dragover", over);
     node.addEventListener("dragleave", leave);
@@ -711,28 +763,109 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     const at = shownBy(drag, "clip", held.clip.id, held.clip.at, length);
     return <span className="kd-lanes-ghost" style={{ left: pct(at.at, span), width: pct(at.length, span) }} aria-hidden="true">{fileLabel(held.clip.src)}</span>;
   };
-  /** Where a new track would be made: a line between rows (`edge`: above `row`, or below the last). */
+  /**
+   * The line between rows above track `index` (or under the last, at the track count): where a
+   * clip held or a drop would make a new track, or where a track whose name is held would go.
+   */
   const newTrackLine = (index: number) => {
-    if (!heldTo || "track" in heldTo || heldTo.newTrack !== index) return null;
-    return <div className="kd-lanes-new-track" aria-hidden="true"><span>新轨道</span></div>;
+    if (heldTo && !("track" in heldTo) && heldTo.newTrack === index) return <div className="kd-lanes-new-track" aria-hidden="true"><span>新轨道</span></div>;
+    if (dropLine?.index === index) {
+      // The words stand at the time it goes in; near the right end, to the left of it.
+      const far = Math.min(dropLine.at, span) / span > 0.7;
+      return <div className="kd-lanes-new-track" aria-hidden="true">
+        <span style={far ? { left: "auto", right: pct(span - Math.min(dropLine.at, span), span) } : { left: pct(dropLine.at, span) }}>{dropLine.label}</span>
+      </div>;
+    }
+    if (reorder?.moved && reorder.to === index) return <div className="kd-lanes-new-track" aria-hidden="true" />;
+    return null;
   };
+
+  // ---- a track's name held and dragged up or down: the track (with its fold) to another place ----
+  /** The tracks a row moves as one: its own, or every track of its fold, in their order. */
+  const blockOf = (row: Row) => {
+    const fold = row.fold ? (doc.folds ?? []).find(f => f.id === row.fold) : undefined;
+    const ids = fold ? fold.tracks : row.tracks.map(track => track.id);
+    return doc.tracks.filter(track => ids.includes(track.id)).map(track => track.id);
+  };
+  /**
+   * Where `row` held at `y` would go: the place in the track list it is put before, the gap nearest
+   * the pointer among the rows of its kind. Never inside another fold; null where it already is.
+   */
+  const reorderTo = (row: Row, y: number): number | null => {
+    const block = blockOf(row);
+    const from = trackIndex(block[0]), to = from + block.length;
+    let best: number | null = null, distance = Infinity;
+    for (const other of rows.filter(r => r.kind === row.kind)) {
+      const box = rowNodes.current.get(other.key)?.getBoundingClientRect();
+      if (!box) continue;
+      for (const [edge, g] of [[box.top, trackIndex(other.tracks[0].id)], [box.bottom, trackIndex(other.tracks.at(-1)!.id) + 1]]) {
+        if (insideFold(g) || Math.abs(y - edge) >= distance) continue;
+        distance = Math.abs(y - edge);
+        best = g;
+      }
+    }
+    return best === null || (best >= from && best <= to) ? null : best;
+  };
+  /** The move_track operations that put `row`'s tracks before track place `g`. */
+  const reorderOps = (row: Row, g: number): LaneOp[] => {
+    const block = blockOf(row);
+    const ids = doc.tracks.map(track => track.id);
+    const rest = ids.filter(id => !block.includes(id));
+    const at = g - ids.slice(0, g).filter(id => block.includes(id)).length;
+    const wanted = [...rest.slice(0, at), ...block, ...rest.slice(at)];
+    const now = [...ids], ops: LaneOp[] = [];
+    wanted.forEach((id, n) => {
+      if (now[n] === id) return;
+      now.splice(now.indexOf(id), 1);
+      now.splice(n, 0, id);
+      ops.push({ op: "move_track", id, index: n });
+    });
+    return ops;
+  };
+  const reorderRef = useRef(reorder);
+  reorderRef.current = reorder;
+  const nameGrip = (row: Row) => ({
+    onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0 || (event.target as Element).closest("button")) return;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setReorder({ row: row.key, pointer: event.pointerId, y0: event.clientY, moved: false, to: null });
+    },
+    onPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => {
+      const now = reorderRef.current;
+      if (!now || now.pointer !== event.pointerId) return;
+      const moved = now.moved || Math.abs(event.clientY - now.y0) > DRAG_PX;
+      setReorder({ ...now, moved, to: moved ? reorderTo(row, event.clientY) : null });
+    },
+    onPointerUp: (event: ReactPointerEvent<HTMLDivElement>) => {
+      const now = reorderRef.current;
+      if (!now || now.pointer !== event.pointerId) return;
+      setReorder(null);
+      if (now.moved && now.to !== null) {
+        const ops = reorderOps(row, now.to);
+        if (ops.length) edit(ops);
+      }
+    },
+    onPointerCancel: () => setReorder(null),
+  });
   const rowLines = rows.map(row => trackIndex(row.tracks[0].id));
 
   return <div className="kd-lanes-frame">
    {/* The tracks' names and keys, level with their rows. */}
    <div className="kd-lanes-names">
+    {vj && tempo.length > 0 && <span className="kd-lanes-name" data-lane="tempo" />}
     <span className="kd-lanes-name" data-lane="ruler" />
     {titles.length > 0 && <span className="kd-lanes-name" data-lane="title">字幕</span>}
     {rows.map((row, n) => {
       const track = row.tracks[0];
       const folded = row.fold !== null && !row.opened;
       const next = rows[n + 1];
-      return <div key={row.key} className="kd-lanes-name" data-lane={row.kind} data-folded={row.fold ? "" : undefined}>
+      return <div key={row.key} className="kd-lanes-name" data-lane={row.kind} data-folded={row.fold ? "" : undefined}
+        data-moving={reorder?.moved && reorder.row === row.key ? "" : undefined} {...nameGrip(row)}>
         {row.fold && <button type="button" className="kd-lanes-name-key" onClick={() => toggleOpened(row.fold!)}
           aria-label={folded ? "展开合并的轨道" : "收起"} title={folded ? "展开来调整（合并不变）" : "收起"}>
           {folded ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
         </button>}
-        <span className="kd-lanes-name-text">{folded ? row.tracks.map(t => trackName(doc, t)).join(" + ") : trackName(doc, track)}</span>
+        <span className="kd-lanes-name-text" title="上下拖动换位置">{folded ? row.tracks.map(t => trackName(doc, t)).join(" + ") : trackName(doc, track)}</span>
         {!folded && track.kind === "picture" && <button type="button" className="kd-lanes-name-key" aria-pressed={!track.hidden}
           onClick={() => edit([{ op: "set_track", id: track.id, fields: { hidden: !track.hidden } }])}
           aria-label={track.hidden ? "显示这条轨道" : "隐藏这条轨道"}>{track.hidden ? <EyeOff size={12} /> : <Eye size={12} />}</button>}

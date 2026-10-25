@@ -200,7 +200,8 @@ export const isPictureTrack = (track: Pick<Track, "format">) => isVideoTrack(tra
 /** The whole file, its length when the library knows it, else measured by the server (no `out`). */
 const length = (track: Track) => (track.duration && track.duration > 0 ? { out: track.duration } : {});
 export const songOf = (track: Track): NewClip => ({ src: track.path, in: 0, ...length(track) });
-export const clipOf = (track: Track, muted: boolean): NewClip => ({ src: track.path, in: 0, ...length(track), muted, fill: true });
+/** A picture as it is put in: filling the frame and silent (its sound is turned on in 声音 when wanted). */
+export const clipOf = (track: Track): NewClip => ({ src: track.path, in: 0, ...length(track), muted: true, fill: true });
 
 /** Where a drop goes (`placeTracks`): from `at` (LANE_END: after the last clip), into these tracks. */
 export interface Placement {
@@ -210,6 +211,15 @@ export interface Placement {
   /** The picture track pictures go into, and the sound track songs go into. */
   picture?: string;
   song?: string;
+  /** Made for them instead: a new picture or sound track at this index of the track list (0 is the top). */
+  newPicture?: number;
+  newSong?: number;
+}
+
+/** The id the server gives the next track of `kind` (tracks.rs `fresh_track`): v1, v2… or a1, a2… */
+function freshTrackId(doc: LaneDocument, kind: TrackKind): string {
+  const prefix = kind === "sound" ? "a" : "v";
+  for (let n = 1; ; n++) if (!doc.tracks.some(track => track.id === `${prefix}${n}`)) return `${prefix}${n}`;
 }
 
 /** The songs of a document: the clips of its first sound track that has any (where bar lines come from). */
@@ -470,11 +480,10 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       const named = (songs[0] ?? pictures[0]).title?.trim() ?? "";
       const word = songs.length ? "VJ" : "剪辑";
       const title = named && !madeName(named) ? `${named} ${word}` : `${word} ${today()}`;
-      // Songs one after another in a sound track; pictures one after another in a picture track,
-      // without their own sound when there are songs.
+      // Songs one after another in a sound track; pictures one after another in a picture track, silent.
       const adds: LaneOp[] = [
         ...songs.map(song => ({ op: "add" as const, clip: songOf(song), kind: "sound" as const })),
-        ...pictures.map(picture => ({ op: "add" as const, clip: clipOf(picture, songs.length > 0), kind: "picture" as const })),
+        ...pictures.map(picture => ({ op: "add" as const, clip: clipOf(picture), kind: "picture" as const })),
       ];
       const home = projectHome(first.path);
       let made = await create(home, title, [{ op: "new", title }, ...adds]);
@@ -563,9 +572,16 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
         }
       };
       const at = place.at >= LANE_END ? undefined : place.at;
-      run(songs, "sound", place.song, at, songOf);
-      // In a project with songs a picture goes in at the bar where it is let go, without its own sound.
-      run(pictures, "picture", place.picture, at !== undefined && vj ? snapToBar(grid?.downbeats ?? [], at) : at, picture => clipOf(picture, vj));
+      /** The track a kind goes into: the one named, or one made for it first (its id known in advance). */
+      const into = (kind: TrackKind, named: string | undefined, index: number | undefined, items: Track[]) => {
+        if (index === undefined || items.length === 0) return named;
+        ops.push({ op: "add_track", kind, index });
+        return freshTrackId(doc, kind);
+      };
+      run(songs, "sound", into("sound", place.song, place.newSong, songs), at, songOf);
+      // In a project with songs a picture goes in at the bar where it is let go.
+      run(pictures, "picture", into("picture", place.picture, place.newPicture, pictures),
+        at !== undefined && vj ? snapToBar(grid?.downbeats ?? [], at) : at, clipOf);
       if (ops.length === 0) return;
       const before = new Set(doc.tracks.flatMap(track => track.clips.map(clip => clip.id)));
       if (!(await editEach(project.path, ops)) || !pictures.length) return;
@@ -637,10 +653,16 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       const target = project && songUnder(project, clipId);
       if (!target) return;
       const ops = alignedOps(target.clip, target.track, plan, target.song);
+      const before = new Set(allClips(project.doc).map(({ clip }) => clip.id));
+      const chosen = get().selected === clipId;
       if (ops.length && await get().edit(ops)) {
+        // The clip laid in the song stays chosen (the first of its pieces), with its panel open.
+        const now = get().projects.find(p => p.path === project.path);
+        const made = (now ? allClips(now.doc) : []).filter(({ clip }) => !before.has(clip.id) || clip.id === clipId)
+          .filter(({ clip }) => clip.src === target.clip.src).sort((a, b) => a.clip.at - b.clip.at)[0];
         set(state => {
           const { [alignKey(project.path, clipId, target.clip.src)]: _gone, ...plans } = state.plans;
-          return { plans, selected: null };
+          return { plans, ...(chosen && made && state.active === project.path ? { selected: made.clip.id } : {}) };
         });
       }
     },

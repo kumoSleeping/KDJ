@@ -70,6 +70,11 @@ test("the editor shows a project's tracks, and everything about what is chosen i
     // A sound clip chosen: no picture to set.
     await click(document.querySelectorAll('.kd-lanes-clip[data-kind="sound"]')[1]);
     assert.deepEqual([...document.querySelectorAll(".kd-lanes-section-label")].map(node => node.textContent), ["剪", "声音", "淡入淡出"]);
+    // Pressed again it stays chosen: the panel under the tracks does not go away by itself.
+    await click(document.querySelectorAll('.kd-lanes-clip[data-kind="sound"]')[1]);
+    assert.equal(useLaneEditor.getState().selected, "s2");
+    assert.deepEqual([...document.querySelectorAll(".kd-lanes-section-label")].map(node => node.textContent), ["剪", "声音", "淡入淡出"]);
+
 
     // 字幕 offers a new title at the playhead; 导出 its settings; nothing to undo yet.
     await click(button("字幕"));
@@ -78,6 +83,23 @@ test("the editor shows a project's tracks, and everything about what is chosen i
     assert.ok(document.querySelector('.kd-lanes-panel [role="radiogroup"][aria-label="尺寸"]'));
     assert.ok(button("导出 MP4"));
     assert.equal((document.querySelector('[aria-label="撤销"]') as HTMLButtonElement).disabled, true);
+
+    // A video let go between two tracks goes into a new track made there, silent.
+    const { api } = await import("../src/lib/api");
+    const sent: unknown[] = [];
+    const editKdjv = api.editKdjv;
+    api.editKdjv = (async (body: { ops: unknown[] }) => {
+      sent.push(...body.ops);
+      return { path: "/p/set.kdjv", track_id: null, song_track_id: 1, song_track_ids: [1, 2], document: doc, layout, duration: 100 };
+    }) as typeof api.editKdjv;
+    try {
+      await act(async () => useLaneEditor.getState().placeTracks("/p/set.kdjv",
+        [{ id: 9, path: "/v/new.mp4", title: "new", format: "mp4", duration: 12 } as never], { at: 4, picture: "v2", newPicture: 1 }));
+    } finally { api.editKdjv = editKdjv; }
+    assert.deepEqual(sent, [
+      { op: "add_track", kind: "picture", index: 1 },
+      { op: "add", clip: { src: "/v/new.mp4", in: 0, out: 12, muted: true, fill: true }, kind: "picture", track: "v3", at: 4 },
+    ]);
   } finally {
     await act(async () => root.unmount());
     dom.window.close();
