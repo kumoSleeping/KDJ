@@ -36,6 +36,9 @@ fn ensure_editor_window(
     .maximizable(kind != "preferences")
     .visible(!background)
     .focused(!background)
+    // The visualizer window renders the export queue's frames while never shown; throttled
+    // like a hidden page its exports stall and fail (the main window has this in tauri.conf.json).
+    .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
     .center();
     // Editor tools use the same single-row chrome as the main window; preferences
     // keeps its native title bar until it has its own in-page chrome.
