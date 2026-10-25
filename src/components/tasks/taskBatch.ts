@@ -12,6 +12,9 @@ export interface BatchMember {
   error: string;
   /** It started now, rather than being found already under way. */
   fresh: boolean;
+  /** What a finished batch of this one alone says instead of the usual word, and its keys:
+   *  where an export went and a key that shows it there. */
+  outcome?: { detail: string; actions?: TaskBubbleSpec["actions"] };
 }
 
 interface BatchWords {
@@ -58,9 +61,10 @@ export function createBatchReporter(words: BatchWords) {
     const title = !first ? "" : about.length === 1 ? first.title : `${first.title} 等 ${about.length} ${words.unit}`;
     const error = phase === "failed" || (closing && failed.length > 0);
     const covers = about.flatMap(member => member.covers);
+    const outcome = closing && !error && about.length === 1 ? first?.outcome : undefined;
     const detail = error
       ? [words.failed, (subject ?? failed[0])?.error, closing && done.length ? `${done.length} ${words.unit}已完成` : ""].filter(Boolean).join(" · ")
-      : closing ? words.finished
+      : closing ? outcome?.detail ?? words.finished
       : phase === "started" && done.length === 0 ? words.started
       : `${words.running} ${done.length + failed.length}/${members.length}`;
     return {
@@ -71,6 +75,7 @@ export function createBatchReporter(words: BatchWords) {
       covers,
       count: about.length > covers.length ? about.length : undefined,
       icon: words.icon,
+      actions: outcome?.actions,
       placement: words.placement,
       stay: words.stay?.(),
       tone: error ? "error" : closing ? "success" : "info",

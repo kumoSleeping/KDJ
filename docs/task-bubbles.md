@@ -255,7 +255,7 @@ Name the source in the `sources` of the window's `<TaskBubbleHost>`.
 | --- | --- | --- | --- |
 | A song starts (not pause/resume) | `now-playing`: cover, title, artist (two lines, no figures); 歌词, 小窗, 歌曲色彩; the mini transport while the bar is away; the song's colours as its backdrop while 歌曲色彩 is on | bottom, the base | `NowPlayingTask.tsx` |
 | Downloads started / progress / ended / failed | `downloads`: one bubble per run | top | source `downloads` |
-| Exports added / started / ended / failed (mixing and visualizer) | `exports` | bottom | source `exports` |
+| Exports added / started / ended / failed (剪辑/VJ projects and visualizer; a project export stopped by an edit of its project reports as failed, one finished alone names its folder with 打开所在文件夹) | `exports` | bottom | source `exports` |
 | A folder import ended or failed | `import` | bottom | source `imports` |
 | The player's own message (playback, transition and deck errors, "下一首已替换为…") | `player-notice` | bottom | `PlayerBar.tsx` `setNotice` |
 | The playing song has no lyrics to open ("没有找到歌词") | `lyrics-entry`, small, 3 s | top when asked from the drawer's 歌词 entry; bottom from the bar's key or the song's bubble | `lyricsEntry.ts` `requestPlayingLyrics(onOpened, near)` |

@@ -1,6 +1,7 @@
 import { startTransition, useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelStore";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
+import { useProjectExportStore } from "../../stores/projectExportStore";
 import { Panel } from "../common";
 import { QueuePanel } from "../download/QueuePanel";
 import { ExportQueuePanel } from "../composition/ExportQueuePanel";
@@ -48,6 +49,7 @@ export function DownloadTaskPages() {
     if ((view !== "exports" && view !== "export-history") || visitedExports.current) return;
     visitedExports.current = true;
     void useVisualizerExportStore.getState().initialize().catch(() => undefined);
+    void useProjectExportStore.getState().initialize().catch(() => undefined);
   }, [view]);
   return <SlidePages page={view} order={taskViewIds}>
     <TaskPageBody key={view} view={view} position={positions.current[view]} onReady={onReady} />

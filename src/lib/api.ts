@@ -968,9 +968,12 @@ export const api = {
     post<import("./lanes").LaneEdited>("/kdjv/edit", body),
   /** A project's file and title renamed in its folder, its library row moved with it; answers as an edit does. */
   renameKdjv: (path: string, name: string) => post<import("./lanes").LaneEdited>("/kdjv/rename", { path, name }),
-  /** A `.kdjv` project written out as one MP4 beside it, never over an existing file. */
-  exportKdjv: (trackId: number, options?: import("./lanes").ExportOptions) =>
-    post<{ path: string; track_id: number | null }>("/kdjv/export", options ? { track_id: trackId, options } : { track_id: trackId }),
+  /** A `.kdjv` project written out as one MP4 beside it, never over an existing file. `id` names
+   *  the export for `cancelKdjvExport`; a project written meanwhile stops it (`kdjv_project_changed`). */
+  exportKdjv: (trackId: number, options: import("./lanes").ExportOptions | undefined, id: string) =>
+    post<{ path: string; track_id: number | null }>("/kdjv/export", options ? { track_id: trackId, options, id } : { track_id: trackId, id }),
+  /** Stops the export of that id; its own request then answers `kdjv_export_stopped`. */
+  cancelKdjvExport: (id: string) => post<{ stopped: boolean }>("/kdjv/export/cancel", { id }),
   /** A title's text drawn as a PNG (base64), kept by the server; answers where. */
   saveTitleImage: (png: string) => post<{ src: string }>("/kdjv/title-image", { png }),
   downloads: () => request<DownloadTask[]>("/downloads"),

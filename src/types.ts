@@ -987,6 +987,8 @@ export interface KdjvPreview {
 export interface KdjvProgress {
   path: string;
   track_id: number | null;
+  /** The export queue's task this render is for, if any. */
+  export?: string | null;
   progress: number;
   detail: string;
   error: string | null;

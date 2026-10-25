@@ -12,13 +12,11 @@
  * Asking again for a project the listener left (another song was started meanwhile) only
  * finishes the mix, so the next play is immediate; it does not take the player back.
  */
-import { createElement } from "react";
 import { create } from "zustand";
-import { FolderOpen } from "lucide-react";
-import { getBridge } from "./bridge";
 import { api } from "./api";
 import { dismissTask, showTask } from "../components/tasks/taskBubbleStore";
 import { getPlayerSession, requestPlayerCommand } from "./playerSession";
+import { useProjectExportStore } from "../stores/projectExportStore";
 import type { KdjvLive, KdjvProgress, PlayableTrack } from "../types";
 import type { ExportOptions } from "./lanes";
 
@@ -132,46 +130,22 @@ export function handleKdjvProxy(source: string): void {
   }
 }
 
-const exportId = (trackId: number) => `kdjv-export:${trackId}`;
-/** Rows being exported, by id, with their titles. */
-const exporting = new Map<number, string>();
-
 /**
- * The library's 导出 MP4 for a project row: the render (the same one playing uses), copied
- * beside the project as an MP4, with the work shown as an export bubble.
+ * 导出 for a project row (the editor's, the library's 导出 MP4): a task in the export queue
+ * (下载 → 导出), which renders it, copies it beside the project, can be paused there, and stops
+ * when the project is changed meanwhile. Its bubble is the queue's.
  */
-export function exportProject(track: { id: number; title: string; filename: string }, options?: ExportOptions): void {
-  if (exporting.has(track.id)) return;
-  const title = track.title || track.filename;
-  exporting.set(track.id, title);
-  showTask({ id: exportId(track.id), kind: "export", title, detail: options?.audio_only ? "导出声音" : "导出 MP4", progress: 0, stay: 0 });
-  void api
-    .exportKdjv(track.id, options)
-    .then(({ path }) => {
-      // Where it went, and a key that shows it there: beside the project, wherever that is.
-      const parts = path.split(/[\\/]/);
-      const file = parts.pop() ?? path, folder = parts.pop() ?? "";
-      showTask({
-        id: exportId(track.id), kind: "export", title, progress: null, tone: "success",
-        detail: folder ? `已导出到「${folder}」· ${file}` : `已导出 ${file}`,
-        actions: [{
-          id: "reveal", label: "打开所在文件夹", icon: createElement(FolderOpen, { size: 13, "aria-hidden": true }),
-          onSelect: () => { void getBridge().revealPath(path).catch(() => undefined); },
-        }],
-      });
-    })
-    .catch((error: unknown) => {
-      showTask({ id: exportId(track.id), kind: "export", title: `${title} 导出失败`, detail: error instanceof Error ? error.message : String(error), progress: null, tone: "error" });
-    })
-    .finally(() => exporting.delete(track.id));
+export function exportProject(track: { id: number; title: string; filename: string; path: string }, options?: ExportOptions): void {
+  void useProjectExportStore.getState().enqueue(track, options);
 }
 
 /** The server's word on a render under way (`kdjv.progress`). */
 export function handleKdjvProgress(payload: KdjvProgress): void {
   const id = payload.track_id;
-  if (id !== null && exporting.has(id) && !payload.error && payload.progress < 1) {
-    showTask({ id: exportId(id), kind: "export", title: exporting.get(id) ?? "", detail: payload.detail || "导出 MP4",
-      progress: Math.max(0, Math.min(1, payload.progress)), stay: 0 });
+  const task = payload.export;
+  if (task) {
+    if (!payload.error && payload.progress < 1) useProjectExportStore.getState().progress(task, payload.progress, payload.detail);
+    return;
   }
   if (id === null || !pending.has(id) || payload.error) return;
   showTask({
