@@ -19,7 +19,7 @@ export function shownTipsPages(): readonly { id: TipsPage; label: string; title?
   try {
     desktop = ["darwin", "win32", "linux"].includes(getBridge().platform);
   } catch { /* no bridge yet: no AI */ }
-  return desktop ? tipsPages : tipsPages.filter(page => page.id !== "ai");
+  return desktop ? tipsPages : tipsPages.filter(page => page.id !== "ai" && page.id !== "viz");
 }
 
 /** The page the tips drawer shows. A view state: it starts over with the app. */

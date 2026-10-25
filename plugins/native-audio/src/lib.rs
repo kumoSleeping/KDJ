@@ -39,6 +39,23 @@ pub struct ApplyPlaybackSnapshotArgs {
 
 #[cfg(target_os = "android")]
 impl<R: Runtime> NativeAudio<R> {
+    /// Internal transport only; deliberately absent from native-audio:default permissions.
+    pub fn youtube_proof(&self, operation: &str, javascript: &str) -> Result<String, String> {
+        #[derive(serde::Deserialize)]
+        struct Reply {
+            value: String,
+        }
+        #[derive(Serialize)]
+        struct Request<'a> {
+            operation: &'a str,
+            javascript: &'a str,
+        }
+        self.0
+            .run_mobile_plugin::<Reply>("youtubeProof", Request { operation, javascript })
+            .map(|reply| reply.value)
+            .map_err(|error| format!("YouTube proof: {error}"))
+    }
+
     pub fn apply_playback_snapshot(&self, args: &ApplyPlaybackSnapshotArgs) -> Result<(), String> {
         self.0
             .run_mobile_plugin::<()>("applyPlaybackSnapshot", args)

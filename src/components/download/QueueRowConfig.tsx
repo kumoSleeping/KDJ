@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Link2, Music4, Search } from "lucide-react";
+import { mediaProductionAvailable } from "../../lib/platformFeatures";
 import { api } from "../../lib/api";
 import { DASH } from "../../lib/format";
 import {
@@ -120,7 +121,7 @@ export function QueueRowConfig({
       page_title: task.video_page?.title || undefined,
       max_height: Number.isFinite(height) && height > 0 ? height : (settings?.video_max_height ?? 1080),
       audio_only: task.quality === "audio",
-      transcode: videoPlatform === "youtube" ? false : (settings?.video_transcode ?? false),
+      transcode: mediaProductionAvailable() && videoPlatform !== "youtube" && (settings?.video_transcode ?? false),
       title: task.title,
       artist: task.artist,
       cover: task.cover,
@@ -339,7 +340,7 @@ export function QueueRowConfig({
           </button>
         </span>
 
-        <label className="kd-check">
+        {mediaProductionAvailable() && <label className="kd-check">
           <input
             type="checkbox"
             checked={audioOnly}
@@ -354,10 +355,10 @@ export function QueueRowConfig({
           />
           <Music4 size={12} />
           只要音轨
-        </label>
+        </label>}
       </div>
 
-      {videoPlatform === "bilibili" ? (
+      {mediaProductionAvailable() && videoPlatform === "bilibili" ? (
       <div className="kd-queue-config-block">
         <div className="kd-queue-config-label">时间偏移</div>
         <label className="kd-queue-radio">

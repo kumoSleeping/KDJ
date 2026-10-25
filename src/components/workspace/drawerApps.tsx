@@ -29,7 +29,8 @@ import { TrackMetaEditorDrawer } from "../library/TrackMetaEditor";
 import { DrawerLyrics } from "../player/SidePanels";
 import { SongColorBackdrop } from "../player/SongColorBackdrop";
 import { requestPlayingLyrics } from "../player/lyricsEntry";
-import { DownloadTaskPages, taskViews } from "../player/TaskPanels";
+import { mediaProductionAvailable } from "../../lib/platformFeatures";
+import { DownloadTaskPages, shownTaskViews } from "../player/TaskPanels";
 import { SettingsPanel } from "../settings/SettingsPanel";
 
 /** The settings sections of one page; a page starts at its top. */
@@ -105,10 +106,10 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
   });
   if (downloads) apps.push({
     id: "downloads",
-    title: "下载与导出",
+    title: mediaProductionAvailable() ? "下载与导出" : "下载",
     // Things are dropped on its blank space, so it keeps room even while it lists nothing.
     extent: "at-least-half",
-    pages: taskViews,
+    pages: shownTaskViews(),
     usePage: useTaskView,
     onPage: id => useTaskPanelStore.getState().setView(id as TaskPanelView),
     body: <div className="kd-task-window kd-download-window kd-drawer-tasks"><DownloadTaskPages /></div>,
@@ -124,7 +125,7 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
     body: <DrawerSettings />,
     close: () => useAppStore.getState().dismissOverlay(),
   });
-  if (visualizerTrack) apps.push({
+  if (mediaProductionAvailable() && visualizerTrack) apps.push({
     id: VISUALIZER_DOCK_APP,
     title: "可视化配置",
     extent: "fit",
@@ -145,7 +146,7 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
     body: <AiDrawer />,
     close: () => useAiDrawer.getState().close(),
   });
-  if (laneEditor) apps.push({
+  if (mediaProductionAvailable() && laneEditor) apps.push({
     id: LANE_EDITOR_APP,
     title: "剪辑",
     extent: "at-least-half",
@@ -184,7 +185,7 @@ export function useDrawerEntries(): DrawerEntry[] {
     {
       id: "downloads",
       label: "下载",
-      title: "下载与导出",
+      title: mediaProductionAvailable() ? "下载与导出" : "下载",
       icon: <Download size={15} aria-hidden="true" />,
       count: running,
       open: () => useSidePanels.getState().setDownloads(true),

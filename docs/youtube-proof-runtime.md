@@ -1,6 +1,10 @@
 # YouTube proof/player 桌面统一方案
 
-更新日期：2026-09-07
+更新日期：2026-10-25
+
+Android 现复用本文的 proof/player 业务代码，通过独立进程的原生 WebView 服务承载，
+不复用桌面隐藏窗口。隔离、生命周期和验收边界见 [Android](android.md)。下文 9 月的
+验收记录是历史记录；其中“移动端不打包 worker”已由本次 Android 适配替代，iOS 不变。
 
 补充研究：[YouTube API / Safari HLS 实测与优化计划](youtube-api-validation-2026-09-07.md)。
 该实验确认部分无 Token 请求可播放，但也复现首片 403；直接 player API 的新鲜上下文可用，

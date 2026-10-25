@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -36,6 +37,27 @@ class NativeAudioService : MediaSessionService() {
         setupNotificationManager()
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Media3 owns media-button intents and controller reconnection.
+        super.onStartCommand(intent, flags, startId)
+        if (NativeAudioRuntime.needsForeground()) {
+            ensureNotificationChannel()
+            val notification = Notification.Builder(this, channelId())
+                .setSmallIcon(resolveNotificationSmallIconResId())
+                .setContentTitle(appDisplayName())
+                .setCategory(Notification.CATEGORY_TRANSPORT)
+                .setOngoing(true)
+                .build()
+            startForeground(NOTIFICATION_ID, notification)
+            NativeAudioRuntime.onForegroundReady()
+            notificationManager?.invalidate()
+        } else if (intent?.action != Intent.ACTION_MEDIA_BUTTON) {
+            stopSelf()
+        }
+        // The coordinator belongs to the application process; do not resurrect an empty player.
+        return START_NOT_STICKY
+    }
+
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
         return NativeAudioRuntime.mediaSession()
     }
@@ -45,6 +67,7 @@ class NativeAudioService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        NativeAudioRuntime.onForegroundStopped()
         notificationManager?.setPlayer(null)
         notificationManager = null
         appLargeIcon?.recycle()
@@ -113,7 +136,7 @@ class NativeAudioService : MediaSessionService() {
             .setNotificationListener(
                 object : PlayerNotificationManager.NotificationListener {
                     override fun onNotificationPosted(notificationId: Int, notification: Notification, ongoing: Boolean) {
-                        if (ongoing) {
+                        if (ongoing || NativeAudioRuntime.needsForeground()) {
                             startForeground(notificationId, notification)
                         } else {
                             stopForegroundCompat(remove = false)
@@ -195,6 +218,7 @@ class NativeAudioService : MediaSessionService() {
     }
 
     private fun stopForegroundCompat(remove: Boolean) {
+        NativeAudioRuntime.onForegroundStopped()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(if (remove) Service.STOP_FOREGROUND_REMOVE else Service.STOP_FOREGROUND_DETACH)
             return

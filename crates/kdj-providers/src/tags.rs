@@ -56,7 +56,7 @@ pub fn is_media_extension(ext: &str) -> bool {
     let lower = ext.trim_start_matches('.').to_ascii_lowercase();
     AUDIO_EXTENSIONS.contains(&lower.as_str())
         || VIDEO_EXTENSIONS.contains(&lower.as_str())
-        || lower == PROJECT_EXTENSION
+        || (!cfg!(any(target_os = "android", target_os = "ios")) && lower == PROJECT_EXTENSION)
 }
 
 /// A project's title and length, read from its own JSON (no source is opened): the length is
@@ -615,7 +615,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_project_is_in_the_library_with_its_title_and_length() {
-        assert!(is_media_extension("kdjv"));
+        assert_eq!(is_media_extension("kdjv"), !cfg!(any(target_os = "android", target_os = "ios")));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("set.kdjv");
         std::fs::write(

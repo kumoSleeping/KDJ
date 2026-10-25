@@ -122,6 +122,7 @@ import {
 } from "../../lib/tableColumnPrefs";
 import { ContextMenu, InlineNotice } from "../common";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
+import { mediaProductionAvailable } from "../../lib/platformFeatures";
 import { canVisualizeTrack, useVisualizerPopup } from "../../lib/visualizerPopup";
 import { exportVisualizerTracks, reportVisualizerExportError } from "../../lib/visualizerExportActions";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
@@ -2360,7 +2361,7 @@ export const TrackTable = memo(function TrackTable({
     cancelPress,
     doubleClick(track) {
       // A project double-clicked plays and opens in the editor beside the list, whichever click plays.
-      if (!selecting && isProjectTrack(track.format)) void useLaneEditor.getState().openTrack(track);
+      if (mediaProductionAvailable() && !selecting && isProjectTrack(track.format)) void useLaneEditor.getState().openTrack(track);
       if (selecting || playClick !== "double") return;
       const submitted = doubleClickPlaybackRef.current;
       doubleClickPlaybackRef.current = null;
@@ -2764,14 +2765,14 @@ export const TrackTable = memo(function TrackTable({
               编辑 Meta
             </button>
           )}
-          {isProjectTrack(rowMenu.track.format) && (
+          {mediaProductionAvailable() && isProjectTrack(rowMenu.track.format) && (
             <button type="button" disabled={menuIds.length !== 1} onClick={() => {
               const track = rowMenu.track;
               setRowMenu(null);
               exportProject(track);
             }}><Download size={12} />导出 MP4</button>
           )}
-          {menuIds.length === 1 && !isImageTrack(rowMenu.track.format) && (
+          {mediaProductionAvailable() && menuIds.length === 1 && !isImageTrack(rowMenu.track.format) && (
             <button type="button" onClick={() => {
               const track = rowMenu.track;
               setRowMenu(null);
@@ -2784,7 +2785,7 @@ export const TrackTable = memo(function TrackTable({
               {isProjectTrack(rowMenu.track.format) ? "编辑工程" : isVideoTrack(rowMenu.track.format) ? "剪辑这个视频" : "用这首歌做 VJ"}
             </button>
           )}
-          <button type="button" disabled={menuIds.length !== 1 || !canVisualizeTrack(rowMenu.track)} onClick={event => {
+          {mediaProductionAvailable() && <><button type="button" disabled={menuIds.length !== 1 || !canVisualizeTrack(rowMenu.track)} onClick={event => {
             const track = rowMenu.track;
             const from = event.currentTarget.getBoundingClientRect();
             setRowMenu(null);
@@ -2796,7 +2797,7 @@ export const TrackTable = memo(function TrackTable({
             if (isVideoTrack(track.format)) { useVisualizerStudioStore.getState().open(track); return; }
             useVisualizerPopup.getState().openTrack(track);
             useVisualizerStudioStore.getState().openInlineSettings(track, { editorIfNoWindow: true });
-          }}><BarChart3 size={12} />展开可视化</button>
+          }}><BarChart3 size={12} />展开可视化</button></>}
           {menuIds.length === 1 && (
             <button
               type="button"

@@ -359,6 +359,12 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     await click(BROWSER);
     assert.equal(buttons(panel()).find(button => button.textContent === "登录")?.disabled, true);
     assert.equal(panel().querySelector("select"), null, "no browsers is an empty choice, not a message");
+
+    // Mobile keeps supported input methods, not desktop browser extraction instructions.
+    dom.window.kdj.platform = "android";
+    const { loginMethods } = await import("../src/components/settings/AccountLogin");
+    assert.deepEqual(loginMethods(browserAccount("youtube")), ["headers"]);
+    assert.deepEqual(loginMethods({ ...browserAccount("wyy"), login_method: "qr" }), ["qr", "headers"]);
   } finally {
     await act(async () => root.unmount());
     await (await import("../src/lib/diagnostics")).flushDiagnostics();

@@ -6,6 +6,8 @@
  * 不把小窗命运绑在 PlayerBar 是否已挂上 PLAY 监听上。
  */
 
+import { mediaProductionAvailable } from "./platformFeatures";
+import { showTask } from "../components/tasks/taskBubbleStore";
 import { isImageTrack, isProjectTrack, isVideoTrack } from "./format";
 import { needsRender, notePlay, playProject } from "./kdjvPlay";
 import { requestLocalVideo, useVideoPip } from "./videoPip";
@@ -36,6 +38,10 @@ export interface PlayRequest {
 
 export function playTrack(track: PlayableTrack, autoPlay = true, purpose?: "composition", position?: number): number {
   if (isImageTrack(track.format)) return 0;
+  if (isProjectTrack(track.format) && !mediaProductionAvailable()) {
+    showTask({ id: "mobile-project", kind: "render", tone: "error", title: "移动版不播放视频工程", size: "small" });
+    return 0;
+  }
   // A `.kdjv` project plays from its render, which may still have to be made (kdjvPlay.ts).
   if (isProjectTrack(track.format) && needsRender(track)) {
     playProject(track, playTrack, autoPlay, purpose, position);

@@ -54,6 +54,7 @@ import { releaseDrawerHolds, useHeldDrawer } from "../../lib/drawerHold";
 import { useDrawerApps } from "./drawerApps";
 import { DrawerHost } from "../drawer/Drawer";
 import type { DrawerSpec } from "../drawer/drawerSchema";
+import { mediaProductionAvailable } from "../../lib/platformFeatures";
 import { VisualizerPopup } from "../player/VisualizerPopup";
 import { useAppStore } from "../../stores/appStore";
 import { showNotice } from "../../stores/toastStore";
@@ -2973,7 +2974,7 @@ export function Workspace() {
         )}
         </div>
         {showSettings && layout === "narrow" && <SettingsOverlay />}
-        <VisualizerPopup />
+        {mediaProductionAvailable() && <VisualizerPopup />}
       </div>
     </section>
   );

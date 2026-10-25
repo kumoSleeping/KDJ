@@ -19,9 +19,9 @@ import { defineConfig, type Plugin } from "vite";
 const YOUTUBE_NATIVE_PO_DEV_PATH = "/__kdj_youtube_native_po.js";
 const tauriPlatform = process.env.TAURI_ENV_PLATFORM;
 // Tauri builds provide the target-triple platform (`darwin`, `windows`, `linux`, `androideabi`,
-// …). A direct Vite build falls back to its host. Only mobile bundles replace the desktop proof
-// and SABR modules with explicit unsupported stubs.
-const nativeYoutubePlatforms = new Set(["darwin", "windows", "win32", "linux"]);
+// …). Android shares the proof/player JS and SABR, with a separate native service host.
+// iOS has no proof host and keeps the explicit unsupported modules.
+const nativeYoutubePlatforms = new Set(["darwin", "windows", "win32", "linux", "android", "androideabi"]);
 const nativeYoutubeRuntime = tauriPlatform
   ? nativeYoutubePlatforms.has(tauriPlatform)
   : nativeYoutubePlatforms.has(process.platform);
@@ -85,6 +85,37 @@ function youtubeNativePoDevBundle(): Plugin {
   };
 }
 
+/** Production panels are absent from the mobile module graph, not merely invisible. Shared
+ * colour extraction/analysis modules are deliberately not redirected. Runtime actions and the
+ * Rust route table enforce the same product boundary for stale state or direct calls. */
+function mobileMediaPanels(): Plugin {
+  const mobile = ["android", "androideabi", "ios"].includes(tauriPlatform ?? "");
+  const panels: Record<string, string> = {
+    VisualizerStudioPanel: "default", VisualizerPopup: "VisualizerPopup",
+    LaneEditor: "LaneEditor", KdjvLivePicture: "KdjvLivePicture",
+    ExportQueuePanel: "ExportQueuePanel", KvjApp: "KvjApp",
+    AiPanel: "AiPanel", AiDrawer: "AiDrawer,AiDrawerTools", FfmpegPanel: "FfmpegPanel",
+    visualizerStudioExport: "runStudioExport,createStudioExportFrames",
+  };
+  const prefix = "\0kdj-mobile-panel:";
+  return {
+    name: "kdj-mobile-media-panels", enforce: "pre",
+    resolveId(source) {
+      if (!mobile) return null;
+      const name = source.split("/").pop()?.replace(/\\.tsx$/, "") ?? "";
+      return panels[name] ? prefix + name : null;
+    },
+    load(id) {
+      if (!id.startsWith(prefix)) return null;
+      const name = panels[id.slice(prefix.length)];
+      if (id === prefix + "visualizerStudioExport") return name.split(",")
+        .map(symbol => `export async function ${symbol}() { throw new Error("移动版不提供视频导出"); }`).join("\n");
+      return name === "default" ? "export default function MobileOmittedPanel() { return null; }"
+        : name.split(",").map(symbol => `export function ${symbol}() { return null; }`).join("\n");
+    },
+  };
+}
+
 // `tauri dev --host` 会设这个变量：真机调试时 HMR 不能连 localhost。
 const host = process.env.TAURI_DEV_HOST;
 
@@ -95,7 +126,7 @@ export default defineConfig({
   // dependency generations, which manifests as an otherwise inexplicable Invalid Hook Call.
   // `target/` is checkout-local, so every Tauri session gets one coherent dependency graph.
   cacheDir: "target/vite-tauri-cache",
-  plugins: [react(), youtubeNativePoDevBundle(), withoutReactPerformanceTracks()],
+  plugins: [mobileMediaPanels(), react(), youtubeNativePoDevBundle(), withoutReactPerformanceTracks()],
   resolve: nativeYoutubeRuntime
     ? undefined
     : {

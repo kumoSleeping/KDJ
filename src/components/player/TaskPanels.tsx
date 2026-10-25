@@ -1,3 +1,4 @@
+import { mediaProductionAvailable } from "../../lib/platformFeatures";
 import { startTransition, useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelStore";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
@@ -16,7 +17,7 @@ export const taskViews: { id: TaskPanelView; label: string; title?: string }[] =
   { id: "exports", label: "导出" },
   { id: "export-history", label: "成品", title: "导出历史" },
 ];
-const taskViewIds = taskViews.map(item => item.id);
+export const shownTaskViews = () => mediaProductionAvailable() ? taskViews : taskViews.filter(item => item.id === "downloads" || item.id === "history");
 
 /** Give the title and slide a painted frame before building the requested page. */
 function TaskPageBody({ view, position, onReady }: {
@@ -30,7 +31,7 @@ function TaskPageBody({ view, position, onReady }: {
     return () => cancelAnimationFrame(frame);
   }, []);
   useEffect(() => { if (ready) onReady(); }, [ready, onReady]);
-  const exportView = view === "exports" || view === "export-history";
+  const exportView = mediaProductionAvailable() && (view === "exports" || view === "export-history");
   return <div className="kd-task-page" data-drawer-pending={!ready || undefined} aria-busy={!ready || undefined}>
     {ready && (exportView
       ? <ExportQueuePanel history={view === "export-history"} position={position} />
@@ -46,18 +47,19 @@ export function DownloadTaskPages() {
   });
   const visitedExports = useRef(false);
   const onReady = useCallback(() => {
-    if ((view !== "exports" && view !== "export-history") || visitedExports.current) return;
+    if (!mediaProductionAvailable() || (view !== "exports" && view !== "export-history") || visitedExports.current) return;
     visitedExports.current = true;
     void useVisualizerExportStore.getState().initialize().catch(() => undefined);
     void useProjectExportStore.getState().initialize().catch(() => undefined);
   }, [view]);
-  return <SlidePages page={view} order={taskViewIds}>
+  return <SlidePages page={view} order={shownTaskViews().map(item => item.id)}>
     <TaskPageBody key={view} view={view} position={positions.current[view]} onReady={onReady} />
   </SlidePages>;
 }
 
 /** The task list as a panel with its own tabs: the phone's sheet. On a wide window it is a drawer. */
 export function DownloadTaskPanel() {
+  const taskViews = shownTaskViews();
   const view = useTaskPanelStore(state => state.view);
   const setView = useTaskPanelStore(state => state.setView);
   const tabs = useRef<(HTMLButtonElement | null)[]>([]);

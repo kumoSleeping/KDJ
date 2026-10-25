@@ -43,7 +43,9 @@ pub struct Ctx {
 
 pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
     let router = Router::new()
-        .route("/api/health", get(health))
+        .route("/api/health", get(health));
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let router = router
         .route("/api/tools/ffmpeg", get(ffmpeg_installation_status))
         .route("/api/ai/status", get(crate::ai::status))
         .route("/api/ai/models", get(crate::ai::models))
@@ -69,6 +71,8 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/cli/download", post(crate::cli_api::download))
         .route("/api/cli/peek", post(crate::cli_media::peek))
         .route("/api/cli/align", post(crate::cli_media::align))
+        .route("/api/video/calibrate", post(video_calibrate));
+    let router = router
         .route("/api/control/show", post(control_show))
         .route("/api/control/quit", post(control_quit))
         .route("/api/settings", get(get_settings).put(put_settings))
@@ -223,7 +227,6 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         )
         .route("/api/video/youtube/hls/{ticket}", get(youtube_hls_resource))
         .route("/api/video/preview", get(video_preview))
-        .route("/api/video/calibrate", post(video_calibrate))
         .route("/api/library/tracks", get(library_tracks))
         .route("/api/library/tracks/index", get(library_track_index))
         .route(
@@ -4061,7 +4064,7 @@ pub(crate) fn enqueue_sources(
                         .get("video_only")
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false),
-                    transcode: platform != Platform::Youtube
+                    transcode: !cfg!(any(target_os = "android", target_os = "ios")) && platform != Platform::Youtube
                         && source
                             .payload
                             .get("transcode")
@@ -5207,7 +5210,7 @@ pub(crate) fn apply_video_defaults(req: &mut VideoDownloadRequest, settings: &Se
     if req.max_height <= 0 {
         req.max_height = settings.video_max_height;
     }
-    if !req.transcode {
+    if !req.transcode && !cfg!(any(target_os = "android", target_os = "ios")) {
         req.transcode = settings.video_transcode;
     }
     // 偏移封顶 ±10 分钟：这个值来自预览面板一下一下按出来的校准，
@@ -9523,7 +9526,8 @@ https://rr1---sn.example.googlevideo.com/api/manifest/hls_playlist/id/high/playl
         };
         apply_video_defaults(&mut req, &settings);
         assert_eq!(req.max_height, 720, "0 = 没指定，跟随设置");
-        assert!(req.transcode, "没显式要求转码时跟随设置");
+        assert_eq!(req.transcode, !cfg!(any(target_os = "android", target_os = "ios")),
+            "只有桌面继承全局转码设置，移动版不改写持久设置");
 
         // 显式给了就以请求为准
         let mut req = VideoDownloadRequest {

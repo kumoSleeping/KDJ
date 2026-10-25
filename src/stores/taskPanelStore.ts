@@ -1,3 +1,4 @@
+import { mediaProductionAvailable } from "../lib/platformFeatures";
 import { create } from "zustand";
 
 export type TaskPanelView = "downloads" | "history" | "exports" | "export-history";
@@ -8,5 +9,5 @@ export const useTaskPanelStore = create<{
   setView(view: TaskPanelView): void;
 }>((set) => ({
   view: "downloads",
-  setView: view => set({ view }),
+  setView: view => set({ view: !mediaProductionAvailable() && (view === "exports" || view === "export-history") ? "downloads" : view }),
 }));

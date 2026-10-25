@@ -161,14 +161,14 @@ watch_run() { # $1=workflow 名
   return 1
 }
 
-info "盯桌面三平台构建（macOS 双架构，rust-build）"
+info "盯桌面三平台和 Android arm64 构建（rust-build）"
 build_ok=1
 watch_run rust-build || {
   build_ok=0
   red "rust-build 失败或超时。Latest 不会被提升，更新通道仍指向上一版。"
 }
 
-# 安卓不再随发版自动构建，这里不等它；补 APK：gh workflow run rust-android.yml --ref "v$VERSION"
+# rust-build 的 reusable Android job 与桌面一起完成后才提升 Latest。
 
 # ---- 终检：更新端点必须已经是新版本 ------------------------------------------
 info "验证更新清单"

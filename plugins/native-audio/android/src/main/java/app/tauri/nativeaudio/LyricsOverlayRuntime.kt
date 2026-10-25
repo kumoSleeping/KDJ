@@ -317,15 +317,10 @@ object LyricsOverlayRuntime {
         }
         if (overlay == null || !snapshotConfig.visible || !overlay.isAttached()) return 0L
 
-        // 正 ID 本地曲目只读 coordinator 镜像；负 ID 浏览器试听只接外部流时钟。
-        // 流时钟暂未到时宁可显示占位，绝不回退到上一首本地曲目的位置串词。
-        val clock = if (snapshotTimeline.trackId != null && snapshotTimeline.trackId < 0L) {
-            snapshotStreamPlaybackClock
-                ?.takeIf { it.trackId == snapshotTimeline.trackId }
-                ?.snapshotNow()
-        } else {
-            NativeAudioRuntime.clock()
-        }
+        // Local and online tracks share the coordinator. A legacy browser clock is used only
+        // when it names this exact song and the native owner does not have it.
+        val clock = NativeAudioRuntime.clock()?.takeIf { it.trackId == snapshotTimeline.trackId }
+            ?: snapshotStreamPlaybackClock?.takeIf { it.trackId == snapshotTimeline.trackId }?.snapshotNow()
         val lines = snapshotTimeline.lines
         val stale = snapshotTimeline.trackId != null &&
             clock?.trackId != null &&

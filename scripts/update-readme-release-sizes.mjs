@@ -18,7 +18,7 @@ function usableAsset(asset) {
   return Boolean(asset) && Number.isSafeInteger(asset.size) && asset.size > 0;
 }
 
-// 安卓只手动构建（release.yml），Latest 常常没有 APK：取最近一个带 APK 的正式 Release。
+// 新版随桌面发版；旧 Latest 可能没有 APK，仍回退到最近一个带 APK 的 Release。
 function newestAndroidApk(latest, releases) {
   for (const release of [latest, ...releases]) {
     if (release.draft || typeof release.tag_name !== "string") continue;

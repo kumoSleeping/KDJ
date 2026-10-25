@@ -11,6 +11,8 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application>
+        <service android:name="app.tauri.nativeaudio.YoutubeProofService"
+            android:exported="false" android:process=":youtube_proof" />
         <service
             android:name="app.tauri.nativeaudio.NativeAudioService"
             android:enabled="true"

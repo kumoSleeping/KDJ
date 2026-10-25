@@ -7,6 +7,7 @@ import {
   Link2,
   ListMinus,
 } from "lucide-react";
+import { mediaProductionAvailable } from "../../lib/platformFeatures";
 import { api, ApiError } from "../../lib/api";
 import { copyText } from "../../lib/copyText";
 import { copyShareContent, remoteArtwork } from "../../lib/shareClipboard";
@@ -313,7 +314,7 @@ export function VideoResultRow({
       video_only: false,
       // YouTube has one fixed, decode-free H.264/AAC → MP4 path. The global compatibility
       // re-encode setting remains available to Bilibili downloads only.
-      transcode: platform === "youtube" ? false : (settings?.video_transcode ?? false),
+      transcode: mediaProductionAvailable() && platform !== "youtube" && (settings?.video_transcode ?? false),
       title: title.trim() || undefined,
       artist: author.trim() || undefined,
       cover: displayCover || undefined,

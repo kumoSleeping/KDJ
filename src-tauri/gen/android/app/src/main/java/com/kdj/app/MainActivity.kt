@@ -1,6 +1,10 @@
 package com.kdj.app
 
+import app.tauri.nativeaudio.NativeAudioRuntime
 import android.Manifest
+import android.app.PictureInPictureParams
+import android.content.res.Configuration
+import android.util.Rational
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -50,6 +54,51 @@ class MainActivity : TauriActivity() {
     requestMediaPermissionIfNeeded()
   }
 
+  private var videoView: WebView? = null
+  private var videoPipActive = false
+  private var videoPlaying = false
+  private var videoRatio = 16.0 / 9.0
+
+  private fun pipAvailable() = packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+  private fun updateVideoPip() {
+    if (!pipAvailable()) return
+    val builder = PictureInPictureParams.Builder()
+      .setAspectRatio(Rational((videoRatio.coerceIn(0.42, 2.38) * 1000).toInt(), 1000))
+    if (Build.VERSION.SDK_INT >= 31) builder.setAutoEnterEnabled(videoPipActive && videoPlaying)
+    runCatching { setPictureInPictureParams(builder.build()) }
+  }
+
+  private fun enterVideoPip() {
+    if (!videoPipActive || !pipAvailable()) return
+    updateVideoPip()
+    runCatching { enterPictureInPictureMode(PictureInPictureParams.Builder()
+      .setAspectRatio(Rational((videoRatio.coerceIn(0.42, 2.38) * 1000).toInt(), 1000)).build()) }
+      .onSuccess { if (!it) reportVideoPip(false) }
+      .onFailure { reportVideoPip(false) }
+  }
+
+  private fun reportVideoPip(active: Boolean) {
+    videoView?.evaluateJavascript("document.documentElement.toggleAttribute('data-android-pip', $active);window.dispatchEvent(new CustomEvent('kdj:android-pip',{detail:$active}));", null)
+  }
+
+  override fun onUserLeaveHint() {
+    super.onUserLeaveHint()
+    if (Build.VERSION.SDK_INT < 31 && videoPipActive && videoPlaying) enterVideoPip()
+  }
+
+  override fun onPictureInPictureModeChanged(active: Boolean, configuration: Configuration) {
+    super.onPictureInPictureModeChanged(active, configuration)
+    reportVideoPip(active)
+    if (active) videoView?.onResume()
+  }
+
+  override fun onPause() {
+    super.onPause()
+    // Wry pauses its WebView with the Activity; PiP is still visible and must keep decoding.
+    if (isInPictureInPictureMode || NativeAudioRuntime.needsForeground()) videoView?.onResume()
+  }
+
   private external fun initNdkContext(activity: MainActivity): Boolean
 
   /**
@@ -58,7 +107,19 @@ class MainActivity : TauriActivity() {
    */
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
+    videoView = webView
     webView.addJavascriptInterface(object {
+      @JavascriptInterface
+      fun canVideoPip(): Boolean = pipAvailable()
+      @JavascriptInterface
+      fun configureVideoPip(active: Boolean, playing: Boolean, ratio: Double) = runOnUiThread {
+        videoPipActive = active
+        videoPlaying = playing
+        videoRatio = if (ratio.isFinite() && ratio > 0) ratio else 16.0 / 9.0
+        updateVideoPip()
+      }
+      @JavascriptInterface
+      fun enterVideoPip() = runOnUiThread { this@MainActivity.enterVideoPip() }
       @JavascriptInterface
       fun setSystemBarsLight(light: Boolean) = runOnUiThread {
         WindowCompat.getInsetsController(window, window.decorView).apply {

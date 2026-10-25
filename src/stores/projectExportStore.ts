@@ -1,3 +1,4 @@
+import { mediaProductionAvailable } from "../lib/platformFeatures";
 import { create } from "zustand";
 import { api, ApiError } from "../lib/api";
 import { captureDiagnostic } from "../lib/diagnostics";
@@ -98,6 +99,7 @@ async function pump(): Promise<void> {
 export const useProjectExportStore = create<State>((set, get) => ({
   tasks: [], error: "",
   initialize() {
+    if (!mediaProductionAvailable()) return Promise.resolve();
     if (!initializing) initializing = loadProjectExports().then(tasks => {
       const live = new Map(get().tasks.map(task => [task.id, task]));
       // An export left running when the window went away was stopped by the server with it.
@@ -108,6 +110,7 @@ export const useProjectExportStore = create<State>((set, get) => ({
     return initializing;
   },
   async enqueue(track, options) {
+    if (!mediaProductionAvailable()) throw new Error("移动版不提供视频导出");
     await get().initialize().catch(() => undefined);
     const same = JSON.stringify(options ?? {});
     // A second press while the same export is still waiting or running adds nothing.

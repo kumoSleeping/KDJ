@@ -5,15 +5,28 @@
 //! minted from that synthetic document. We therefore navigate a non-persistent hidden Tauri
 //! WebView to YouTube's inert `robots.txt` document. The proof window matches no capability, so
 //! remote content cannot invoke application commands. Results cross the boundary through Tauri's
-//! own cross-platform JavaScript callback adapter; there is no platform-specific proof backend.
+//! own JavaScript callback adapter. Android uses a separate bound WebView service/profile instead
+//! of a Tauri window; only the transport differs, not proof/player construction or validation.
 
+#[cfg(not(target_os = "android"))]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(not(target_os = "android"))]
 use tauri::Manager;
 
+#[cfg(not(target_os = "android"))]
+type ProofWindow = tauri::WebviewWindow;
+#[cfg(target_os = "android")]
+#[path = "youtube_proof_android.rs"]
+mod android;
+#[cfg(target_os = "android")]
+use android::{ProofWindow, active_proof_window, replace_failed_realm, eval_with_callback};
+
+#[cfg(not(target_os = "android"))]
 const PROOF_WINDOW_LABEL: &str = "youtube-proof-runtime";
 const PROOF_DOCUMENT_URL: &str = "https://www.youtube.com/robots.txt";
+#[cfg(target_os = "macos")]
 const MAIN_WEBVIEW_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
                                        AppleWebKit/605.1.15 (KHTML, like Gecko) \
                                        Version/18.5 Safari/605.1.15";
@@ -155,6 +168,7 @@ if (document.body) document.body.textContent = "";
     ))
 }
 
+#[cfg(not(target_os = "android"))]
 async fn ensure_proof_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
     use tauri::{
         webview::{NewWindowResponse, PageLoadEvent},
@@ -204,6 +218,7 @@ async fn ensure_proof_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWin
     Ok(window)
 }
 
+#[cfg(not(target_os = "android"))]
 async fn active_proof_window<'a>(
     app: &tauri::AppHandle,
     state: &'a YoutubeProofState,
@@ -226,6 +241,7 @@ async fn active_proof_window<'a>(
     Ok((window, exclusive.downgrade()))
 }
 
+#[cfg(not(target_os = "android"))]
 async fn replace_failed_realm(
     app: &tauri::AppHandle,
     active: tokio::sync::RwLockReadGuard<'_, ()>,
@@ -239,7 +255,7 @@ async fn replace_failed_realm(
 }
 
 async fn evaluate_javascript(
-    window: &tauri::WebviewWindow,
+    window: &ProofWindow,
     javascript: String,
     failure: &'static str,
 ) -> Result<String, String> {
@@ -272,9 +288,7 @@ void (async () => {{
 }})();
 "#
     );
-    window
-        .eval(script)
-        .map_err(|error| format!("无法进入 YouTube proof WebView：{error}"))?;
+    submit_javascript(window, script).await?;
 
     let poll_script = format!(
         r#"(() => {{
@@ -323,11 +337,12 @@ void (async () => {{
     .await;
 
     if poll_result.is_err() {
-        cancel_evaluation(window, &request_id_json);
+        cancel_evaluation(window, &request_id_json).await;
     }
     poll_result.unwrap_or_else(|_| Err("YouTube proof WebView 运算超时".to_string()))
 }
 
+#[cfg(not(target_os = "android"))]
 async fn eval_with_callback(
     window: &tauri::WebviewWindow,
     javascript: String,
@@ -349,15 +364,22 @@ async fn eval_with_callback(
         .map_err(|_| "YouTube proof WebView 回调状态丢失".to_string())
 }
 
-fn cancel_evaluation(window: &tauri::WebviewWindow, request_id_json: &str) {
-    let _ = window.eval(format!(
+async fn submit_javascript(window: &ProofWindow, javascript: String) -> Result<(), String> {
+    #[cfg(not(target_os = "android"))]
+    { window.eval(javascript).map_err(|error| format!("无法进入 YouTube proof WebView：{error}")) }
+    #[cfg(target_os = "android")]
+    { eval_with_callback(window, javascript).await.map(|_| ()) }
+}
+
+async fn cancel_evaluation(window: &ProofWindow, request_id_json: &str) {
+    let _ = submit_javascript(window, format!(
         r#"(() => {{
   const tasks = globalThis.__KDJ_YOUTUBE_EVAL_TASKS__;
   const task = tasks && tasks[{request_id_json}];
   if (task) task.active = false;
   if (tasks) delete tasks[{request_id_json}];
 }})()"#
-    ));
+    )).await;
 }
 
 /// `call` runs with the installed local bundle bound to `po`. Without a bundle the script only
@@ -384,7 +406,7 @@ fn bundle_call_script(bundle: Option<&str>, call: &str) -> Result<String, String
 /// does not reach. Sending the 177 KiB bundle and the 2.6 MiB player script with each call grew
 /// the proof WebView by 5.7 MiB per song: 1.18 GiB after 200 songs, against 60 MiB this way.
 async fn evaluate_installed(
-    window: &tauri::WebviewWindow,
+    window: &ProofWindow,
     bundle: &str,
     call: impl Fn(bool) -> String,
     failure: &'static str,
@@ -398,7 +420,7 @@ async fn evaluate_installed(
 }
 
 async fn evaluate_proof(
-    window: &tauri::WebviewWindow,
+    window: &ProofWindow,
     bundle: String,
     binding: String,
     force_fresh: bool,
@@ -459,7 +481,7 @@ pub async fn youtube_mint_gvs_po_token(
 }
 
 async fn evaluate_player(
-    window: &tauri::WebviewWindow,
+    window: &ProofWindow,
     bundle: String,
     player_url: String,
     javascript: String,

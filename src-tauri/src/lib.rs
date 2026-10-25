@@ -47,7 +47,7 @@ mod release_version;
 mod share_clipboard;
 #[cfg(desktop)]
 mod youtube_embed;
-#[cfg(desktop)]
+#[cfg(any(desktop, target_os = "android"))]
 mod youtube_proof;
 #[cfg(desktop)]
 #[cfg(desktop)]
@@ -2275,7 +2275,7 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
         }
         app.manage(UpdateProgressState::default());
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_os = "android"))]
         app.manage(youtube_proof::YoutubeProofState::default());
         #[cfg(desktop)]
         app.manage(youtube_embed::YoutubeEmbedState::default());
@@ -2428,6 +2428,8 @@ pub fn run() {
         desktop_player::playback_state,
         desktop_player::playback_waveform_window,
         desktop_player::playback_trace,
+        youtube_proof::youtube_mint_gvs_po_token,
+        youtube_proof::youtube_run_player,
         media_permission_granted
     ]);
     #[cfg(all(mobile, target_os = "ios"))]

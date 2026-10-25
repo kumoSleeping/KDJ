@@ -178,6 +178,12 @@ class OpenLocalPathArgs {
 }
 
 @InvokeArg
+class YoutubeProofArgs {
+    var operation: String = ""
+    var javascript: String = ""
+}
+
+@InvokeArg
 class StartFileDragArgs {
     var paths: Array<String>? = null
     var label: String? = null
@@ -237,6 +243,13 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
         }.onFailure {
             invoke.reject(it.message ?: "applyPlaybackSnapshot failed")
         }
+    }
+
+    // No frontend ACL permission: only the Rust proof validator can submit scripts.
+    @Command
+    fun youtubeProof(invoke: Invoke) {
+        val args = invoke.parseArgs(YoutubeProofArgs::class.java)
+        YoutubeProofClient.execute(activity.applicationContext, args.operation, args.javascript, invoke)
     }
 
     @Command

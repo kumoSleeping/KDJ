@@ -30,6 +30,7 @@ pub fn available() -> bool {
 }
 
 pub fn binary() -> Result<PathBuf> {
+    anyhow::ensure!(!cfg!(any(target_os = "android", target_os = "ios")), "移动版不提供 FFmpeg 媒体处理");
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     if let Some(path) = managed::selected_binary() {
         anyhow::ensure!(path.is_file(), "KDJ 的媒体工具文件已丢失，请在媒体工具中重新安装");

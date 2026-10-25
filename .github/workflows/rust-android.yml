@@ -1,18 +1,13 @@
 # 安卓 APK（Tauri 2 mobile）。
 #
-# 状态：本机（macOS/arm64 + NDK r27c）能编出 aarch64 release APK，明文放行和
-# 签名都已就位（见 scripts/android-postinit.sh），实测细节在
-# docs/rust-port/06-packaging-results.md §4 和 08-updates-and-signing.md。
-# **仍未验证**：这条流水线没在 GitHub 上真跑过，APK 也没装进过真机。
-# 下面的风险注释已按本机实测重排，别再照着旧版去乱设 CC_*/AR_*。
+# 原生编译、签名身份与 APK 内容在 CI 检查；设备验收范围见 docs/android.md。
 #
-# 触发只留手动：安卓构建要下 SDK/NDK（~2GB）又要交叉编译四遍，不再随 v* tag 自动跑，
-# 桌面发版不等它（2026-10-13）。要给某个版本补 APK：
-#   gh workflow run rust-android.yml --ref v<version>
-# 它在 tag 上跑时，仍会把 APK 传进同一个 Release。
+# rust-build 在版本 tag 上调用本工作流，APK 与桌面安装包发布到同一 Release。
+# 也可手动构建设备测试包；分支构建只上传 artifact，不改变发布渠道。
 name: rust-android
 
 on:
+  workflow_call:
   workflow_dispatch:
 
 # APK 构建 job 只读；只有独立 publish job 临时获得 contents:write。
@@ -147,13 +142,12 @@ jobs:
       #     `.app` 结尾会触发 Tauri 的 macOS 扩展名提示，但不影响 Android 包名；
       #     它也不影响数据目录——
       #     `src-tauri/src/lib.rs::legacy_data_dir` 取的是 app_config_dir 的父目录。
-      #   - gen/android 是生成物，按 Tauri 官方建议**不进版本库**，所以 CI 每次都要 init；
-      #     如果以后要改 AndroidManifest（比如加 INTERNET / 存储权限），
-      #     得把 gen/android 提交进仓库或改用 tauri 的 manifest 合并配置，
-      #     否则每次 init 都会把手改冲掉。
+      #   - MainActivity 等定制源码已跟踪；init 后恢复它们，清单由 postinit 幂等补齐。
       - name: tauri android init
         if: steps.shell.outputs.present == 'true'
-        run: npx --no-install tauri android init
+        run: |
+          npx --no-install tauri android init
+          git restore -- src-tauri/gen/android/app/src/main/java/com/kdj/app/MainActivity.kt
 
       # Secret 只进入这一小步：脚本将 keystore 与 Gradle properties 写入生成目录，
       # 后续耗时构建不再继承 base64、口令或 alias。并在编译前核对既有发布证书身份。

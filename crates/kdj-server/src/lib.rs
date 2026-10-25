@@ -417,11 +417,14 @@ pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) ->
         control: control.clone(),
         media: media.clone(),
     };
-    let workshop = compositions::workshop::Workshop::new(state.clone())?;
-    let router = routes::router(ctx)
-        .merge(compositions::workshop::routes::router(workshop))
-        .merge(compositions::audio_visualizer::studio::router())
-        .merge(themes::router())
+    let router = routes::router(ctx);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let router = {
+        let workshop = compositions::workshop::Workshop::new(state.clone())?;
+        router.merge(compositions::workshop::routes::router(workshop))
+            .merge(compositions::audio_visualizer::studio::router())
+    };
+    let router = router.merge(themes::router())
         .merge(diagnostics::router())
         .route("/ws", axum::routing::get(ws::handler))
         .layer(Extension(control))

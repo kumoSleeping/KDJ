@@ -401,6 +401,7 @@ jobs:
       - name: 下载桌面 artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          pattern: kdj-rust-*
           path: bundles
 
       - name: 上传安装包到 Release
@@ -429,14 +430,22 @@ jobs:
             fi
           done
 
+  android:
+    name: Android arm64
+    if: startsWith(github.ref, 'refs/tags/')
+    uses: ./.github/workflows/rust-android.yml
+    permissions:
+      contents: write
+    secrets: inherit
+
   # 正式 KDJ 每个 Release 都发布一份 latest.json 更新清单。
   # 三个平台的测试、平台构建与 updater 验签必须全部通过，publish 才会上传安装包；
   # 清单最后生成并提升 Latest；带 -rc 后缀的正式推送同样进入全体用户更新通道。
   # 任一门禁失败都让上一可用版本继续作为 Latest。
   latest-json:
     name: 更新清单 latest.json
-    needs: [desktop, publish]
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.desktop.result != 'cancelled' && needs.publish.result == 'success' }}
+    needs: [desktop, publish, android]
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.desktop.result != 'cancelled' && needs.publish.result == 'success' && needs.android.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -446,6 +455,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          pattern: kdj-rust-*
           path: bundles
 
       - name: 拼 latest.json、上传并处理更新通道
@@ -539,6 +549,12 @@ jobs:
           print(f"latest.json: {len(manifest['platforms'])} platform keys")
           PY
 
+          # Android has its own APK signature, not a desktop Tauri updater entry.
+          apk_size=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[] | select(.name == "app-arm64-release.apk") | .size')
+          if ! [[ "$apk_size" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Android APK 缺失，拒绝提升 Latest"
+            exit 1
+          fi
           upload_ok=0
           for attempt in 1 2 3 4; do
             if gh release upload "$TAG" latest.json --repo "$REPO" --clobber; then

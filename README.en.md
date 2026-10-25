@@ -41,9 +41,9 @@ Choose your platform below to download the latest installer. The macOS button de
 
 You may need to allow apps from unidentified developers. On macOS, allow the app under System Settings → Privacy & Security → General.
 
-When GitHub is reachable, KDJ checks for updates on launch. You can also check manually in Settings.
+Desktop builds check for updates when GitHub is reachable, with a manual check in Settings. On Android, install the arm64 APK; installing a newer version over it preserves your data.
 
-KDJ packs cross-platform search, download, local library management, and music analysis into one desktop app. Instead of jumping between websites, downloaders, and tagging tools, preparing music can stay one continuous workflow.
+KDJ packs cross-platform search, download, local library management, and music analysis into one app. Instead of jumping between websites, downloaders, and tagging tools, preparing music can stay one continuous workflow.
 
 ## Features
 
@@ -79,6 +79,13 @@ KDJ packs cross-platform search, download, local library management, and music a
 
 > [!NOTE]
 > Everyday library management, analysis and playback do not need FFmpeg. The mixing editor's media reading, tempo change and export, video mux and audio extraction, and visualizer export do.
+
+### Android
+
+- Android 8+ on arm64 devices; YouTube playback needs Android 9+ and a current Android System WebView.
+- Music search/download, library, analysis, waveforms, lyrics, themes and system media controls; overlay lyrics and video picture-in-picture.
+- No visualizer production, editing, video projects, FFmpeg or local AI. Video formats depend on system support.
+- See [Android](docs/android.md) for adaptation details and device acceptance checks.
 
 ## Build for development
 

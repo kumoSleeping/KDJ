@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { mediaProductionAvailable } from "../../lib/platformFeatures";
 import { Blend, Clapperboard, Disc3, Download, LoaderCircle, Minus, Play, Plus, Scissors } from "lucide-react";
 import { VideoPlaybackEngine } from "../../lib/videoPlaybackEngine";
 import { api } from "../../lib/api";
@@ -459,7 +460,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
           video_only: false,
           // YouTube 的固定原生链路直接把 H.264/AAC 封装为 MP4，不做解码或重编码。
           // B站继续保留原来的兼容转码及 Offset 语义。
-          transcode: req.platform !== "youtube",
+          transcode: mediaProductionAvailable() && req.platform !== "youtube",
           offset_ms: withOffset && req.platform !== "youtube" ? Math.round(offsetMs) : 0,
           title: req.title.trim() || undefined,
           artist: req.author.trim() || undefined,
@@ -611,7 +612,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
 
       {/* 混音台：协同开关 + 交叉推子。语言学播放条的走带区——裸图标、
           靠间距分组，一行里不出现第二块描边方块。 */}
-      <div className="kd-xfade">
+      {mediaProductionAvailable() && <div className="kd-xfade">
         <button
           type="button"
           className="kd-player-step kd-xfade-toggle"
@@ -658,13 +659,13 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
           className="kd-xfade-end"
           style={{ opacity: coplay ? 0.3 + 0.7 * previewGain(coplay, fadeX) : undefined }}
         />
-      </div>
+      </div>}
       <InlineNotice text={syncError} />
 
       {/* Offset 校准 + 两条下载路。± 按走带键的裸图标语言；
           数值是唯一的"表"，等宽数字，点一下归零。 */}
       <div className="kd-preview-actions">
-        <div className="kd-offset" title="成品起点偏移：正=掐掉开头，负=开头补黑场/静音">
+        {mediaProductionAvailable() && <><div className="kd-offset" title="成品起点偏移：正=掐掉开头，负=开头补黑场/静音">
           <button
             type="button"
             className="kd-player-step"
@@ -717,7 +718,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
         >
           <Scissors size={12} />
           按 Offset 下载
-        </Button>
+        </Button></>}
         <Button
           size="sm"
           disabled={sending}

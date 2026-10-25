@@ -1,0 +1,22 @@
+/* Android presents this Activity in its system PiP surface. The original video host and shared
+   scheduling stay mounted; no second decoder or canvas copy is introduced. */
+html[data-android-pip] .kd-pip-host {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: 2147483647;
+  background: #000;
+}
+html[data-android-pip] .kd-pip-host > div,
+html[data-android-pip] .kd-pip-float-stage {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  aspect-ratio: auto !important;
+  transform: none !important;
+  border-radius: 0;
+}
+html[data-android-pip] .kd-pip-float-stage > :not(.kd-pip-video) { display: none !important; }
+html[data-android-pip] .kd-pip-video { object-fit: contain; }

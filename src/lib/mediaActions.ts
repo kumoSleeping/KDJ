@@ -3,6 +3,7 @@
  * 队列何时打开或平台准备何时开始。
  */
 
+import { mediaProductionAvailable } from "./platformFeatures";
 import { useAppStore } from "../stores/appStore";
 import { useDownloadStore } from "../stores/downloadStore";
 import type { DownloadTask, Quality, SongSource } from "../types";
@@ -37,7 +38,7 @@ function normalizedDownloadSources(
             max_height: options.video?.maxHeight,
             // YouTube's fixed native path already produces MP4 by transmuxing H.264/AAC.
             // Applying the cross-platform re-encode toggle would reintroduce FFmpeg.
-            transcode: source.platform === "youtube" ? false : options.video?.transcode,
+            transcode: mediaProductionAvailable() && source.platform !== "youtube" && options.video?.transcode,
           },
         }
       : source,

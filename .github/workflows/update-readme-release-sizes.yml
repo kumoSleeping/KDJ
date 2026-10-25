@@ -1,6 +1,5 @@
-# 桌面打包线随发版跑，安卓只手动跑。本工作流在任一条成功结束后检查一次：只有
-# 触发标签已经成为 Latest，且桌面三平台的目标资产全部到齐，才把真实体积和下载
-# 链接写回 README；安卓按钮指向最近一个带 APK 的 Release。缺桌面资产时正常跳过。
+# 发版由 rust-build 同时构建桌面和 Android；Latest 就绪后同步真实体积和下载链接。
+# 保留手动补 APK 的完成事件与历史版本回退，不改 README 的自动生成块结构。
 name: update-readme-release-sizes
 
 on:

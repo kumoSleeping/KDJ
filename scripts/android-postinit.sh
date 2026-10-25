@@ -186,7 +186,15 @@ if attribute not in manifest:
     if count != 1:
         print("::error::清单里找不到唯一的 <application> 标签，模板形状变了")
         raise SystemExit(1)
-    open(manifest_path, "w").write(manifest)
+
+# Reapply after `tauri android init`; MainActivity keeps the shared video host in Activity PiP.
+if 'android:supportsPictureInPicture="true"' not in manifest:
+    manifest, count = re.subn(
+        r'(<activity\b[^>]*android:name="\.MainActivity")',
+        r'\1 android:supportsPictureInPicture="true"', manifest, count=1)
+    if count != 1:
+        raise SystemExit("MainActivity manifest template changed")
+open(manifest_path, "w").write(manifest)
 PY
 
 cat > "$NETWORK_SECURITY_CONFIG" <<'EOF'

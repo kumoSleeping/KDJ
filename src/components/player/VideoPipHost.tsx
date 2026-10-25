@@ -21,6 +21,9 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import "./AndroidVideoPip.css";
+import { canAndroidVideoPip, configureAndroidVideoPip, enterAndroidVideoPip } from "../../lib/androidVideoPip";
+import { mediaProductionAvailable } from "../../lib/platformFeatures";
 import { PictureInPicture2 } from "lucide-react";
 import { FloatingMediaResizeHandles, useFloatingMediaWindow } from "./FloatingMediaWindow";
 import { FloatingVideoControls, FloatingVideoScrub, PreviewVolume } from "./FloatingVideoControls";
@@ -125,10 +128,11 @@ function canSystemPip(video: HTMLVideoElement | null = null): boolean {
     document.pictureInPictureEnabled &&
     typeof HTMLVideoElement !== "undefined" &&
     "requestPictureInPicture" in HTMLVideoElement.prototype;
-  return webkitApi || standardApi;
+  return canAndroidVideoPip() || webkitApi || standardApi;
 }
 
 async function enterSystemPip(video: HTMLVideoElement): Promise<boolean> {
+  if (canAndroidVideoPip()) return enterAndroidVideoPip();
   // macOS/iOS 的 WKWebView 即使暴露标准方法也可能以 NotSupportedError 拒绝；
   // 原生 WebKit presentation mode 才是这里可靠的系统级小窗入口。
   if (supportsWebKitPip(video)) {
@@ -1010,7 +1014,7 @@ export function VideoPipHost() {
       const unsupported =
         (reason instanceof DOMException && reason.name === "NotSupportedError") ||
         playingVideo.error?.code === 4; // MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
-      if (next.source === "local" && unsupported && compatRetryKeyRef.current !== nextKey) {
+      if (mediaProductionAvailable() && next.source === "local" && unsupported && compatRetryKeyRef.current !== nextKey) {
         compatRetryKeyRef.current = nextKey;
         loadedKeyRef.current = `${nextKey}:compat`;
         useVideoPip.getState().setError("正在转换为系统播放器兼容格式…");
@@ -1189,6 +1193,8 @@ export function VideoPipHost() {
   useEffect(() => {
     let hideTimer = 0;
     const maybeAutoPip = () => {
+      // Android enters from the Activity lifecycle, before it becomes backgrounded.
+      if (canAndroidVideoPip()) return;
       const pip = useVideoPip.getState();
       if (shouldUsePlatformPlayer(pip.session)) return;
       const floats = pip.mode === "float";
@@ -1812,6 +1818,11 @@ export function VideoPipHost() {
     // 会在约 0.1 秒的交接窗里反复起音，听起来就是“哒哒”两下。
     seekTo(at, false);
   };
+
+  useEffect(() => {
+    configureAndroidVideoPip(Boolean(hostActive && mode === "float" && !isPlatformPlayer), playing, sourceRatio ?? 16 / 9);
+  }, [hostActive, mode, isPlatformPlayer, playing, sourceRatio]);
+  useEffect(() => () => configureAndroidVideoPip(false, false, 16 / 9), []);
 
   const title = session?.title || "视频预览";
 

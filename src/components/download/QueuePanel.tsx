@@ -12,6 +12,7 @@ import {
   Trash2,
   Video,
 } from "lucide-react";
+import { mediaProductionAvailable } from "../../lib/platformFeatures";
 import { api } from "../../lib/api";
 import { copyText } from "../../lib/copyText";
 import { copyShareContent, remoteArtwork } from "../../lib/shareClipboard";
@@ -227,7 +228,7 @@ function QueueQualityControl({
     task.kind === "video" && normalizedQuality !== "audio"
       ? <Video size={10} />
       : <Music2 size={10} />;
-  const modeControl = task.kind === "video" && task.platform === "bilibili";
+  const modeControl = mediaProductionAvailable() && task.kind === "video" && task.platform === "bilibili";
   const options =
     task.kind === "audio"
       ? AUDIO_QUALITIES.map((quality) => ({

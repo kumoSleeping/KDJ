@@ -12,6 +12,7 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.Player
@@ -46,6 +47,9 @@ object NativeAudioRuntime {
     private val focusPolicy = AudioFocusPolicy()
     private var focusRejectedSequence: Long? = null
     private var noisyRegistered = false
+    private var wakeLock: PowerManager.WakeLock? = null
+    @Volatile private var foregroundReady = false
+    private var continuationUntilMs = 0L
 
     private var mirrorTrackId: Long? = null
     private var mirrorSequence = -1L
@@ -95,7 +99,19 @@ object NativeAudioRuntime {
             if (sequence <= mirrorSequence) return
             mirrorSequence = sequence
             ensureLocked(ctx)
-            mirrorTrackId = args.trackId?.takeIf { it > 0 }
+            if (args.phase == "ended" && mirrorPhase != "ended" && mirrorDesiredPlaying) {
+                // Keep the foreground lease while the shared next-track resolver hands off.
+                continuationUntilMs = SystemClock.elapsedRealtime() + 15_000L
+                mainHandler.postDelayed({
+                    synchronized(lock) {
+                        if (!needsForeground()) {
+                            updateWakeLockLocked(ctx)
+                            stopService(ctx)
+                        }
+                    }
+                }, 15_100L)
+            }
+            mirrorTrackId = args.trackId?.takeIf { it != 0L }
             mirrorTitle = args.title?.trim().orEmpty()
             mirrorArtist = args.artist?.trim().orEmpty()
             mirrorAlbum = args.album?.trim().orEmpty()
@@ -117,7 +133,7 @@ object NativeAudioRuntime {
                 if (focusRejectedSequence?.let { sequence > it } == true) {
                     abandonAudioFocusLocked()
                 }
-                requestAudioFocusLocked()
+                // Focus is requested only after the service has entered the foreground (API 35+).
                 registerNoisyReceiverLocked(ctx)
                 shouldStartService = true
             } else {
@@ -131,6 +147,8 @@ object NativeAudioRuntime {
                 }
             }
 
+            if (needsForeground()) { shouldStartService = true; shouldStopService = false }
+            updateWakeLockLocked(ctx)
             persistProgressCheckpointLocked(ctx, snapshotLocked(), force = false)
             val player = sessionPlayer
             mainHandler.post { player?.publish() }
@@ -140,7 +158,34 @@ object NativeAudioRuntime {
         emitState()
     }
 
+    fun wantsPlayback(): Boolean = synchronized(lock) { mirrorDesiredPlaying }
+    fun needsForeground(): Boolean = synchronized(lock) {
+        mirrorDesiredPlaying || SystemClock.elapsedRealtime() < continuationUntilMs
+    }
+
+    fun onForegroundStopped() { foregroundReady = false }
+
+    fun onForegroundReady() {
+        foregroundReady = true
+        synchronized(lock) {
+            if (mirrorDesiredPlaying) requestAudioFocusLocked()
+        }
+    }
+
+    private fun updateWakeLockLocked(context: Context) {
+        if (needsForeground()) {
+            val power = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            val held = wakeLock ?: power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "KDJ:playback")
+                .apply { setReferenceCounted(false) }.also { wakeLock = it }
+            // Renew a bounded lease with snapshots; a broken bridge cannot hold the CPU forever.
+            held.acquire(60_000L)
+        } else {
+            wakeLock?.let { if (it.isHeld) it.release() }
+        }
+    }
+
     fun startService(context: Context) {
+        if (foregroundReady) { onForegroundReady(); return }
         val serviceIntent = Intent(context.applicationContext, NativeAudioService::class.java)
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -150,10 +195,16 @@ object NativeAudioRuntime {
             }
         }.onFailure { error ->
             Log.w(TAG, "startService failed", error)
+            synchronized(lock) {
+                focusRejectedSequence = mirrorSequence
+                NativeAudioBridge.focusDenied(mirrorSequence)
+                wakeLock?.let { if (it.isHeld) it.release() }
+            }
         }
     }
 
     fun stopService(context: Context) {
+        foregroundReady = false
         val serviceIntent = Intent(context.applicationContext, NativeAudioService::class.java)
         context.applicationContext.stopService(serviceIntent)
     }
@@ -267,6 +318,8 @@ object NativeAudioRuntime {
         synchronized(lock) {
             persistProgressCheckpointLocked(context.applicationContext, snapshotLocked(), force = true)
             abandonAudioFocusLocked()
+            continuationUntilMs = 0L
+            wakeLock?.let { if (it.isHeld) it.release() }
             unregisterNoisyReceiverLocked(context.applicationContext)
 
             val player = sessionPlayer

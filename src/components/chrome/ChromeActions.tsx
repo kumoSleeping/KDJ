@@ -1,3 +1,4 @@
+import { mediaProductionAvailable } from "../../lib/platformFeatures";
 import { useEffect } from "react";
 import { Moon, Settings, Sun, Upload, Palette, Download } from "lucide-react";
 import { cycleThemePack, OFFICIAL_THEMES, useThemePack } from "../../lib/themePack";
@@ -43,7 +44,7 @@ export function ChromeActions({
         aria-pressed={tipsOpen} data-open={tipsOpen || undefined} data-fresh={tipsFresh || undefined} onClick={onTips}>
         <HintBulbIcon size={17} aria-hidden="true" />
       </button>}
-      <button type="button" className="kd-chrome-btn" title="下载与导出" aria-label="下载与导出"
+      <button type="button" className="kd-chrome-btn" title={mediaProductionAvailable() ? "下载与导出" : "下载"} aria-label={mediaProductionAvailable() ? "下载与导出" : "下载"}
         data-kd-search-queue-drop="entry" aria-pressed={tasksOpen} data-open={tasksOpen || undefined} onClick={onTasks}><Download size={16} /></button>
       {/* Only the main window has the editor, as only it has the tips. */}
       {onTips && <ChromeEditorKey />}

@@ -60,6 +60,8 @@ const WAYS = "ways";
 
 /** The ways one account can be logged in on a desktop, in the order they are offered. */
 export function loginMethods(account: Account): Method[] {
+  const mobile = ["android", "ios"].includes(window.kdj?.platform ?? "");
+  if (mobile) return account.login_method === "qr" ? ["qr", "headers"] : ["headers"];
   return account.login_method === "qr" ? ["qr", "cookies", "browser", "headers"] : ["cookies", "browser", "headers"];
 }
 
