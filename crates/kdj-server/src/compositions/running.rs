@@ -62,26 +62,52 @@ fn read(path: &Path) -> Option<(u32, u32, String)> {
     Some((pid, u32::try_from(note["owner"].as_u64()?).ok()?, note["output"].as_str()?.to_owned()))
 }
 
-fn processes() -> sysinfo::System {
-    let mut system = sysinfo::System::new();
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use sysinfo::System;
+
+/// The mobile builds run no FFmpeg and have no process table to read: nothing is killed there,
+/// and every owner counts as running, so nothing of theirs is removed.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+struct System;
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn processes() -> System {
+    let mut system = System::new();
     system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     system
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn processes() -> System {
+    System
+}
+
 /// Kills `pid` only while it is still the FFmpeg that was written down: its command line names
 /// that output. A pid the system has since given to something else is left alone.
-fn kill(system: &sysinfo::System, pid: u32, output: &str) -> bool {
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn kill(system: &System, pid: u32, output: &str) -> bool {
     system.process(sysinfo::Pid::from_u32(pid)).is_some_and(|process| {
         process.cmd().iter().any(|arg| arg.to_string_lossy() == output) && process.kill()
     })
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn kill(_: &System, _: u32, _: &str) -> bool {
+    false
+}
+
 /// Whether `pid` is a KDJ still running (another build sharing this data directory may be
 /// rendering): its executable is named for KDJ.
-fn kdj_running(system: &sysinfo::System, pid: u32) -> bool {
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn kdj_running(system: &System, pid: u32) -> bool {
     system.process(sysinfo::Pid::from_u32(pid)).is_some_and(|process| {
         process.name().to_string_lossy().to_ascii_lowercase().contains("kdj")
     })
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn kdj_running(_: &System, _: u32) -> bool {
+    true
 }
 
 /// Starts writing renders down in `dir`, first stopping the FFmpeg an earlier run left: one
