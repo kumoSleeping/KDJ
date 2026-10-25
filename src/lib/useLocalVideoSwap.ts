@@ -5,6 +5,7 @@ import {
 } from "./localVideoSeekBridge";
 import { waitForVideoFrames } from "./videoFrames";
 import { SeekTransitionOverlay } from "./seekTransition";
+import { tracePlayback } from "./playbackTrace";
 import { configurePictureVideo, VideoTransportEchoGuard, type VideoPlaybackEngine } from "./videoPlaybackEngine";
 import { captureLocalVideoSeekFence, getLocalVideoClock, localVideoSeekHasLanded, usesLocalVideoDeviceClock, type LocalVideoSeekFence } from "./mediaSync";
 
@@ -355,6 +356,8 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
     transitionRef.current.clear();
     void synchronizer.alignStandby(old, next, isCurrent, () => {
       if (!isCurrent()) return false;
+      // Seen as the picture jumping by itself: in the log, so that a report of one can be read.
+      tracePlayback("video-standby-swap", { track: optionsRef.current.trackId, error: Math.round((next.currentTime - old.currentTime) * 1000) });
       activeSlotRef.current = activeSlotRef.current === 0 ? 1 : 0;
       setActiveSlot(activeSlotRef.current);
       transitionRef.current.videoHandoff(old, () => {

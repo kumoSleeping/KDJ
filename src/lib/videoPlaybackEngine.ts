@@ -26,6 +26,8 @@ const TRIM_PHASE_ENTER_SEC = 0.03;
 const TRIM_PHASE_DONE_SEC = 0.008;
 const TRIM_PHASE_MAX_DELTA = 0.12;
 const TRIM_PHASE_CLOSE_SEC = 0.8;
+/** followStableClock: a shown picture this near its clock is trimmed by tempo, never sought or handed over. */
+const TRIM_PHASE_LIMIT_SEC = 0.5;
 const VIDEO_SYNC_CORRECTION_INTERVAL_MS = 500;
 const VIDEO_SYNC_CORRECTION_ENTER_SEC = 0.04;
 const VIDEO_SYNC_CORRECTION_EXIT_SEC = 0.015;
@@ -371,6 +373,16 @@ export class VideoPlaybackEngine {
   }
 
   private followStableClock(video: HTMLVideoElement, clock: LocalVideoClock, changed: boolean, seek: ProgrammaticSeek, align?: BackgroundAlignment, preparing = false): void {
+    // A picture on screen a little off its clock is caught up by its tempo (trimPhase, set once
+    // and back): a seek froze it while its source decoded from a keyframe, and a spare taking
+    // over faded one frame into another, both seen as the picture jumping by itself every so
+    // often. Only a larger error is aligned below.
+    if (align && !preparing && clock.playing && clock.rate > 0 && !video.paused
+      && Math.abs(clock.position - video.currentTime) < TRIM_PHASE_LIMIT_SEC) {
+      this.trimPhase(video, clock);
+      return;
+    }
+    this.phaseTrims.delete(video);
     // WKWebView retimes its decoding pipeline on rate changes: even a 500ms PLL can cause a
     // catch-up -> ratechange stall -> catch-up cycle. Keep the actual audio tempo unchanged.
     this.setBaseRate(video, clock.rate > 0 ? clock.rate : 1);
