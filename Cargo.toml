@@ -28,7 +28,7 @@ cpal = { path = "vendor/cpal-0.18.1" }
 tauri-plugin-updater = { path = "vendor/tauri-plugin-updater-2.10.1" }
 
 [workspace.package]
-version = "1.1.0-rc17"
+version = "1.1.0-rc18"
 edition = "2021"
 rust-version = "1.93"
 license = "GPL-3.0-or-later"
