@@ -33,10 +33,10 @@ KDJ 是一款面向音乐收集、整理、分析、播放和可视化的跨平�
 
 <!-- release-package-size-badges:start -->
 <p>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc5/KDJ_1.1.0-rc5_aarch64.dmg"><img src="https://img.shields.io/badge/macOS-9.1_MB-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 9.1 MB"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc5/KDJ_1.1.0-rc5_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-7.3_MB-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 7.3 MB"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc5/KDJ_1.1.0-rc5_amd64.deb"><img src="https://img.shields.io/badge/Linux-10.4_MB-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux 10.4 MB"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.0.2-rc8/app-arm64-release.apk"><img src="https://img.shields.io/badge/Android-23.8_MB-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android 23.8 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc16/KDJ_1.1.0-rc16_aarch64.dmg"><img src="https://img.shields.io/badge/macOS-8.6_MB-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 8.6 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc16/KDJ_1.1.0-rc16_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-7.1_MB-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 7.1 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc16/KDJ_1.1.0-rc16_amd64.deb"><img src="https://img.shields.io/badge/Linux-10.1_MB-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux 10.1 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc16/app-arm64-release.apk"><img src="https://img.shields.io/badge/Android-24.8_MB-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android 24.8 MB"></a>
   <a href="https://github.com/kumoSleeping/KDJ/releases"><img src="https://img.shields.io/badge/More-Releases-555555?style=for-the-badge&logo=github&logoColor=white" alt="More releases"></a>
 </p>
 <!-- release-package-size-badges:end -->
