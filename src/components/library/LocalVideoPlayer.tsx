@@ -22,7 +22,8 @@ import {
   VideoTransportEchoGuard,
 } from "../../lib/videoPlaybackEngine";
 import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
-import { useKdjvLive } from "../../lib/kdjvPlay";
+import { ensureProjectLive, useKdjvLive } from "../../lib/kdjvPlay";
+import { isProjectTrack } from "../../lib/format";
 import { KdjvLivePicture } from "../player/KdjvLivePicture";
 import { PanelErrorBoundary } from "../RootErrorBoundary";
 import { playTrack } from "./TrackTable";
@@ -96,9 +97,11 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   // A project playing from its sound is drawn live (KdjvLivePicture): there is no file to load,
   // and these elements neither prepare its seeks nor follow its clock.
   const live = useKdjvLive(state => state.live[track.id]);
+  // A project is never loaded as a video, also before its live picture is there (ensureProjectLive).
+  const project = isProjectTrack(track.format);
   const localSwap = useLocalVideoSwap({
-    enabled: !hidden && !live,
-    trackId: hidden || live ? null : track.id,
+    enabled: !hidden && !live && !project,
+    trackId: hidden || live || project ? null : track.id,
     desiredPlayingRef,
     getRate: () => getLocalVideoClock(track.id)?.rate ?? getLatestPlayerSync(track.id)?.rate ?? 1,
     onActivate: (video) => {
@@ -166,8 +169,9 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
 
   useEffect(() => {
     if (live) { localSwap.unload(); setDuration(live.duration); return; }
+    if (project) { localSwap.unload(); ensureProjectLive(track.id); return; }
     localSwap.load(`local:${track.id}`, api.videoUrl(track.id));
-  }, [localSwap.load, localSwap.unload, track.id, live]);
+  }, [localSwap.load, localSwap.unload, track.id, live, project]);
 
   useEffect(() => {
     const onFocus = (event: Event) => {
@@ -179,7 +183,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   }, []);
 
   useEffect(() => {
-    if (hidden || live || !usesLocalVideoDeviceClock()) return;
+    if (hidden || live || project || !usesLocalVideoDeviceClock()) return;
     const apply = () => {
       const video = activeVideo();
       if (!video || localSwap.isHoldingPosition()) return;
@@ -194,7 +198,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     video?.addEventListener("seeked", apply);
     apply();
     return () => { unsubscribe(); video?.removeEventListener("loadeddata", apply); video?.removeEventListener("seeked", apply); };
-  }, [track.id, hidden, Boolean(live), localSwap.activeSlot]);
+  }, [track.id, hidden, Boolean(live), project, localSwap.activeSlot]);
 
   useEffect(() => {
     const onMediaSync = (event: Event) => {

@@ -106,6 +106,8 @@ export type VideoPipSession =
       title: string;
       author: string;
       autoPlay: boolean;
+      /** A `.kdjv` project: its picture is drawn live (KdjvLivePicture), never loaded as a video. */
+      project?: boolean;
     };
 
 function isMode(value: string | null): value is VideoPreviewMode {

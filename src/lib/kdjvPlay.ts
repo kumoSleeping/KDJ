@@ -3,8 +3,11 @@
  * the server for its sound — the clips' sound mixed into one file, cached, seconds the first
  * time — and plays the same library row with that sound as its file, while the picture is drawn
  * live from the sources themselves (KdjvLivePicture), as the old workshop's preview did. No
- * picture is rendered to play a project; a render, made for 导出 MP4, is played instead once it
- * exists. The row stays the project: its id, title and 工程 mark do not change.
+ * picture is rendered to play a project, and a render made for 导出 MP4 is not played either: it
+ * is keyed every few seconds, so each start and jump decoded seconds of it and fell behind the
+ * sound, and the picture was handed between decoders around the ninth second; the live picture
+ * reads proxies keyed every half second. The row stays the project: its id, title and 工程 mark
+ * do not change.
  *
  * Asking again for a project the listener left (another song was started meanwhile) only
  * finishes the mix, so the next play is immediate; it does not take the player back.
@@ -50,18 +53,13 @@ export function playProject(track: PlayableTrack, play: Play, autoPlay = true, p
   }, BUBBLE_DELAY_MS);
   void api
     .previewKdjv(track.id)
-    .then(({ sound, render, project }) => {
+    .then(({ sound, project }) => {
       window.clearTimeout(shown);
       pending.delete(track.id);
       dismissTask(bubbleId(track.id));
-      useKdjvLive.setState(({ live }) => {
-        const next = { ...live };
-        if (render) delete next[track.id];
-        else next[track.id] = project;
-        return { live: next };
-      });
+      useKdjvLive.setState(({ live }) => ({ live: { ...live, [track.id]: project } }));
       if (request !== latest) return;
-      play({ ...track, path: render ?? sound }, autoPlay, purpose, position);
+      play({ ...track, path: sound }, autoPlay, purpose, position);
     })
     .catch((error: unknown) => {
       window.clearTimeout(shown);
@@ -100,16 +98,24 @@ export async function refreshPlayingProject(trackId: number, live?: KdjvLive | n
   if (live) showLive(trackId, live);
   const preview = await api.previewKdjv(trackId).catch(() => null);
   if (!preview || turn !== refreshes || getPlayerSession().trackId !== trackId) return;
-  if (preview.render) {
-    useKdjvLive.setState(({ live }) => {
-      const next = { ...live };
-      delete next[trackId];
-      return { live: next };
-    });
-  } else {
-    showLive(trackId, preview.project);
-  }
-  requestPlayerCommand({ type: "resound", trackId, path: preview.render ?? preview.sound });
+  showLive(trackId, preview.project);
+  requestPlayerCommand({ type: "resound", trackId, path: preview.sound });
+}
+
+/** Rows whose live picture is being asked for (ensureProjectLive). */
+const fetching = new Set<number>();
+/**
+ * A project row shown without its live picture — the window was loaded again while the player
+ * went on with its sound — gets it, without playing anything. Nothing is loaded as a video for a
+ * project meanwhile.
+ */
+export function ensureProjectLive(trackId: number): void {
+  if (useKdjvLive.getState().live[trackId] || fetching.has(trackId)) return;
+  fetching.add(trackId);
+  void api.previewKdjv(trackId)
+    .then(preview => showLive(trackId, preview.project))
+    .catch(() => undefined)
+    .finally(() => fetching.delete(trackId));
 }
 
 /**
@@ -121,7 +127,7 @@ export function handleKdjvProxy(source: string): void {
     if (!project.sources.some(s => s.file?.startsWith(`${source}#`) && !s.proxy)) continue;
     const trackId = Number(id);
     void api.previewKdjv(trackId).then(preview => {
-      if (!preview.render && useKdjvLive.getState().live[trackId]) showLive(trackId, preview.project);
+      if (useKdjvLive.getState().live[trackId]) showLive(trackId, preview.project);
     }).catch(() => undefined);
   }
 }

@@ -42,10 +42,10 @@ import {
   VideoTransportEchoGuard,
 } from "../../lib/videoPlaybackEngine";
 import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
-import { useKdjvLive } from "../../lib/kdjvPlay";
+import { ensureProjectLive, useKdjvLive } from "../../lib/kdjvPlay";
+import { isProjectTrack } from "../../lib/format";
 import { KdjvLivePicture } from "./KdjvLivePicture";
 import { PanelErrorBoundary } from "../RootErrorBoundary";
-import type { KdjvLive } from "../../types";
 import {
   YoutubeEmbedController,
   type YoutubeEmbedBounds,
@@ -244,9 +244,13 @@ function youtubeBounds(node: HTMLElement | null): YoutubeEmbedBounds | null {
   };
 }
 
-/** The project a local session plays live, while it plays from its sound (kdjvPlay.ts). */
-function liveProject(session: VideoPipSession | null): KdjvLive | undefined {
-  return session?.source === "local" ? useKdjvLive.getState().live[session.trackId] : undefined;
+/**
+ * A local session of a project, drawn live while it plays from its sound (kdjvPlay.ts): also
+ * before its live picture is there (the window was loaded again while it played), when nothing
+ * is loaded as a video either — that was its render, keyed every few seconds, or a 409.
+ */
+function projectSession(session: VideoPipSession | null): boolean {
+  return session?.source === "local" && (session.project === true || Boolean(useKdjvLive.getState().live[session.trackId]));
 }
 
 function mediaUrl(session: VideoPipSession): string {
@@ -401,7 +405,7 @@ export function VideoPipHost() {
     // WebKit PiP is bound to the concrete source <video>. While it is open, keep that element
     // stable and use the single-video seek fallback instead of swapping it out from underneath PiP.
     // A live project has no video of its own here: its seeks are not prepared on these elements.
-    enabled: Boolean(isLocal && hostActive && !systemPip && !live),
+    enabled: Boolean(isLocal && hostActive && !systemPip && !live && !(session?.source === "local" && session.project)),
     trackId: session?.source === "local" ? session.trackId : null,
     desiredPlayingRef,
     getRate: () => {
@@ -757,10 +761,11 @@ export function VideoPipHost() {
     useVideoPip.getState().setError("");
     // A live project follows the player's clock by itself; there is no video here to start, and
     // the one played before it is let go (useLocalVideoSwap `unload`).
-    if (liveProject(next)) {
+    if (projectSession(next)) {
       pauseHostVideos();
       localSwap.unload();
       loadedKeyRef.current = null;
+      if (next.source === "local") ensureProjectLive(next.trackId);
       return;
     }
     if (next.source === "network" && shouldUsePlatformPlayer(next)) {
@@ -1096,6 +1101,7 @@ export function VideoPipHost() {
         title: track.title || track.filename,
         author: track.artist || "",
         autoPlay: detail.autoPlay !== false,
+        project: isProjectTrack(track.format),
       };
       pip.setSession(next);
       applyPanelChrome(next, pip.mode);
@@ -1266,7 +1272,7 @@ export function VideoPipHost() {
       const current = useVideoPip.getState().session;
       const pip = useVideoPip.getState();
       if (!current || !pip.active) return;
-      if (current.source === "local" && liveProject(current)) {
+      if (current.source === "local" && projectSession(current)) {
         // A live project's picture follows the player: the key only starts or stops the player.
         broadcastMediaSync({ owner: "local-video", action: pip.playing ? "pause" : "play", trackId: current.trackId });
         return;
@@ -1339,7 +1345,7 @@ export function VideoPipHost() {
     const apply = () => {
       const pip = useVideoPip.getState();
       if (!pip.active || pip.mode !== "float" || pip.session?.source !== "local" || pip.session.trackId !== trackId) return;
-      if (liveProject(pip.session)) return;
+      if (projectSession(pip.session)) return;
       const video = activeVideo();
       if (!video || localSwap.isHoldingPosition()) return;
       const clock = getLocalVideoClock(trackId);
@@ -1470,7 +1476,7 @@ export function VideoPipHost() {
     const video = activeVideo();
     if (!video) return;
     // A live project's picture is KdjvLivePicture's: these elements say nothing about it.
-    const stillActive = () => localSwap.isActiveVideo(video) && !liveProject(useVideoPip.getState().session);
+    const stillActive = () => localSwap.isActiveVideo(video) && !projectSession(useVideoPip.getState().session);
     const onSize = () => {
       if (!stillActive() || !(video.videoWidth > 0) || !(video.videoHeight > 0)) return;
       const ratio = video.videoWidth / video.videoHeight;
