@@ -24,6 +24,15 @@ const AVAILABLE_TTL: Duration = Duration::from_secs(30 * 60);
 const UNAVAILABLE_TTL: Duration = Duration::from_secs(5 * 60);
 const FAILURE_TTL: Duration = Duration::from_secs(60);
 const DEFAULT_BITRATE: u64 = 12_000_000;
+/// What a renderer's private staging directory is called, then a unique suffix. Only output
+/// inside such a directory may use a hardware encoder (its partial can be removed on fallback):
+/// a renderer that stages under another name silently encodes on the CPU.
+pub(super) const STAGE_PREFIX: &str = ".kdj-composition-";
+
+/// A staging directory's name: `STAGE_PREFIX`, then `rest` (which must make it unique).
+pub(super) fn stage_name(rest: &str) -> String {
+    format!("{STAGE_PREFIX}{rest}")
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum Encoder {
@@ -447,7 +456,7 @@ impl Staging {
             || !directory
                 .file_name()
                 .and_then(|s| s.to_str())
-                .is_some_and(|s| s.starts_with(".kdj-composition-") && s.len() > 17)
+                .is_some_and(|s| s.starts_with(STAGE_PREFIX) && s.len() > STAGE_PREFIX.len())
         {
             return Ok(None);
         }
@@ -571,12 +580,14 @@ async fn source_bitrate(
 /// removing its private staging partial. Cancellation and `-n` collisions never
 /// retry. Copy, WebM, other codecs, and unrecognized layouts pass through unchanged.
 /// Progress is monotonic across fallback; the existing renderer reserves 1.0 for
-/// the caller's validation/commit phase. `status` names the encoder in use.
-pub async fn render_with_status(
+/// the caller's validation/commit phase. `status` names the encoder in use. A hardware
+/// encoder is held to `bitrate`: the canvas's, since a composition's first input says nothing
+/// of the picture it makes.
+pub async fn render_at(
     args: &[String], duration: i64, cancel: &CancellationToken,
-    preference: EncodingAcceleration, progress: impl FnMut(f64), status: impl Fn(&str),
+    preference: EncodingAcceleration, bitrate: u64, progress: impl FnMut(f64), status: impl Fn(&str),
 ) -> Result<()> {
-    render_inner(args, duration, cancel, preference, progress, status, None, None).await
+    render_inner(args, duration, cancel, preference, progress, status, None, Some(bitrate)).await
 }
 
 /// Explicit opt-in for a frame source that can regenerate every frame on retry.
@@ -619,11 +630,18 @@ async fn render_inner(
         }
     };
     let candidates = candidates(preference);
-    let Some(layout) = layout(args).filter(|_| !candidates.is_empty()) else {
+    if candidates.is_empty() {
+        return attempt(args, duration, cancel, report, frames).await;
+    }
+    // A builder whose arguments or staging this module does not recognize loses the hardware
+    // encoder; say so, or the CPU fallback goes unnoticed for weeks.
+    let Some(layout) = layout(args) else {
+        crate::diagnostics::record("warn", "hardware", "encoder.layout", "合成参数不在硬件编码可识别的范围内，使用 CPU");
         return attempt(args, duration, cancel, report, frames).await;
     };
     let prepare = || if frames.is_some() { Staging::prepare_input(args, &layout, true) } else { Staging::prepare(args, &layout) };
     let Some(staging) = prepare()? else {
+        crate::diagnostics::record("warn", "hardware", "encoder.staging", &format!("输出不在 {STAGE_PREFIX}* 临时目录中，使用 CPU"));
         return attempt(args, duration, cancel, report, frames).await;
     };
     let binary = kdj_providers::ffmpeg::binary()?;
@@ -862,6 +880,22 @@ mod tests {
         assert_eq!(bitrate(1920, 1080, f64::INFINITY), DEFAULT_BITRATE);
     }
 
+    #[test]
+    fn only_a_stage_named_by_stage_name_takes_the_hardware_encoder() {
+        let scratch = Scratch::new();
+        let source = scratch.0.join("source.mp4");
+        std::fs::write(&source, b"original").unwrap();
+        let staged = |name: &str| {
+            let directory = scratch.0.join(name);
+            std::fs::create_dir(&directory).unwrap();
+            let args = args(&directory.join("render.mp4"), &source);
+            Staging::prepare(&args, &layout(&args).unwrap()).unwrap().is_some()
+        };
+        assert!(staged(&stage_name("kdjv-x-0123-abcd")), "a project's render");
+        assert!(!staged(".kdjv-x-0123-abcd"), "the name kdjv renders staged under from 10-19 to 10-25");
+        assert!(!staged(STAGE_PREFIX), "a prefix alone is no one's own directory");
+    }
+
     struct Scratch(PathBuf);
 
     impl Scratch {
@@ -998,7 +1032,7 @@ mod tests {
         cancel.cancel();
         let mut progress = Vec::new();
         assert!(
-            render_with_status(&args, 1000, &cancel, EncodingAcceleration::Auto, |p| {
+            render_at(&args, 1000, &cancel, EncodingAcceleration::Auto, DEFAULT_BITRATE, |p| {
                 progress.push(p)
             }, |_| {})
             .await

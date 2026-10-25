@@ -68,6 +68,17 @@ const INPUT_SLACK_MS: f64 = 500.;
 fn picture_threads() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get() / 2).clamp(1, 4)
 }
+/// Threads of the software H.264 encoder: two ran flat out near 86 frames/s at 1080p, so half
+/// the cores, two to eight, as the visualizer's export does (studio.rs).
+fn encoder_threads() -> usize {
+    std::thread::available_parallelism().map_or(2, |n| n.get() / 2).clamp(2, 8)
+}
+/// What a hardware encoder is held to for `crf` on this canvas: the 1080p30 standard at CRF 20,
+/// doubled every six steps down and halved every six up, as x264's own rate roughly is.
+fn canvas_bitrate(canvas: &Canvas, crf: u8) -> u64 {
+    let base = super::super::acceleration::bitrate(canvas.width, canvas.height, canvas.fps) as f64;
+    ((base * 2f64.powf((20. - crf as f64) / 6.)).round() as u64).clamp(3_000_000, 80_000_000)
+}
 pub(super) struct Scratch(pub(super) PathBuf);
 impl Drop for Scratch {
     fn drop(&mut self) {
@@ -656,7 +667,7 @@ impl Workshop {
             "-crf".into(),
             p.output.quality.to_string(),
             "-threads:v:0".into(),
-            "2".into(),
+            encoder_threads().to_string(),
             "-pix_fmt:v:0".into(),
             "yuv420p".into(),
             "-c:a".into(),
@@ -670,11 +681,12 @@ impl Workshop {
             output.to_string_lossy().into_owned(),
         ]);
         let last_progress = Mutex::new(0u32);
-        super::super::acceleration::render_with_status(
+        super::super::acceleration::render_at(
             &args,
             duration.round() as i64,
             cancel,
             p.output.acceleration,
+            canvas_bitrate(&p.canvas, p.output.quality),
             |v| {
                 let progress = (v * 1000.) as u32;
                 let mut last = last_progress.lock().unwrap();
@@ -799,4 +811,21 @@ fn image_graph(graph: &mut Vec<String>, n: usize, s: &Source, c: &Clip, p: &Comp
         graph.push(format!("[color{n}][alpha{n}]alphamerge=shortest=1,{shift}"));
     } else {graph.push(format!("{pixels},{shift}"));}
     graph.push(format!("[base{n}][clip{n}]overlay=x='{}':y='{}':format=yuv420:eof_action=repeat:repeatlast=1:enable='gte(t,{})*lt(t,{})'[base{}]",picture_axis(c.picture.x,c.picture.crop_auto_fit,"W","w"),picture_axis(c.picture.y,c.picture.crop_auto_fit,"H","h"),secs(c.start_ms-lo),secs(c.start_ms-lo+c.duration()),n+1));
+}
+
+#[cfg(test)]
+mod encoder_tests {
+    use super::*;
+
+    #[test]
+    fn a_hardware_encoder_is_held_to_the_canvas_and_the_quality() {
+        let canvas = |width, height, fps| Canvas { width, height, fps, ..Canvas::default() };
+        assert_eq!(canvas_bitrate(&canvas(1920, 1080, 30.), 20), 12_000_000, "the standard");
+        assert_eq!(canvas_bitrate(&canvas(1920, 1080, 30.), 26), 6_000_000, "compact: half");
+        assert_eq!(canvas_bitrate(&canvas(1920, 1080, 30.), 14), 24_000_000, "six steps better: twice");
+        assert_eq!(canvas_bitrate(&canvas(1920, 1080, 60.), 20), 24_000_000, "twice the frames");
+        assert_eq!(canvas_bitrate(&canvas(3840, 2160, 60.), 16), 80_000_000, "held under the ceiling");
+        assert_eq!(canvas_bitrate(&canvas(320, 180, 30.), 26), 3_000_000, "and over the floor");
+        assert!((2..=8).contains(&encoder_threads()));
+    }
 }

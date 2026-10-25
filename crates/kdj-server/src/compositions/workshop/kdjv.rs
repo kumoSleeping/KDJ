@@ -1240,9 +1240,13 @@ impl Workshop {
         }
         let _slot = tokio::select! {_ = cancel.cancelled() => bail!("渲染已取消"), s = self.export_slots.acquire() => s?};
         std::fs::create_dir_all(&self.cache)?;
-        let stage = self.cache.join(format!(".{name}-{}", id()));
+        // The hardware encoder only writes into a directory named like this (acceleration.rs);
+        // under the cache's own `.kdjv-…` name every render fell back to the CPU.
+        let stage = self.cache.join(super::super::acceleration::stage_name(&format!("{name}-{}", id())));
         std::fs::create_dir(&stage)?;
         let _scratch = Scratch(stage.clone());
+        // Whose it is: a later start removes it only once this process is gone (`Workshop::new`).
+        std::fs::write(stage.join(".owner"), std::process::id().to_string())?;
         let report = |step: Step, at: f64, span: f64| -> Result<()> {
             match step {
                 Step::Progress(v) => progress(at + span * v, ""),

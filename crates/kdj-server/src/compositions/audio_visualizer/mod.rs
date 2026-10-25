@@ -54,10 +54,10 @@ pub struct ExportReport {
 struct Stage(PathBuf);
 impl Stage {
     fn new(directory: &Path) -> Result<Self> {
-        let path = directory.join(format!(
-            ".kdj-composition-visualizer-{:016x}",
+        let path = directory.join(super::acceleration::stage_name(&format!(
+            "visualizer-{:016x}",
             rand::random::<u64>()
-        ));
+        )));
         std::fs::create_dir(&path).context("无法建立可视化临时目录")?;
         Ok(Self(path))
     }
