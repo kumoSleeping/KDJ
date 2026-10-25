@@ -1510,7 +1510,7 @@ export const TrackTable = memo(function TrackTable({
         taker.drop(ids, up.clientX, up.clientY);
         return;
       }
-      // Agent Mode: the songs become cards that go to the AI with the request.
+      // The `/pi` field: the songs become cards that go to the AI with the request.
       if (ai) {
         finishTrackDrop();
         void libraryStore.getState().resolveSummaries(ids)

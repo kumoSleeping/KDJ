@@ -1,0 +1,59 @@
+/* The frames the AI cut (AiShots.tsx): small pictures in a row that wraps, the moment written
+   on each one's foot; the one opened lies across the row above them. No lines between them:
+   the pictures are their own edges. */
+.kd-ai-shots {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.kd-ai-shot-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 4px;
+  min-width: 0;
+}
+.kd-ai-shot,
+.kd-ai-shot-open {
+  appearance: none;
+  position: relative;
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--kd-text) 8%, var(--kd-panel));
+  cursor: zoom-in;
+}
+.kd-ai-shot { flex: none; height: 3.25rem; }
+.kd-ai-shot img {
+  display: block;
+  height: 100%;
+  width: auto;
+  max-width: 7.5rem;
+  object-fit: cover;
+}
+.kd-ai-shot[aria-pressed="true"] { opacity: 0.55; }
+.kd-ai-shot-label {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, #000 55%, transparent);
+  color: #fff;
+  font-size: 0.66rem;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+.kd-ai-shot-open { width: 100%; cursor: zoom-out; }
+.kd-ai-shot-open img { display: block; width: 100%; height: auto; max-height: 16rem; object-fit: contain; }
+.kd-ai-shot-more {
+  align-self: center;
+  padding: 0 4px;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+.kd-ai-shot:focus-visible,
+.kd-ai-shot-open:focus-visible { outline: 2px solid var(--kd-focus, var(--kd-text)); outline-offset: 1px; }

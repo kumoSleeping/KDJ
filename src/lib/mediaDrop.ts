@@ -1,6 +1,6 @@
 /**
  * Files and folders dropped on the main window from the computer (Finder, Explorer), as the
- * native shell reports them (`kdj:media-drop`, src-tauri/src/folder_drop.rs). On Agent Mode's
+ * native shell reports them (`kdj:media-drop`, src-tauri/src/folder_drop.rs). On the `/pi` field's
  * row or key they become cards for the AI (aiAttachments.ts); anywhere else the dropped folders
  * are imported into the library. A selection of files dropped anywhere else is left alone: it
  * must never grow into its parent folder or a scan of every root.
@@ -24,7 +24,7 @@ export interface NativeMediaDrop {
   error?: string | null;
 }
 
-/** Agent Mode under the drop lights the way an in-window drag lights it. */
+/** The `/pi` field under the drop lights the way an in-window drag lights it. */
 function paint(x?: number, y?: number): void {
   document.querySelectorAll("[data-kd-pointer-ai-over]").forEach(node => node.removeAttribute("data-kd-pointer-ai-over"));
   if (x !== undefined && y !== undefined) aiDropElementAt(x, y)?.setAttribute("data-kd-pointer-ai-over", "");

@@ -46,7 +46,7 @@ export interface AiStatus {
   };
 }
 
-/** pi's reasoning efforts that the key beside Agent Mode steps through. */
+/** pi's reasoning efforts that the key beside the `/pi` field steps through. */
 export type AiThinking = "low" | "medium" | "high" | "xhigh";
 
 /** How the AI searches the web: pi-web-access, or one of KDJ's own ways. */

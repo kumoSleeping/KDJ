@@ -72,3 +72,4 @@
 .kd-ai-session-title:focus-visible,
 .kd-ai-session-go:focus-visible,
 .kd-ai-drawer-key:focus-visible { outline: 2px solid var(--kd-focus, var(--kd-text)); outline-offset: 1px; }
+.kd-ai-step-copy > .kd-ai-shots { margin-top: 4px; }

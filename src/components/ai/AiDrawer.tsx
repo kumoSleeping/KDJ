@@ -5,7 +5,7 @@
  *   the supplements — and every step the AI took, as it runs (aiStore.run, kept by aiEvents.tsx);
  * - 历史: pi's earlier sessions in KDJ's folder, newest first (AiSessions.tsx, also in 设置 → AI).
  *   Every request is a session of its own; one opens to what was asked and what was done, and
- *   can be continued: the next request in Agent Mode goes on from it.
+ *   can be continued: the next request in the `/pi` field goes on from it.
  *
  * The title row holds 停止 while the AI works and + for a new session. Nothing here is written
  * by the AI; an empty page stays empty.

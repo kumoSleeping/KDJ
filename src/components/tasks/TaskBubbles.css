@@ -105,6 +105,54 @@
   pointer-events: auto;
   will-change: transform;
 }
+/* `working` (the AI's task while it runs): one soft arc of warm light — red into orange into
+   yellow, fading at both ends, the `/pi` field's colours (docs/ai-dock.md) — goes round the
+   bubble's edge every few seconds. A masked ring on the bubble's own outline, over its content
+   and under the pointer, so nothing is laid out or moved; under reduced motion the whole edge
+   stays faintly lit instead. */
+@property --kd-task-sweep {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.kd-task[data-working] {
+  --kd-task-work-a: #e8412f;
+  --kd-task-work-b: #f2811d;
+  --kd-task-work-c: #f2b822;
+}
+:root[data-theme="light"] .kd-task[data-working] { --kd-task-work-c: #d99a06; }
+.kd-task[data-working]::after {
+  content: "";
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  padding: 1.5px;
+  border-radius: inherit;
+  background: conic-gradient(from var(--kd-task-sweep),
+    transparent 0deg,
+    color-mix(in srgb, var(--kd-task-work-a) 55%, transparent) 40deg,
+    var(--kd-task-work-a) 80deg,
+    var(--kd-task-work-b) 120deg,
+    var(--kd-task-work-c) 160deg,
+    transparent 200deg,
+    transparent 360deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  animation: kd-task-sweep 2.8s linear infinite;
+}
+@keyframes kd-task-sweep {
+  from { --kd-task-sweep: 0deg; }
+  to { --kd-task-sweep: 360deg; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-task[data-working]::after {
+    animation: none;
+    background: linear-gradient(115deg, var(--kd-task-work-a), var(--kd-task-work-b) 50%, var(--kd-task-work-c));
+    opacity: 0.6;
+  }
+}
 /* 460 ms in and 360 ms out: the song-change clock (src/lib/songSwapMotion.ts), which the host
    passes in. One pair of keyframes serves both places: --kd-task-drop lies below a bottom
    bubble and above a top one. Both ends of every keyframe are written out: WebKit keeps an

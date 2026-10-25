@@ -76,6 +76,12 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   caller takes it down.
   `dismiss: { label, icon? }` rewrites the key that rolls it down when doing so does more than
   put the bubble away — never by testing an id in the host.
+- **Working.** `working: true` says the task is at work right now and shows no percentage
+  (the AI's task, `docs/ai-dock.md`): the host runs one soft arc of warm light — red into
+  orange into yellow, the `/pi` field's colours — round the bubble's edge (a masked ring on its
+  outline, `--kd-task-sweep`; under reduced motion a still, faintly lit edge). It stops when the
+  flag goes. This is the one warm edge a bubble may have; no task draws it itself, and the
+  search row shows nothing of the AI's work.
 - **Tone is not selection.** `info`, `success`, `error` colour the leading mark only (on a cover
   stack, a small mark on its corner); an error is amber, never the theme red. An error shows its
   whole sentence (up to four lines) instead of scrolling it.

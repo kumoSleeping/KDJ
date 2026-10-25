@@ -35,7 +35,7 @@ import { pointerDragGhost, setDragGhost, type PointerDragGhost } from "../compon
 import { aiDropElementAt, fromSearchDrag } from "./aiAttachments";
 import { useAiStore } from "../stores/aiStore";
 
-/** Agent Mode's field (or its key) under a dragged result lights; dropped there, it becomes a card. */
+/** the `/pi` field's field (or its key) under a dragged result lights; dropped there, it becomes a card. */
 function clearAiOver(): void {
   document
     .querySelectorAll<HTMLElement>("[data-kd-pointer-ai-over]")

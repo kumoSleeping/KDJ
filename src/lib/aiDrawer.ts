@@ -1,7 +1,7 @@
 /**
  * The AI's app in the list's drawer (docs/ai-dock.md, "AI 抽屉"): 任务 — the request under way or
  * the last one, step by step — and 历史 — the earlier sessions, read back and continued. Opened
- * from the drawer's head or from the Agent Mode name in the search row.
+ * from the drawer's head.
  */
 import { create } from "zustand";
 import { useSidePanels } from "./sidePanels";

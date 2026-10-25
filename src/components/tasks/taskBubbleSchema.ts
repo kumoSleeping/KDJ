@@ -155,6 +155,12 @@ export interface TaskBubbleSpec {
    * `actions` (the AI's task).
    */
   held?: boolean;
+  /**
+   * The task is at work right now: the host runs a short light round the bubble's edge, which
+   * stops when this goes. For work the listener handed over and waits on, which shows no
+   * percentage (the AI's task: each task has its own light, the search row has none).
+   */
+  working?: boolean;
   /** Esc dismisses it. For a bubble the user called up; never for a transient report. */
   escape?: boolean;
   /**

@@ -1,5 +1,5 @@
 /**
- * What the listener drags or pastes into Agent Mode (docs/ai-dock.md): songs and videos from the
+ * What the listener drags or pastes into the `/pi` field (docs/ai-dock.md): songs and videos from the
  * library, the search results, the computer's own files, and pictures. Each becomes a card above the field and goes
  * to the AI with the request, in a `<kdj-attachments>` block (prompts/system.md): where the thing
  * is, how long it is, and the time the listener marked on it — the range held on the waveform
@@ -38,10 +38,10 @@ export interface AiAttachment {
   range?: { start: number; end: number };
 }
 
-/** The marker of the field that takes drops (SearchBar, Agent Mode only). */
+/** The marker of the field that takes drops (SearchBar: the search row while the AI is offered). */
 export const AI_DROP_ATTR = "data-kd-ai-drop";
 
-/** The Agent Mode field under the pointer, if any. */
+/** The `/pi` field under the pointer, if any. */
 export function aiDropElementAt(x: number, y: number): HTMLElement | null {
   if (typeof document === "undefined") return null;
   const hit = document.elementFromPoint(x, y);

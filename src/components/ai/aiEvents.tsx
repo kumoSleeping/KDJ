@@ -1,8 +1,10 @@
 /**
  * pi's stream turned into what the window does (docs/ai-dock.md). The AI writes nothing back:
  *
- * - each tool call is a bubble at the top while it runs and for a moment after (aiTasks.ts says
- *   what it reads); downloads report in the download list and its bubbles like any other;
+ * - each kind of step is one bubble at the top while it runs and for a moment after (aiTasks.ts
+ *   says what it reads): the calls of one tool in one task share it, the latest one written on
+ *   it, so five frame cuts are one bubble, which then shows the frames it cut (aiShots.ts);
+ *   downloads report in the download list and its bubbles like any other;
  * - `kdj_search` runs the same search in the search pane, `kdj_library_list` the same lookup in
  *   the library, `kdj_play` plays the track; when the task is done and the listener has not
  *   moved the window, it goes back to where they were (aiPlace.ts);
@@ -10,17 +12,21 @@
  *   artists, where they come from) and/or text choices, one or several to pick, a line for the
  *   listener's own words, and when the AI gave one, a countdown after which its default is taken;
  * - `tell_user` is a message at the top that stays as long as the AI said, or until put away;
- * - the listener's own request is a task at the bottom right, over the playing song's bubble: it
- *   has no countdown and leaves when the AI is done. A line sent while it works is a second task
- *   until the AI takes it in, then joins the first as a supplement. A task the AI has not taken
- *   yet can be taken back;
+ * - each request the listener sends (`/pi …`) is a task of its own at the bottom right, over the
+ *   playing song's bubble, in a session of its own. One task runs at a time — they all drive
+ *   the same window — and its bubble's edge runs while it works; a request sent meanwhile waits
+ *   in a bubble of its own and starts when the tasks before it are done. A waiting task can be
+ *   taken back, a running one stopped;
  * - what goes wrong is an amber bubble at the top.
  */
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { Check, FileVideo, Globe, Library, LoaderCircle, LogIn, Search, Settings2, Sparkles, Square, Undo2, Wrench } from "lucide-react";
+import { Check, Clock3, FileVideo, Globe, Library, LogIn, Search, Settings2, Sparkles, Square, Undo2, Wrench } from "lucide-react";
 import { aiApi } from "../../lib/api";
 import { requestAiLibrary, requestAiSearch } from "../../lib/aiSearch";
 import { aiTaskBegan, aiTaskEnded } from "../../lib/aiPlace";
+import { imagesOf, withAttachments, type AiAttachment } from "../../lib/aiAttachments";
+import { withStatus } from "../../lib/aiStatus";
+import { peekShots, peekUnshown, type AiShot } from "../../lib/aiShots";
 import { openAiSettings } from "../../lib/aiSettings";
 import { noticeOnEnd, noticeOnStart, resultText, stepProgress, type AiNotice, type AiNoticeIcon } from "../../lib/aiTasks";
 import { formatDuration, thumbUrl } from "../../lib/format";
@@ -32,6 +38,7 @@ import { PlatformMark } from "../download/PlatformMark";
 import { dismissTask, showTask, updateTask } from "../tasks/taskBubbleStore";
 import { emptyTrace, reduceAiTrace } from "../../lib/aiTrace";
 import { AiTaskTrace } from "./AiTaskTrace";
+import { AiShots } from "./AiShots";
 import { useAiStore, type AiRun } from "../../stores/aiStore";
 import { PlanBody, PlanText, type PlanMedia } from "./AiMarkup";
 import { TimelineBoard } from "./AiTimeline";
@@ -87,25 +94,72 @@ function gatherSearch(args: Fields) {
 
 /** The calls under way: their tool and arguments, for the line their end writes. */
 const calls = new Map<string, { tool: string; args: Fields }>();
-/** The step bubbles this task put up at the top, cleared when its closing words come. */
-const stepBubbles = new Set<string>();
 /** The AI's last words in this task: its closing reply. */
 let lastReply = "";
 
-function noticeBubble(id: string, notice: AiNotice, stay: number | undefined, progress?: number) {
-  stepBubbles.add(id);
+/** The frames one bubble shows at most: the latest. */
+const SHOTS_SHOWN = 12;
+
+/**
+ * The calls of one tool in the task under way, which share one bubble at the top: their words
+ * as they started and ended, and for frame cuts the frames they cut.
+ */
+interface StepGroup {
+  bubble: string;
+  calls: Map<string, { notice: AiNotice; running: boolean }>;
+  shots: AiShot[];
+  unshown: number;
+}
+/** By tool, for the task under way; a new task starts its own. */
+let groups = new Map<string, StepGroup>();
+let groupSeq = 0;
+
+function groupOf(tool: string): StepGroup {
+  let group = groups.get(tool);
+  if (!group) {
+    group = { bubble: `ai:step:${groupSeq}:${tool}`, calls: new Map(), shots: [], unshown: 0 };
+    groups.set(tool, group);
+  }
+  return group;
+}
+
+/**
+ * The group's bubble: the latest call that is still running, or else the latest that ended,
+ * how many calls there were, a render's percentage, and the frames the cuts brought back.
+ */
+function drawGroup(group: StepGroup, progress?: number) {
+  const entries = [...group.calls.values()];
+  if (entries.length === 0) return;
+  const running = entries.filter(entry => entry.running);
+  const { notice } = running[running.length - 1] ?? entries[entries.length - 1];
+  const shown = group.shots.slice(-SHOTS_SHOWN);
+  const more = group.unshown + group.shots.length - shown.length;
   showTask({
     progress,
-    id: `ai:${id}`,
+    id: group.bubble,
     kind: "ai",
     title: notice.title,
-    detail: notice.detail,
+    detail: running.length > 1 ? `${running.length} 个进行中` : notice.detail,
+    facts: entries.length > 1 ? [`共 ${entries.length} 次`] : undefined,
     icon: ICONS[notice.icon],
-    tone: notice.tone,
+    tone: running.length > 0 ? "info" : notice.tone,
     placement: "top",
-    size: notice.detail ? "regular" : "small",
-    stay,
+    size: notice.detail || shown.length > 0 || entries.length > 1 ? "regular" : "small",
+    // A running step is timed rather than kept, so that a full place makes room for the newest;
+    // a finished one stays the listener's usual length, a failed one twice that.
+    stay: running.length > 0 ? RUNNING_STAY_MS : undefined,
+    controls: shown.length > 0 ? <AiShots shots={shown} more={more} /> : undefined,
   });
+}
+
+/** The step bubbles go with their task; a finished frame cut stays its time, to be looked at. */
+function clearGroups() {
+  for (const group of groups.values()) {
+    const running = [...group.calls.values()].some(entry => entry.running);
+    if (running || group.shots.length === 0) dismissTask(group.bubble);
+  }
+  groups = new Map();
+  groupSeq += 1;
 }
 
 /** One sentence at the top, for the AI's own troubles. */
@@ -481,12 +535,11 @@ function tell(callId: string, args: Fields) {
 // ---------------------------------------------------------------- the closing reply
 
 /**
- * The task is done and the AI said what came of it: its words are a bubble that stays until put
- * away, and the steps' bubbles leave with the task (the drawer keeps them).
+ * The task is done and the AI said what came of it: its words go into the task's record (and
+ * a bubble of their own when the task has none), and the step bubbles leave with the task.
  */
 function closingReply(text: string) {
-  for (const id of stepBubbles) dismissTask(`ai:${id}`);
-  stepBubbles.clear();
+  clearGroups();
   const reply = text.trim();
   if (!reply) return;
   updateRun(run => ({ ...run, reply }));
@@ -508,17 +561,24 @@ function closingReply(text: string) {
 // ---------------------------------------------------------------- the listener's tasks
 
 /**
- * `text` is the listener's words as shown; `sent` is what pi got (the words and the dragged-in
- * cards, aiAttachments.ts), by which its echo is recognised; `attached` names the cards and `images`
- * are the pictures that went with it, sent again with it if it is sent again.
+ * One request: the listener's words, the cards that went with them (aiAttachments.ts), and,
+ * once it is handed to pi, what pi got (the words, the cards and where the listener was then).
  */
-interface UserLine { id: string; text: string; sent: string; attached: string[]; images: string[] }
-interface UserTask extends UserLine { supplements: string[]; working: boolean }
+interface UserTask {
+  id: string;
+  text: string;
+  attached: AiAttachment[];
+  sent?: string;
+  /** pi has begun on it (agent_start). */
+  working: boolean;
+}
 
-/** The request under way, and the lines sent since that the AI has not taken in yet. */
+/** The task handed to pi, and the ones waiting for it, in order. */
 let mainTask: UserTask | null = null;
-let waiting: UserLine[] = [];
+let queue: UserTask[] = [];
 let taskSeq = 0;
+
+const titlesOf = (task: UserTask) => task.attached.map(item => item.title);
 
 function Attached({ titles }: { titles: string[] }) {
   return titles.length > 0 ? <p className="kd-ai-message kd-ai-task-more">附带：{titles.join("、")}</p> : null;
@@ -527,8 +587,7 @@ function Attached({ titles }: { titles: string[] }) {
 function TaskText({ task }: { task: UserTask }) {
   return <div className="kd-ai-task">
     <p className="kd-ai-message">{task.text}</p>
-    <Attached titles={task.attached} />
-    {task.supplements.map((line, index) => <p key={index} className="kd-ai-message kd-ai-task-more">补充：{line}</p>)}
+    <Attached titles={titlesOf(task)} />
   </div>;
 }
 
@@ -539,11 +598,13 @@ function drawMain() {
     id: `ai-task:${task.id}`,
     kind: "ai-task",
     title: task.working ? "正在做" : "等待开始",
-    icon: task.working ? <LoaderCircle size={16} className="kd-spin" aria-hidden="true" /> : AI_MARK,
+    icon: AI_MARK,
     stay: 0,
     controls: <TaskText task={task} />,
     body: <AiTaskTrace />,
     resizable: true,
+    // While it works, its edge runs: the search row shows nothing of it.
+    working: task.working,
     // The task stays in sight until it ends: it cannot be put away, only stopped with its key.
     held: true,
     actions: [{
@@ -554,23 +615,31 @@ function drawMain() {
         if (task.working) void useAiStore.getState().abort();
         else {
           dismissTask(`ai-task:${task.id}`, "caller");
-          stopTask();
+          if (mainTask === task) mainTask = null;
+          void useAiStore.getState().abort();
         }
       },
     }],
   });
 }
 
-function drawWaiting(line: UserLine) {
+/** A task waiting for the ones before it: its words, its place in the line, and 撤销. */
+function drawQueued(task: UserTask) {
+  const place = queue.indexOf(task) + 1;
   showTask({
-    id: `ai-task:${line.id}`,
+    id: `ai-task:${task.id}`,
     kind: "ai-task",
-    title: "补充 · 等待 AI 收到",
-    icon: AI_MARK,
+    title: place > 1 ? `排队中 · 第 ${place} 个` : "排队中 · 下一个",
+    icon: <Clock3 size={16} aria-hidden="true" />,
     stay: 0,
-    controls: <div className="kd-ai-task"><p className="kd-ai-message">{line.text}</p><Attached titles={line.attached} /></div>,
+    controls: <TaskText task={task} />,
+    resizable: true,
     dismiss: { label: "撤销" },
-    onDismiss: reason => { if (reason === "user") void takeBack(line.id); },
+    onDismiss: reason => {
+      if (reason !== "user") return;
+      queue = queue.filter(item => item !== task);
+      queue.forEach(drawQueued);
+    },
   });
 }
 
@@ -579,52 +648,50 @@ function updateRun(change: (run: AiRun) => AiRun) {
   const run = useAiStore.getState().run;
   if (run) useAiStore.setState({ run: change(run) });
 }
-function startRun(line: UserLine, supplements: string[] = [], resumed?: string) {
-  useAiStore.setState({ run: { request: line.text, attached: line.attached, supplements, steps: [], trace: emptyTrace(), resumed } });
-}
 
-/** The listener sent a request: a task of its own, or a supplement to the one under way. */
-export function userRequest(text: string, running: boolean, sent = text, attached: string[] = [], images: string[] = [], resumed?: string): string {
-  taskSeq += 1;
-  if (!mainTask) {
-    mainTask = { id: `t${taskSeq}`, text, sent, attached, images, supplements: [], working: running };
-    startRun(mainTask, [], resumed);
-    drawMain();
-    return mainTask.id;
-  }
-  const line = { id: `s${taskSeq}`, text, sent, attached, images };
-  waiting.push(line);
-  drawWaiting(line);
-  return line.id;
-}
-
-/** The request never reached pi: its bubble goes. */
-export function requestFailed(id: string) {
-  if (mainTask?.id === id) {
-    dismissTask(`ai-task:${id}`, "caller");
-    mainTask = null;
-  } else {
-    waiting = waiting.filter(line => line.id !== id);
-    dismissTask(`ai-task:${id}`, "caller");
-  }
-}
-
-function stopTask() {
-  mainTask = null;
-  for (const line of waiting) dismissTask(`ai-task:${line.id}`, "caller");
-  waiting = [];
-  void useAiStore.getState().abort();
-}
-
-/** A supplement taken back before the AI took it in: pi's queue is emptied and the rest sent again. */
-async function takeBack(id: string) {
-  waiting = waiting.filter(line => line.id !== id);
-  try {
-    await aiApi.clearQueue();
-    for (const line of waiting) await aiApi.prompt(line.sent, line.images, true);
-  } catch (error) {
+/**
+ * Hands a task to pi, in a session of its own (or the one 历史 → 继续 opened): it says where the
+ * listener is now (aiStatus.ts), which for a task that waited is not where they were when they
+ * wrote it.
+ */
+function startTask(task: UserTask) {
+  mainTask = task;
+  clearGroups();
+  const resumed = useAiStore.getState().resume?.title;
+  useAiStore.setState({ running: true, resume: null,
+    run: { request: task.text, attached: titlesOf(task), supplements: [], steps: [], trace: emptyTrace(), resumed } });
+  drawMain();
+  task.sent = withStatus(withAttachments(task.text, task.attached));
+  aiApi.prompt(task.sent, imagesOf(task.attached), false).catch(error => {
+    if (mainTask === task) {
+      dismissTask(`ai-task:${task.id}`, "caller");
+      mainTask = null;
+    }
+    useAiStore.setState({ running: false });
     aiProblem(error instanceof Error ? error.message : String(error));
+    startNext();
+  });
+}
+
+/** The next waiting task starts; none: the window goes back to where the listener was. */
+function startNext(): boolean {
+  const next = queue.shift();
+  if (!next) return false;
+  queue.forEach(drawQueued);
+  startTask(next);
+  return true;
+}
+
+/** The listener sent a request: it starts now, or waits for the tasks before it. */
+export function userRequest(text: string, attached: AiAttachment[] = []): void {
+  taskSeq += 1;
+  const task: UserTask = { id: `t${taskSeq}`, text, attached, working: false };
+  if (!mainTask && !useAiStore.getState().running) {
+    startTask(task);
+    return;
   }
+  queue.push(task);
+  drawQueued(task);
 }
 
 function userText(message: Fields): string {
@@ -636,7 +703,7 @@ function userText(message: Fields): string {
 function finishMain(title: string) {
   if (!mainTask) return;
   updateTask(`ai-task:${mainTask.id}`, {
-    title, held: false, actions: [], icon: AI_MARK,
+    title, held: false, actions: [], icon: AI_MARK, working: false,
     body: <AiTaskTrace snapshot={useAiStore.getState().run?.trace ?? emptyTrace()} />,
   });
 }
@@ -660,20 +727,6 @@ export function handlePiEvent(event: PiEvent) {
         drawMain();
       }
       return;
-    case "message_start": {
-      // A line the AI takes in: a supplement waiting for it joins the task.
-      const message = fields(event.message);
-      if (message.role !== "user") return;
-      const text = userText(message).trim();
-      const line = waiting.find(item => item.sent.trim() === text);
-      if (!line || !mainTask) return;
-      waiting = waiting.filter(item => item !== line);
-      dismissTask(`ai-task:${line.id}`, "caller");
-      mainTask.supplements.push(line.text);
-      updateRun(run => ({ ...run, supplements: [...run.supplements, line.text] }));
-      drawMain();
-      return;
-    }
     case "tool_execution_start": {
       const id = str(event.toolCallId), tool = str(event.toolName), args = fields(event.args);
       if (!id) return;
@@ -687,7 +740,11 @@ export function handlePiEvent(event: PiEvent) {
       }
       if (tool === "tell_user") tell(id, args);
       const notice = noticeOnStart(tool, args);
-      if (notice) noticeBubble(id, notice, RUNNING_STAY_MS);
+      if (notice) {
+        const group = groupOf(tool);
+        group.calls.set(id, { notice, running: true });
+        drawGroup(group);
+      }
       return;
     }
     case "tool_execution_update": {
@@ -702,7 +759,9 @@ export function handlePiEvent(event: PiEvent) {
       const step = call ? stepProgress(call.tool, details) : null;
       const notice = call && step ? noticeOnStart(call.tool, call.args) : null;
       if (!call || !step || !notice) return;
-      noticeBubble(id, { ...notice, detail: step.line }, RUNNING_STAY_MS, step.progress);
+      const group = groupOf(call.tool);
+      group.calls.set(id, { notice: { ...notice, detail: step.line }, running: true });
+      drawGroup(group, step.progress);
       updateRun(run => ({ ...run, steps: run.steps.map(item => item.id === id ? { ...item, details } : item) }));
       return;
     }
@@ -724,9 +783,18 @@ export function handlePiEvent(event: PiEvent) {
           : step),
       }));
       const notice = noticeOnEnd(call.tool, call.args, result.details, event.isError === true, resultText(result));
-      // A finished step stays the listener's usual length, a failed one twice that.
-      if (notice) noticeBubble(id, notice, undefined);
-      else dismissTask(`ai:${id}`);
+      const group = groups.get(call.tool);
+      if (!group?.calls.has(id) && !notice) return;
+      const shared = group ?? groupOf(call.tool);
+      if (notice) shared.calls.set(id, { notice, running: false });
+      else shared.calls.delete(id);
+      // The frames a cut brought back come up on its bubble as it ends.
+      if (call.tool === "kdj_peek" && !failed) {
+        shared.shots.push(...peekShots(result));
+        shared.unshown += peekUnshown(result);
+      }
+      if (shared.calls.size > 0) drawGroup(shared);
+      else dismissTask(shared.bubble);
       return;
     }
     case "extension_ui_request":
@@ -744,7 +812,7 @@ export function handlePiEvent(event: PiEvent) {
     }
     case "agent_settled":
       // A step that never ended (an aborted run) does not stay up.
-      for (const [id, call] of calls) dismissTask(call.tool === "ask_user" ? `ai-ask:${id}` : `ai:${id}`);
+      for (const [id, call] of calls) if (call.tool === "ask_user") dismissTask(`ai-ask:${id}`);
       calls.clear();
       askDialogs.clear();
       askEarly.clear();
@@ -752,29 +820,22 @@ export function handlePiEvent(event: PiEvent) {
       finishMain(lastReply ? "已完成" : "已结束");
       lastReply = "";
       mainTask = null;
-      if (waiting.length > 0) {
-        const [first, ...rest] = waiting;
-        for (const line of waiting) dismissTask(`ai-task:${line.id}`, "caller");
-        waiting = [];
-        mainTask = { ...first, supplements: rest.map(line => line.text), working: false };
-        startRun(first, mainTask.supplements);
-        drawMain();
-      } else {
-        // Nothing follows: the AI's closing words come up, and the window goes back to where the
-        // listener was, if they left it be.
-        aiTaskEnded();
-      }
+      // The next task waiting starts in a session of its own. Nothing follows: the window goes
+      // back to where the listener was, if they left it be.
+      if (!startNext()) aiTaskEnded();
       return;
     case "kdj_exit":
     case "kdj_error":
-      for (const [id, call] of calls) dismissTask(call.tool === "ask_user" ? `ai-ask:${id}` : `ai:${id}`);
+      for (const [id, call] of calls) if (call.tool === "ask_user") dismissTask(`ai-ask:${id}`);
       calls.clear();
       askDialogs.clear();
       askEarly.clear();
+      clearGroups();
       finishMain("任务中断");
-      for (const line of waiting) dismissTask(`ai-task:${line.id}`, "caller");
       mainTask = null;
-      waiting = [];
+      // pi is gone, and with it what the tasks waiting were to go on from: they go too.
+      for (const task of queue) dismissTask(`ai-task:${task.id}`, "caller");
+      queue = [];
       aiTaskEnded();
       aiProblem(str(event.message) || "pi 已退出");
       return;

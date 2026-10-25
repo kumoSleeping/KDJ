@@ -652,25 +652,22 @@
   to { opacity: 0; }
 }
 
-/* —— Agent Mode (docs/ai-dock.md) ——
-   A key at the end of the row turns the field into a request for the agent. The whole row turns
-   over (the schema's `turn`, set by SearchBar on .kd-searchbar): the search row lifts away and
-   the Agent Mode row comes up in its place, already laid out — no part rolls, folds or grows on
-   its own. While the agent works, a short light runs round the field's edge and the key stops
-   it. The key itself is ink: the key that is on is full ink and heavier, like any selected
-   control. */
+/* —— `/pi` (docs/ai-dock.md) ——
+   `/pi` at the start of the field hands what follows to the AI. The row stays the search row:
+   nothing turns over, folds or moves, only the field takes the AI's look below. The AI key at
+   the end writes the prefix or takes it out; it is ink, full ink and heavier while the prefix is
+   there, like any selected control. Whether the AI is at work is shown on its task bubbles at
+   the bottom right (TaskBubbles.css, `working`), never on this row: each task is its own. */
 .kd-searchbar[data-has-ai] { grid-template-columns: auto minmax(0, 1fr) auto; }
-.kd-searchbar[data-ai] .kd-plats { display: none; }
-/* Agent Mode's own look, the one warm surface the interface has (AGENTS.md): a field of red,
-   orange and yellow mixed thinly into the panel, drifting slowly, the name and its spark
-   written in the same light, and the running edge in it too. Only these; the key and
-   everything around the field stay ink. */
+/* The `/pi` field's own look, the one warm surface the interface has besides a working AI task
+   (docs/ai-dock.md): red, orange and yellow mixed thinly into the panel, drifting slowly. Only
+   the field; the key and everything around it stay ink. */
 .kd-searchbar[data-ai] {
   --kd-agent-a: #e8412f;
   --kd-agent-b: #f2811d;
   --kd-agent-c: #f2b822;
 }
-/* Written on a light panel, the yellow end is taken deeper so the name stays legible. */
+/* Written on a light panel, the yellow end is taken deeper. */
 :root[data-theme="light"] .kd-searchbar[data-ai] { --kd-agent-c: #d99a06; }
 .kd-searchbar[data-ai] .kd-searchbar-copy,
 .kd-searchbar[data-ai]:hover .kd-searchbar-copy {
@@ -683,64 +680,46 @@
   background-size: 220% 100%;
   animation: kd-agent-drift 14s ease-in-out infinite alternate;
 }
-.kd-searchbar[data-ai-running] .kd-searchbar-copy { animation-duration: 5s; }
 @keyframes kd-agent-drift {
   from { background-position: 0% 50%; }
   to { background-position: 100% 50%; }
 }
 /* A request is a sentence: it wraps instead of scrolling sideways. */
 .kd-searchbar[data-ai] .kd-searchbar-input { white-space: pre-wrap; overflow-wrap: anywhere; }
-.kd-searchbar[data-ai] .kd-search-kind {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-width: max-content;
-  padding-inline: 0.2rem;
-  cursor: pointer;
-}
-.kd-search-agent-mark { flex: none; color: var(--kd-agent-a); }
-.kd-searchbar[data-ai] .kd-search-kind-text .kd-roll-line {
-  background: linear-gradient(90deg, var(--kd-agent-a), var(--kd-agent-b) 55%, var(--kd-agent-c));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-}
-/* The running edge: one soft arc of the field's light — red into orange into yellow, fading at
-   both ends — going round the field once every few seconds. Drawn on the field's own outline (a
-   masked ring), so nothing moves or is laid out. */
-@property --kd-agent-sweep {
-  syntax: "<angle>";
-  inherits: false;
-  initial-value: 0deg;
-}
-.kd-searchbar[data-ai-running] .kd-searchbar-copy::before {
-  content: "";
+/* The hint after a bare `/pi`: laid over the field in its own padding and leading, the prefix
+   unseen in front of it so the hint starts where the caret stands. Only its settings key takes
+   the pointer; a click anywhere else is the field's. */
+.kd-search-pi-hint {
   position: absolute;
   z-index: 2;
   inset: 0;
-  padding: 1.5px;
-  border-radius: inherit;
-  background: conic-gradient(from var(--kd-agent-sweep),
-    transparent 0deg,
-    color-mix(in srgb, var(--kd-agent-a) 55%, transparent) 40deg,
-    var(--kd-agent-a) 80deg,
-    var(--kd-agent-b) 120deg,
-    var(--kd-agent-c) 160deg,
-    transparent 200deg,
-    transparent 360deg);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
+  overflow: hidden;
+  padding: calc((var(--kd-search-h) - var(--kd-search-leading)) / 2) var(--kd-search-pad);
+  color: var(--kd-faint);
+  font-size: var(--kd-size);
+  line-height: var(--kd-search-leading);
+  white-space: pre;
+  text-overflow: ellipsis;
   pointer-events: none;
-  animation: kd-agent-sweep 2.8s linear infinite;
 }
-@keyframes kd-agent-sweep {
-  from { --kd-agent-sweep: 0deg; }
-  to { --kd-agent-sweep: 360deg; }
+.kd-search-pi-hint[data-blocked] { color: var(--kd-muted); }
+.kd-search-pi-hint-lead { color: transparent; }
+.kd-search-pi-hint-key {
+  appearance: none;
+  padding: 0 0.2em;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--kd-text-body);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
 }
-/* The keys at the end of the row: the reasoning effort (Agent Mode only) and AI mode's key. */
+.kd-search-pi-hint-key:hover { color: var(--kd-text); background: var(--kd-hover); }
+.kd-search-pi-hint-key:focus-visible { outline: 2px solid var(--kd-focus, var(--kd-text)); outline-offset: 0; }
+/* The keys at the end of the row: the reasoning effort (with `/pi` only) and the AI key. */
 .kd-search-ai-keys {
   display: flex;
   align-items: flex-start;
@@ -783,11 +762,10 @@
   -webkit-app-region: no-drag;
 }
 .kd-search-ai:hover { background: var(--kd-hover); color: var(--kd-text); }
-.kd-search-ai[aria-pressed="true"],
-.kd-search-ai[data-running] { color: var(--kd-text); }
+.kd-search-ai[aria-pressed="true"] { color: var(--kd-text); }
 .kd-search-ai[aria-pressed="true"] svg { stroke-width: 2.4; }
 .kd-search-ai:focus-visible { outline: 2px solid var(--kd-focus, var(--kd-text)); outline-offset: 1px; }
-/* What was dragged into Agent Mode (aiAttachments.ts): a row of cards under the field, one per
+/* What was dragged onto the row (aiAttachments.ts): a row of cards under the field, one per
    thing — its cover, its name, the time marked on it, and a key to take it out. The row grows
    the search row; nothing else moves. */
 .kd-searchbar[data-attached] { row-gap: 0.35rem; }
@@ -860,10 +838,5 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .kd-searchbar[data-ai] .kd-searchbar-copy { animation: none; }
-  /* Still: the whole edge stays lit in the field's light instead of running. */
-  .kd-searchbar[data-ai-running] .kd-searchbar-copy::before {
-    animation: none;
-    background: linear-gradient(115deg, var(--kd-agent-a), var(--kd-agent-b) 50%, var(--kd-agent-c));
-    opacity: 0.6;
-  }
 }
+

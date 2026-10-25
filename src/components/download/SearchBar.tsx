@@ -10,17 +10,18 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { History, LoaderCircle, Music, Sparkles, Video, X } from "lucide-react";
+import { History, Music, Sparkles, Video, X } from "lucide-react";
 import { AI_DROP_ATTR, fromLocalTracks, fromPastedImage, fromSearchDrag, timeLabel } from "../../lib/aiAttachments";
 import { activeSearchDrag, finishSearchDrop, readSearchDrop } from "../../lib/searchDrag";
 import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
 import { useLibraryStore } from "../../stores/libraryStore";
 import { aiApi } from "../../lib/api";
 import { showTask } from "../tasks/taskBubbleStore";
-import { useAiDrawer } from "../../lib/aiDrawer";
 import type { AiThinking } from "../../types/ai";
 import type { Platform, SearchKind, TrackSummary } from "../../types";
-import { aiOffered, useAiStore } from "../../stores/aiStore";
+import { aiBlocker, aiOffered, useAiStore } from "../../stores/aiStore";
+import { isPiText, PI_PREFIX, piRequestText, withoutPiPrefix } from "../../lib/piPrefix";
+import { openAiSettings } from "../../lib/aiSettings";
 import { useSearchPresets } from "./useSearchPresets";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import {
@@ -31,7 +32,6 @@ import {
   SEARCH_PLATFORMS,
 } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
-import { MOTION_MICRO_OUT_MS, MOTION_REDUCED_MS, prefersReducedMotion } from "../../lib/motion";
 import { PlatformMark } from "./PlatformMark";
 import { HintBulbIcon } from "./HintBulbIcon";
 import {
@@ -319,49 +319,50 @@ export function SearchBar({
   // Some third-party dictation IMEs report Enter before React's isComposing
   // flag settles. Keep our own composition state and also honor keyCode 229.
   const composingRef = useRef(false);
-  // AI mode (docs/ai-dock.md): the same field takes a request for the AI. The search's own
-  // query is kept and comes back with the mode.
+  // `/pi` at the start of the field (docs/ai-dock.md, piPrefix.ts): what follows is a request for
+  // the AI. The row stays the search row; the words are the store's while they start with the
+  // prefix, and the search's own words wait underneath and come back when it is taken out.
   const offered = aiOffered();
-  const aiWanted = useAiStore(state => state.mode) && offered;
-  // The whole row turns over between the two modes by the schema's `turn`: the search row
-  // lifts away, and the Agent Mode row comes up in its place, laid out at once. The row shows
-  // one mode at a time, so what is drawn (`aiMode`) follows the store a gesture later.
-  const [aiMode, setAiMode] = useState(aiWanted);
-  const [rowTurn, setRowTurn] = useState<"out" | "in" | null>(null);
-  if (aiWanted !== aiMode && rowTurn !== "out") setRowTurn("out");
-  useEffect(() => {
-    if (rowTurn !== "out") return;
-    const timer = window.setTimeout(() => {
-      setAiMode(useAiStore.getState().mode && offered);
-      setRowTurn("in");
-    }, prefersReducedMotion() ? MOTION_REDUCED_MS : MOTION_MICRO_OUT_MS);
-    return () => window.clearTimeout(timer);
-  }, [rowTurn, offered]);
-  const aiRunning = useAiStore(state => state.running);
+  const draft = useAiStore(state => state.draft);
+  const aiMode = offered && draft !== null;
+  const request = draft ?? "";
+  const asked = piRequestText(request);
   const attachments = useAiStore(state => state.attachments);
   const resume = useAiStore(state => state.resume);
   const thinking = useAiStore(state => state.status?.thinking ?? "high");
-  const [request, setRequest] = useState("");
-  const seed = useAiStore(state => state.seed);
+  const blocker = useAiStore(state => (state.statusError ? null : aiBlocker(state.status)));
+  // The prefix coming or going, or a request written in from elsewhere (a tip's example, 继续),
+  // puts the caret at the end of the field; arriving on screen does not.
+  const focusAsk = useAiStore(state => state.focus);
+  const caretWas = useRef({ aiMode, focusAsk });
   useEffect(() => {
-    if (!seed || !offered) return;
-    setRequest(seed.text);
-    useAiStore.setState({ seed: null });
-    inputRef.current?.focus();
-  }, [seed, offered]);
-  // Turning the mode over puts the caret in the field; arriving on screen does not.
-  const modeWas = useRef(aiMode);
-  useEffect(() => {
-    if (modeWas.current === aiMode) return;
-    modeWas.current = aiMode;
-    inputRef.current?.focus();
-  }, [aiMode]);
+    const was = caretWas.current;
+    caretWas.current = { aiMode, focusAsk };
+    if (was.aiMode === aiMode && was.focusAsk === focusAsk) return;
+    const element = inputRef.current;
+    if (!element) return;
+    element.focus();
+    element.setSelectionRange(element.value.length, element.value.length);
+  }, [aiMode, focusAsk]);
+  /** The AI key: writes `/pi` in front of the field's words, or takes it out again. */
+  const toggleAi = () => {
+    const ai = useAiStore.getState();
+    if (ai.draft === null) {
+      ai.openDraft(query);
+      return;
+    }
+    // What was written after the prefix goes back to the search; an empty request leaves the
+    // search's own words as they were.
+    const rest = withoutPiPrefix(ai.draft);
+    if (rest.trim()) onQueryChange(rest.replace(/^\s+/, ""));
+    ai.setDraft(null);
+  };
   const sendRequest = () => {
-    const text = request.trim();
-    if (!text) return;
-    // Sent, the request leaves the field for its task at the bottom right.
-    setRequest("");
-    void useAiStore.getState().send(text);
+    if (!asked) return;
+    // Sent, the request leaves the field for its task at the bottom right; the prefix stays, so
+    // the next task can be written straight away.
+    useAiStore.getState().setDraft(PI_PREFIX);
+    void useAiStore.getState().send(asked);
   };
   const [inputFocused, setInputFocused] = useState(false);
   const [platformsExpanded, setPlatformsExpanded] = useState(false);
@@ -377,7 +378,7 @@ export function SearchBar({
   const waveSawBusyRef = useRef(false);
   const lastNonceRef = useRef(burstNonce);
   const canSubmit = query.trim().length > 0 && !busy;
-  // Agent Mode's request grows with its lines like a batch of keywords does: the lines it breaks
+  // A `/pi` request grows with its lines like a batch of keywords does: the lines it breaks
   // (Shift + Enter) and the ones a long sentence wraps into, measured from the field itself.
   const shown = aiMode ? request : query;
   const [wrapRows, setWrapRows] = useState(1);
@@ -499,14 +500,12 @@ export function SearchBar({
       <div
         className="kd-searchbar kd-grow"
         data-ai={aiMode || undefined}
-        data-ai-running={aiMode && aiRunning || undefined}
         data-has-ai={offered || undefined}
         data-batch={batch && !aiMode || undefined}
         data-stacked={stacked || undefined}
         data-platforms-expanded={stacked && platformsExpanded ? "true" : undefined}
         data-searching={wavePhase ?? undefined}
-        data-kd-turn={rowTurn ?? undefined}
-        data-attached={aiMode && attachments.length > 0 || undefined}
+        data-attached={aiMode && (attachments.length > 0 || resume) || undefined}
         {...(offered ? { [AI_DROP_ATTR]: "" } : {})}
         // Most drags are pointer drags that find this row themselves (TrackTable, searchDrag); a
         // system drag of library rows or search results arrives here.
@@ -535,32 +534,22 @@ export function SearchBar({
             .catch(() => undefined);
         } : undefined}
         style={barStyle}
-        onAnimationEnd={(event) => {
-          if (event.target === event.currentTarget && rowTurn === "in") setRowTurn(null);
-        }}
         onClick={(event) => {
           if ((event.target as HTMLElement).closest("button, select, input, textarea")) return;
           inputRef.current?.focus();
         }}
       >
         <div className="kd-searchbar-tools">
-          {(searchKinds.length > 1 || aiMode) && (
+          {searchKinds.length > 1 && (
             <button
               type="button"
               className="kd-search-kind"
-              data-kind={aiMode ? "ai" : searchKind}
-              aria-label={aiMode ? (aiRunning ? "Agent Mode，工作中：打开 AI 任务与历史" : "Agent Mode：打开 AI 任务与历史") : `搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
-              title={aiMode ? "AI 任务与历史" : `${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
-              onClick={() => {
-                // In Agent Mode the name opens the AI's drawer app: the task under way and the history.
-                if (aiMode) useAiDrawer.getState().show("tasks");
-                else onSearchKindChange(nextSearchKind);
-              }}
+              data-kind={searchKind}
+              aria-label={`搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              title={`${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              onClick={() => onSearchKindChange(nextSearchKind)}
             >
-              {/* The row turns over into Agent Mode as a whole, so the kind does not roll on its own
-                  then (keyed by the mode); while the agent works the field's edge runs. */}
-              {aiMode && <Sparkles size={12} className="kd-search-agent-mark" aria-hidden="true" />}
-              <RollText key={aiMode ? "ai" : "search"} text={aiMode ? "Agent Mode" : SEARCH_KIND_LABEL[searchKind]} className="kd-search-kind-text" />
+              <RollText text={SEARCH_KIND_LABEL[searchKind]} className="kd-search-kind-text" />
             </button>
           )}
           <SearchPlatforms
@@ -620,10 +609,10 @@ export function SearchBar({
             spellCheck={false}
             autoCorrect="off"
             autoCapitalize="off"
-            aria-label={aiMode ? "交给 AI 的事" : "关键词、单曲链接或歌单链接，支持多行，@ 选择歌曲名"}
+            aria-label={aiMode ? "交给 AI 的事（/pi 开头）" : "关键词、单曲链接或歌单链接，支持多行，@ 选择歌曲名；/pi 开头交给 AI"}
             role="combobox"
             {...(aiMode ? {} : presets.aria)}
-            title={aiMode ? "交给 AI（Enter；Shift + Enter 换行）" : "搜索（Enter；Shift + Enter 换行；@ 歌曲名）"}
+            title={aiMode ? "交给 pi（Enter；Shift + Enter 换行；删掉 /pi 回到搜索）" : "搜索（Enter；Shift + Enter 换行；@ 歌曲名；/pi 交给 AI）"}
             onFocus={() => setInputFocused(true)}
             onBlur={event => {
               setInputFocused(false);
@@ -649,7 +638,7 @@ export function SearchBar({
               }
             }}
             onPaste={(event) => {
-              // A picture pasted here goes to the AI: a card in Agent Mode (aiAttachments.ts).
+              // A picture pasted here goes to the AI: a card under the field, and `/pi` in it (aiAttachments.ts).
               if (!offered) return;
               const images = Array.from(event.clipboardData?.items ?? [])
                 .filter(item => item.kind === "file" && item.type.startsWith("image/"))
@@ -668,16 +657,43 @@ export function SearchBar({
               }
             }}
             onChange={(event) => {
+              const value = event.target.value;
               if (aiMode) {
-                setRequest(event.target.value);
+                // Taking the prefix out gives the words back to the search.
+                if (isPiText(value)) useAiStore.getState().setDraft(value);
+                else {
+                  useAiStore.getState().setDraft(null);
+                  onQueryChange(value);
+                }
                 return;
               }
-              onQueryChange(event.target.value);
+              // `/pi` typed at the start: what follows is for the AI from now on.
+              if (offered && isPiText(value)) {
+                useAiStore.getState().setDraft(value);
+                onQueryChange(withoutPiPrefix(value).trim());
+                return;
+              }
+              onQueryChange(value);
               if (event.target.value.includes("@")) presets.syncCaret();
             }}
           />
+          {/* Right after a bare `/pi`, in the faint ink of a hint: what the field is for now, or,
+              while no model is set up (no pi, no key), where to set it up first. The prefix
+              itself is laid out unseen in front of it, so the words start where the caret is. */}
+          {aiMode && !asked && !request.includes("\n") && (
+            <span className="kd-search-pi-hint" data-blocked={blocker ? "" : undefined}>
+              <span className="kd-search-pi-hint-lead" aria-hidden="true">{request}</span>
+              {blocker
+                ? <>
+                    <span>{blocker === "AI 未设置模型" ? "还没有配置模型，先去" : `${blocker}，先去`}</span>
+                    <button type="button" className="kd-search-pi-hint-key" onClick={openAiSettings}>设置 → AI</button>
+                    <span>配置</span>
+                  </>
+                : <span aria-hidden="true">在这里向 AI 提出你的需求</span>}
+            </span>
+          )}
         </div>
-        {/* What was dragged into Agent Mode: a card each, sent with the request (aiAttachments.ts).
+        {/* What was dragged onto the row: a card each, sent with the request (aiAttachments.ts).
             First, the earlier session the next request goes on in (历史 → 继续); × lets it go. */}
         {aiMode && (attachments.length > 0 || resume) && (
           <div className="kd-ai-chips" role="list" aria-label="附带给 AI">
@@ -710,9 +726,10 @@ export function SearchBar({
             })}
           </div>
         )}
-        {/* The keys at the end of the row: in Agent Mode first how hard the model thinks (a click
-            steps through 低 中 高 极高), then AI mode's key, which stops the AI while it works.
-            Something dragged onto the row turns it to Agent Mode with that thing attached. */}
+        {/* The keys at the end of the row: while the field starts with `/pi`, first how hard the
+            model thinks (a click steps through 低 中 高 极高); then the AI key, which writes `/pi`
+            in front of the field's words or takes it out. Stopping a task is its own bubble's key.
+            Something dragged onto the row is attached, with `/pi` in the field. */}
         {offered && <span className="kd-search-ai-keys">
           {aiMode && <button
             type="button"
@@ -726,15 +743,11 @@ export function SearchBar({
             className="kd-search-ai"
             {...{ [AI_DROP_ATTR]: "" }}
             aria-pressed={aiMode}
-            data-running={aiRunning || undefined}
-            aria-label={aiRunning ? "停止 AI" : aiMode ? "回到搜索" : "AI 模式"}
-            title={aiRunning ? "停止 AI" : aiMode ? "回到搜索" : "AI 模式"}
-            onClick={() => {
-              if (aiRunning) void useAiStore.getState().abort();
-              else useAiStore.getState().toggleMode();
-            }}
+            aria-label={aiMode ? "去掉 /pi，回到搜索" : "用 pi 辅助：在前面加 /pi"}
+            title={aiMode ? "去掉 /pi，回到搜索" : "用 pi 辅助（/pi）"}
+            onClick={toggleAi}
           >
-            {aiRunning ? <LoaderCircle size={16} className="kd-spin" aria-hidden="true" /> : <Sparkles size={16} aria-hidden="true" />}
+            <Sparkles size={16} aria-hidden="true" />
           </button>
         </span>}
       </div>
@@ -920,8 +933,6 @@ export const SearchPlatforms = memo(function SearchPlatforms({
                 : undefined
             }
             style={{
-              // Its place in the row: the marks come back out of Agent Mode one after another.
-              "--kd-plat-n": index,
               ...(searchPhase && asked.includes(item) ? { "--kd-plat-i": asked.indexOf(item) } : {}),
             } as CSSProperties}
             draggable={false}

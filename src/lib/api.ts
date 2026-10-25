@@ -1316,7 +1316,7 @@ export const aiApi = {
   /** A request of its own opens a new session; `follow` (a supplement) goes on in the open one. */
   prompt: (message: string, images: string[] = [], follow = false) =>
     request<{ disposition: string }>("/ai/prompt", { method: "POST", body: JSON.stringify({ message, images, follow }) }, null),
-  /** A picture pasted into Agent Mode, kept in the AI's workspace. */
+  /** A picture pasted into the `/pi` field, kept in the AI's workspace. */
   paste: (image: Blob) =>
     request<{ path: string }>("/ai/paste", { method: "POST", headers: { "Content-Type": image.type || "image/png" }, body: image }, null),
   abort: () => request<void>("/ai/abort", { method: "POST" }, null),

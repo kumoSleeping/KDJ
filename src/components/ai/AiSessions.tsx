@@ -1,13 +1,15 @@
 /**
  * What the AI was asked and what it did (docs/ai-dock.md, "AI 抽屉"): a request with its steps,
  * and the list of pi's sessions in KDJ's folder, newest first. Every request is a session of its
- * own; one opens to what was asked and done, and 继续 makes the next request in Agent Mode go on
- * from it. The AI drawer's 历史 page and 设置 → AI show the same list.
+ * own; one opens to what was asked and done, and 继续 makes the next `/pi` request go on from
+ * it. The AI drawer's 历史 page and 设置 → AI show the same list.
  */
 import { useCallback, useEffect, useState } from "react";
 import { Check, LoaderCircle, TriangleAlert } from "lucide-react";
 import { aiApi } from "../../lib/api";
 import { stepLine } from "../../lib/aiTasks";
+import type { AiShot } from "../../lib/aiShots";
+import { AiShots } from "./AiShots";
 import { useAiStore } from "../../stores/aiStore";
 import type { AiSessionStep, AiSessionSummary } from "../../types/ai";
 import { InlineNotice } from "../common";
@@ -17,8 +19,10 @@ import "./AiDrawer.css";
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-export function StepRow({ tool, args, state, details, text }: {
+export function StepRow({ tool, args, state, details, text, shots }: {
   tool: string; args: unknown; state: "running" | "done" | "failed"; details?: unknown; text?: string;
+  /** The frames a cut brought back, under its line (aiShots.ts). */
+  shots?: readonly AiShot[];
 }) {
   const line = stepLine(tool, args, state, details, text ?? "");
   // A message is the AI's own words, written as Markdown: drawn as such, not as a line of text.
@@ -30,6 +34,7 @@ export function StepRow({ tool, args, state, details, text }: {
     <span className="kd-ai-step-copy">
       <span>{line.title}</span>
       {message ? <div className="kd-ai-step-md"><PlanText text={message} /></div> : line.detail && <small>{line.detail}</small>}
+      {shots && shots.length > 0 && <AiShots shots={shots} />}
     </span>
   </li>;
 }
@@ -73,7 +78,7 @@ export function AiSessions({ page = false }: { page?: boolean }) {
     setOpen(path);
     aiApi.session(path).then(read => setSteps(known => ({ ...known, [path]: read.steps })), cause => setError(message(cause)));
   };
-  // 继续: the session becomes a card in Agent Mode, and the next request goes on in it.
+  // 继续: the session becomes a card in the `/pi` field, and the next request goes on in it.
   const goOn = (session: AiSessionSummary) => {
     useAiStore.getState().continueSession({ path: session.path, title: session.title }).then(load, cause => setError(message(cause)));
   };

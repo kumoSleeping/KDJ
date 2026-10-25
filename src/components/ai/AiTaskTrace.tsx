@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef } from "react";
 import { LoaderCircle } from "lucide-react";
 import { useAiStore } from "../../stores/aiStore";
 import { resultText } from "../../lib/aiTasks";
+import { peekShots } from "../../lib/aiShots";
 import type { AiTrace } from "../../lib/aiTrace";
 import { StepRow } from "./AiSessions";
 import "./AiTaskTrace.css";
@@ -35,6 +36,7 @@ export function AiTaskTrace({ snapshot }: { snapshot?: AiTrace }) {
         ? <StepRow key={index} tool={entry.name} args={entry.args}
           state={entry.state === "running" ? "running" : entry.state === "done" ? "done" : "failed"}
           details={(entry.result as { details?: unknown } | undefined)?.details}
+          shots={entry.name === "kdj_peek" && entry.state === "done" ? peekShots(entry.result) : undefined}
           text={entry.state === "stopped" ? "已停止" : resultText(entry.result)} />
         : entry.kind === "error" ? <li key={index} className="kd-ai-trace-error">{entry.text}</li>
         : null)}

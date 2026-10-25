@@ -342,7 +342,8 @@ function ReadyTaskBubble({ entry, lift, away, front, held, onHeld, onSize, prepa
     <article ref={node} className="kd-task" role={tone === "error" ? "alert" : "status"}
       data-kind={spec.kind} data-tone={tone} data-phase={entry.leaving || swapping ? "out" : "in"}
       data-expanded={expanded || undefined} data-held={held || preparing || swapping || undefined}
-      data-controls={hasControls || undefined} {...backdrop.attributes} style={backdrop.style}
+      data-controls={hasControls || undefined} data-working={spec.working || undefined}
+      {...backdrop.attributes} style={backdrop.style}
       onPointerEnter={() => onHeld(key, true)} onPointerLeave={() => onHeld(key, false)}
       onFocus={() => onHeld(key, true)}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) onHeld(key, false); }}>
