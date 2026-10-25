@@ -18,7 +18,7 @@ export interface TitleTab<T extends string = string> {
  * the others wait beside it, smaller and quieter. With no tabs it is a plain title. Nothing
  * else is written on the title's line: the title row names the app, not what it is about.
  */
-export function TitleTabs<T extends string>({ label, title, tabs, value, onChange, panelId, drop, onClose, children }: {
+export function TitleTabs<T extends string>({ label, title, tabs, value, onChange, panelId, drop, onClose, onRename, children }: {
   /** Names the group for assistive technology. */
   label: string;
   /** Shown when there are no tabs. */
@@ -32,6 +32,8 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
   drop?: TitleDrop;
   /** Each page closes by its own small × (drawerSchema.ts `closePage`). */
   onClose?(id: T): void;
+  /** Each page is renamed in place (drawerSchema.ts `renamePage`). */
+  onRename?(id: T, name: string): void;
   /** Actions at the right end of the row. */
   children?: ReactNode;
 }) {
@@ -64,6 +66,20 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
     return () => { window.clearTimeout(settle); watch?.disconnect(); };
   }, [value, tabs]);
   const pick = (id: T) => { if (id !== value) onChange?.(id); };
+  // The page word being renamed, and what is written so far.
+  const [naming, setNaming] = useState<{ id: T; text: string } | null>(null);
+  // Read and cleared at once: the blur WebKit sends as the field goes away after Enter or Esc
+  // finds nothing left to keep.
+  const namingNow = useRef(naming);
+  namingNow.current = naming;
+  const rename = (keep: boolean) => {
+    const now = namingNow.current;
+    namingNow.current = null;
+    setNaming(null);
+    const tab = now && tabs?.find(t => t.id === now.id);
+    const text = now?.text.trim() ?? "";
+    if (keep && now && tab && text && text !== tab.label) onRename?.(now.id, text);
+  };
   // Something taken by the row is over it: the row is lit and names what a drop does.
   const [hot, setHot] = useState(false);
   const row = useRef<HTMLElement>(null);
@@ -111,6 +127,15 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
         data-closable={onClose ? "" : undefined}
         style={{ "--kd-tabs-carry": `${-carry.x}px` } as CSSProperties}>
         {tabs.map(tab => <Fragment key={tab.id}>
+          {naming?.id === tab.id ? <input className="kd-title-tab-name" aria-label={`重命名 ${tab.label}`} value={naming.text} autoFocus
+            size={Math.max(4, naming.text.length + 1)} onFocus={event => event.currentTarget.select()}
+            onChange={event => setNaming({ id: tab.id, text: event.target.value })}
+            onKeyDown={event => {
+              event.stopPropagation();
+              if (event.key === "Enter") { event.preventDefault(); rename(true); }
+              if (event.key === "Escape") { event.preventDefault(); rename(false); }
+            }}
+            onBlur={() => rename(true)} /> :
           <button type="button" role="tab" data-tab={tab.id}
             aria-selected={tab.id === value} aria-controls={panelId} aria-label={tab.title ?? tab.label} title={tab.title ?? tab.label}
             tabIndex={tab.id === value ? 0 : -1}
@@ -118,10 +143,14 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
             // assistive technology arrive as a click.
             onPointerDown={event => { if (event.button === 0 && event.pointerType !== "touch") pick(tab.id); }}
             onClick={() => pick(tab.id)}
-            // A page that closes closes with Delete too.
-            onKeyDown={onClose ? event => { if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); onClose(tab.id); } } : undefined}>
+            onDoubleClick={onRename ? () => setNaming({ id: tab.id, text: tab.label }) : undefined}
+            // A page that closes closes with Delete too; one that is renamed takes F2.
+            onKeyDown={onClose || onRename ? event => {
+              if (onClose && (event.key === "Delete" || event.key === "Backspace")) { event.preventDefault(); onClose(tab.id); }
+              if (onRename && event.key === "F2") { event.preventDefault(); setNaming({ id: tab.id, text: tab.label }); }
+            } : undefined}>
             <span>{tab.label}</span>
-          </button>
+          </button>}
           {onClose && <button type="button" className="kd-title-tab-close" tabIndex={-1} data-selected={tab.id === value || undefined}
             aria-label={`关闭 ${tab.label}`} title={`关闭 ${tab.label}`} onClick={() => onClose(tab.id)}>
             <X size={12} aria-hidden="true" />

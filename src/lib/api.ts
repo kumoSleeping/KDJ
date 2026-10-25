@@ -966,6 +966,8 @@ export const api = {
     post<{ matched: boolean; plans: import("./lanes").AlignPlan[]; reason?: string }>("/cli/align", { reference, video }),
   editKdjv: (body: { path?: string; track_id?: number; ops: import("./lanes").LaneOp[]; create?: boolean }) =>
     post<import("./lanes").LaneEdited>("/kdjv/edit", body),
+  /** A project's file and title renamed in its folder, its library row moved with it; answers as an edit does. */
+  renameKdjv: (path: string, name: string) => post<import("./lanes").LaneEdited>("/kdjv/rename", { path, name }),
   /** A `.kdjv` project written out as one MP4 beside it, never over an existing file. */
   exportKdjv: (trackId: number, options?: import("./lanes").ExportOptions) =>
     post<{ path: string; track_id: number | null }>("/kdjv/export", options ? { track_id: trackId, options } : { track_id: trackId }),

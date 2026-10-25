@@ -144,3 +144,17 @@
 .kd-title-tabs-list:hover > button.kd-title-tab-close,
 .kd-title-tabs-list:focus-within > button.kd-title-tab-close { opacity: 1; }
 .kd-title-tabs-list > button.kd-title-tab-close:hover { background: var(--kd-hover); color: var(--kd-text); }
+/* A page word being renamed (renamePage): written in place, at the size it has, on a field's tone. */
+.kd-title-tab-name {
+  margin: 0;
+  padding: 0 0.3rem;
+  border: 0;
+  border-radius: 6px;
+  background: var(--kd-hover);
+  color: var(--kd-text);
+  font: inherit;
+  font-size: 1.4rem;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: 0.01em;
+}

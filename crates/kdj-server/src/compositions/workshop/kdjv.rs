@@ -1003,6 +1003,35 @@ impl Workshop {
     /// (tracks.rs `from_earlier`) and written as one by its first edit; opening it writes nothing.
     /// `create` starts a file that must not be there yet. Answers the document and where
     /// everything in it is.
+    /// A project renamed: its file in the same folder under `name` (never over another file; the
+    /// sources it names relative to that folder stay where they are), its library row moved with it
+    /// (analysis, rating and comment kept), and its title the same name. The edit's answer, for the
+    /// new path.
+    pub async fn kdjv_rename(&self, file: &Path, name: &str, cancel: &CancellationToken) -> Result<serde_json::Value> {
+        let name: String = name.trim().chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() { '_' } else { c }).collect();
+        let name = name.trim().trim_start_matches('.').trim().chars().take(120).collect::<String>();
+        if name.is_empty() {
+            bail!("名字不能是空的")
+        }
+        let target = file.with_file_name(format!("{name}.{EXTENSION}"));
+        // The same file under another case (macOS, Windows) is a rename too.
+        let same = |a: &Path, b: &Path| std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a, b)| a == b);
+        if target != file {
+            if target.exists() && !same(file, &target) {
+                bail!("这个文件夹里已经有「{name}」了")
+            }
+            std::fs::rename(file, &target).with_context(|| format!("改不了名：{}", file.display()))?;
+            if let Some(track) = self.state.library.get_by_path(file).ok().flatten() {
+                if let Err(error) = self.state.library.relocate(track.id, &target) {
+                    let _ = std::fs::rename(&target, file);
+                    bail!("曲库没能跟着改名，文件已改回原名：{error:#}")
+                }
+                self.state.hub.publish_library_updated(&[track.id]);
+            }
+        }
+        self.kdjv_edit(&target, &[serde_json::json!({"op": "title", "title": name})], false, cancel).await
+    }
+
     pub async fn kdjv_edit(&self, file: &Path, ops: &[serde_json::Value], create: bool, cancel: &CancellationToken) -> Result<serde_json::Value> {
         use super::tracks;
         // A new project never takes the place of one that is there.

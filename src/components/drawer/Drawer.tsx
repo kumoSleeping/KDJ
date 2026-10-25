@@ -147,7 +147,8 @@ function DrawerTitle({ spec, page, leaving, panelId }: { spec: DrawerSpec; page?
   const away = taking ? taking.label : `收起${spec.title}`;
   return <TitleTabs label={spec.title} title={spec.title} tabs={spec.pages} value={page}
     onChange={leaving ? undefined : spec.onPage} panelId={spec.pages ? panelId : undefined}
-    drop={leaving ? undefined : spec.titleDrop} onClose={leaving ? undefined : spec.closePage}>
+    drop={leaving ? undefined : spec.titleDrop} onClose={leaving ? undefined : spec.closePage}
+    onRename={leaving ? undefined : spec.renamePage}>
     {spec.tools}
     <button type="button" className="kd-drawer-rollup" aria-label={away} title={`${away} · Esc`}
       onClick={() => { if (taking) taking.leave(); else spec.close(); }}>

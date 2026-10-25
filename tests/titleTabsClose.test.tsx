@@ -33,3 +33,41 @@ test("pages that close each have their own ×, and Delete on a page closes it", 
     dom.window.close();
   }
 });
+
+test("a page that is renamed is written in place: Enter keeps the new name, Esc the old one", async () => {
+  const dom = new JSDOM("<!doctype html><div id='root'></div>", { url: "http://localhost/" });
+  Object.assign(globalThis, {
+    window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement,
+    HTMLInputElement: dom.window.HTMLInputElement, Element: dom.window.Element, Node: dom.window.Node,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  const { createRoot } = await import("react-dom/client");
+  const { TitleTabs } = await import("../src/components/drawer/TitleTabs");
+  const root = createRoot(document.getElementById("root")!);
+  const renamed: Array<[string, string]> = [];
+  const tabs = [{ id: "/a.kdjv", label: "ed8409a611430571 剪辑" }];
+  const write = (input: HTMLInputElement, text: string) => {
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!.call(input, text);
+    input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+  };
+  const field = () => document.querySelector<HTMLInputElement>(".kd-title-tab-name");
+  const word = () => document.querySelector<HTMLElement>('[role="tab"][data-tab="/a.kdjv"]')!;
+  try {
+    await act(async () => root.render(createElement(TitleTabs<string>, {
+      label: "剪辑", tabs, value: "/a.kdjv", onChange: () => undefined, onRename: (id, name) => { renamed.push([id, name]); },
+    })));
+    await act(async () => { word().dispatchEvent(new dom.window.MouseEvent("dblclick", { bubbles: true })); });
+    assert.equal(field()?.value, "ed8409a611430571 剪辑", "the word becomes a field holding its name");
+    await act(async () => { write(field()!, "  命运石之门 OP  "); });
+    await act(async () => { field()!.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    assert.deepEqual(renamed, [["/a.kdjv", "命运石之门 OP"]]);
+    assert.equal(field(), null, "and is a word again");
+    await act(async () => { word().dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "F2", bubbles: true })); });
+    await act(async () => { write(field()!, "不要了"); });
+    await act(async () => { field()!.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
+    assert.deepEqual(renamed, [["/a.kdjv", "命运石之门 OP"]], "Esc keeps the old name");
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});

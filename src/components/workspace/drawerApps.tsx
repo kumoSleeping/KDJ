@@ -155,6 +155,8 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
     onPage: id => useLaneEditor.getState().activate(id),
     // Each project closes by its own ×; what it is is already saved, edit by edit, in its file.
     closePage: path => useLaneEditor.getState().closeProject(path),
+    // A double-click on a project's word renames it: its file, its title and its library row.
+    renamePage: (path, name) => { void useLaneEditor.getState().renameProject(path, name); },
     titleDrop: NEW_PROJECT_DROP,
     body: <LaneEditor />,
     close: () => useLaneEditor.getState().close(),

@@ -12,6 +12,7 @@ import { isImageTrack, isProjectTrack, isVideoTrack } from "../lib/format";
 import { refreshPlayingProject } from "../lib/kdjvPlay";
 import { alignedOps, allClips, clipLength, findClip, LANE_END, snapToBar, type AlignPlan, type LaneClip, type LaneDocument, type LaneEdited, type LaneLayout, type LaneOp, type NewClip, type TrackKind } from "../lib/lanes";
 import { useSidePanels } from "../lib/sidePanels";
+import { useAppStore } from "./appStore";
 import { useVideoPip } from "../lib/videoPip";
 import type { Track } from "../types";
 
@@ -123,6 +124,8 @@ interface LaneEditorState {
   activate(path: string): void;
   /** Takes a project out of the editor (the file stays). */
   closeProject(path: string): void;
+  /** Renames the project at `path` (its file, its title and its library row); it stays open under the new path. */
+  renameProject(path: string, name: string): Promise<void>;
   /** Sends the operations to the project in view (or at `path`); false when they were refused (the reason is in `error`). */
   edit(ops: LaneOp[], path?: string): Promise<boolean>;
   /**
@@ -150,6 +153,26 @@ interface LaneEditorState {
 const folderOf = (path: string) => path.slice(0, Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")));
 const separator = (path: string) => (path.includes("\\") && !path.includes("/") ? "\\" : "/");
 const cleanName = (name: string) => name.replace(/[\\/:*?"<>|]/g, "_").trim() || "工程";
+/**
+ * Where a new project is written, as a path whose folder is that place: beside its first file when
+ * that lies in one of the library's folders, else in the download folder. A file from another
+ * app's own folder (QQ keeps the videos it receives in its sandbox, under hashes) left the project,
+ * and the MP4 exported beside it, where nobody could see them.
+ */
+function projectHome(first: string): string {
+  const settings = useAppStore.getState().settings;
+  const key = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const inside = (settings?.library_dirs ?? []).some(root => key(root) && key(first).startsWith(`${key(root)}/`));
+  const download = settings?.download_dir?.trim().replace(/[\\/]+$/, "");
+  return inside || !download ? first : `${download}${separator(download)}${first.split(/[\\/]/).pop() || "x"}`;
+}
+/** A name an app gave a file, not one a person wrote: a long run of hex digits, a UUID. */
+const madeName = (name: string) => /^[0-9a-f-]{16,}$/i.test(name.trim());
+/** Today, for a project whose files have no names to give it. */
+const today = () => {
+  const now = new Date(), two = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}`;
+};
 /**
  * What the server said, in the editor's words: without the step of the list it was ("第 2 步（add）：")
  * and the document's own names of a clip ("main[1]（主线第 2 段，a.mp4）" says 主线第 2 段，a.mp4),
@@ -444,17 +467,20 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       const pictures = tracks.filter(track => !songs.includes(track) && isPictureTrack(track));
       const first = songs[0] ?? pictures[0];
       if (!first) return;
-      const title = songs.length ? `${songs[0].title || "未命名"} VJ` : `${pictures[0].title || "未命名"} 剪辑`;
+      const named = (songs[0] ?? pictures[0]).title?.trim() ?? "";
+      const word = songs.length ? "VJ" : "剪辑";
+      const title = named && !madeName(named) ? `${named} ${word}` : `${word} ${today()}`;
       // Songs one after another in a sound track; pictures one after another in a picture track,
       // without their own sound when there are songs.
       const adds: LaneOp[] = [
         ...songs.map(song => ({ op: "add" as const, clip: songOf(song), kind: "sound" as const })),
         ...pictures.map(picture => ({ op: "add" as const, clip: clipOf(picture, songs.length > 0), kind: "picture" as const })),
       ];
-      let made = await create(first.path, title, [{ op: "new", title }, ...adds]);
+      const home = projectHome(first.path);
+      let made = await create(home, title, [{ op: "new", title }, ...adds]);
       if (!made && adds.length > 1) {
         // One of them could not go in: the project is made without them, then each is put in on its own.
-        made = await create(first.path, title, [{ op: "new", title }]);
+        made = await create(home, title, [{ op: "new", title }]);
         const path = get().active;
         if (made && path) await editEach(path, adds);
       }
@@ -464,6 +490,29 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       for (const track of now.doc.tracks.filter(t => t.kind === "picture")) for (const clip of track.clips) void get().calibrate(clip.id, true);
     },
     activate: path => set({ active: path, selected: null, error: null }),
+    async renameProject(path, name) {
+      let edited: LaneEdited;
+      try {
+        edited = await api.renameKdjv(path, name);
+      } catch (error) {
+        set({ error: message(error) });
+        return;
+      }
+      // What is kept by the project's path goes with it: its page, undo history and in and out points.
+      set(state => {
+        const move = <V,>(record: Record<string, V>) => {
+          if (!(path in record) || edited.path === path) return record;
+          const { [path]: value, ...rest } = record;
+          return { ...rest, [edited.path]: value };
+        };
+        return {
+          projects: state.projects.map(p => (p.path === path ? { ...p, path: edited.path } : p)),
+          active: state.active === path ? edited.path : state.active,
+          history: move(state.history), ranges: move(state.ranges),
+        };
+      });
+      adopt(edited);
+    },
     closeProject(path) {
       set(state => {
         const at = state.projects.findIndex(p => p.path === path);

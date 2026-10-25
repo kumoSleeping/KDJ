@@ -15,6 +15,7 @@ pub fn router(manager: Arc<Workshop>) -> Router<Arc<AppState>> {
         .route("/api/kdjv/check", post(kdjv_check))
         .route("/api/kdjv/edit", post(kdjv_edit))
         .route("/api/kdjv/preview", post(kdjv_preview))
+        .route("/api/kdjv/rename", post(kdjv_rename))
         .route("/api/kdjv/source/{track_id}/{n}", get(kdjv_source))
         .route("/api/kdjv/proxy/{track_id}/{n}", get(kdjv_proxy))
         .route("/api/kdjv/frame", get(kdjv_frame))
@@ -63,6 +64,21 @@ async fn kdjv_edit(
     let (file, _) = kdjv_file(&m, &edit.target)?;
     let cancel = CancellationToken::new();
     Ok(Json(m.kdjv_edit(&file, &edit.ops, edit.create, &cancel).await?))
+}
+/// A project renamed, by its path or library row (kdjv.rs `kdjv_rename`).
+#[derive(Deserialize)]
+struct KdjvRename {
+    #[serde(flatten)]
+    target: KdjvTarget,
+    name: String,
+}
+async fn kdjv_rename(
+    Extension(m): Extension<Arc<Workshop>>,
+    Json(rename): Json<KdjvRename>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (file, _) = kdjv_file(&m, &rename.target)?;
+    let cancel = CancellationToken::new();
+    Ok(Json(m.kdjv_rename(&file, &rename.name, &cancel).await?))
 }
 async fn kdjv_check(
     Extension(m): Extension<Arc<Workshop>>,

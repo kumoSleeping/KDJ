@@ -75,6 +75,11 @@ export interface DrawerSpec {
    * a long word ends in an ellipsis. The app decides what is in view afterwards.
    */
   closePage?(id: string): void;
+  /**
+   * Pages that can be renamed (the editor's projects): a double-click on the word, or F2, writes
+   * it in place; Enter or leaving the word keeps the new name, Esc the old one.
+   */
+  renamePage?(id: string, name: string): void;
   /** Compact actions at the right end of the title row, before the close button. */
   tools?: ReactNode;
   /**
