@@ -141,7 +141,12 @@ UTF-8 JSON，扩展名 `.kdjv`，`"kdjv": 1`。字段说明写给 AI 看，在�
   `GET /api/kdjv/source/{track}/{n}`（实时预览读的第 n 个素材）、`GET /api/kdjv/frame?track_id&src&t&h`（编辑器画面线的缩略帧：
   工程列出的素材在 `t` 秒的一帧，`h` 像素高的 JPEG，ffmpeg 抽一次后放在渲染缓存里）、`POST /api/kdjv/render`（渲染或找到缓存，`kdjv.progress` 事件报
   进度）、`POST /api/kdjv/check`（只检查：时长、画布、素材，或不能播放的原因）、`POST /api/kdjv/export`（渲染后复制成工程旁的
-  `<名字>.mp4`，同名时 `<名字> 2.mp4`…，从不覆盖；曲库右键「导出 MP4」；导出完的气泡写着放进了哪个文件夹，带「打开所在文件夹」）。曲库的 `/api/library/audio/{id}` 遇到工程时换成
+  `<名字>.mp4`，同名时 `<名字> 2.mp4`…，从不覆盖；曲库右键「导出 MP4」；导出完的气泡写着放进了哪个文件夹，带「打开所在文件夹」）。
+  编辑器的「导出」和曲库的「导出 MP4」都不直接调它，而是在「下载 → 导出」队列里加一个「剪辑」任务（`stores/projectExportStore.ts`，
+  记录存在 IndexedDB `kdj-project-export-queue-v1`）：一次一个，带任务 `id` 请求，`kdjv.progress` 事件带 `export` 回报进度；
+  暂停 = `POST /api/kdjv/export/cancel {id}`（回 `kdjv_export_stopped`），再开始从头渲染工程当时的样子。导出进行中工程文件被写过
+  （编辑器或 AI 的任何一次改动、改名）就立刻停下，回 `kdjv_project_changed`，任务停在「工程已改动，已停止」，不自动重来；
+  请求断开（窗口关闭或重载）也会停下。曲库的 `/api/library/audio/{id}` 遇到工程时换成
   渲染或混音，`/api/library/video/{id}` 换成渲染，都还没有时回 409。CLI：`kdj project check|render <path>`。
 - **画面渲染**（`render.rs`）：每个视频输入用 `-ss` + `-t` 只读片段那一段；画面滤镜图用一半的核心（最多 4 个），给播放留出余量。
 - **窗口**（`src/lib/kdjvPlay.ts`）：`playTrack` 遇到工程先要它的混音（缓存里有就立即，没有一般几秒，慢时右下角出一个任务气泡

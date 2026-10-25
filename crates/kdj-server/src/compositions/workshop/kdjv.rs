@@ -1231,7 +1231,7 @@ impl Workshop {
         let (lo, hi) = options.apply(&mut p)?;
         let (name, cached) = self.kdjv_cache_with(&p, options)?;
         let lock = self.cache_lock(&name).await;
-        let _guard = lock.lock().await;
+        let _guard = tokio::select! {_ = cancel.cancelled() => bail!("渲染已取消"), g = lock.lock() => g};
         if cached.is_file() {
             if options.is_default() {
                 remember(file, Made::Render, &cached);

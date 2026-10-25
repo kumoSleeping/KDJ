@@ -1,10 +1,10 @@
 //! `/api/kdjv/*`: checking and rendering `.kdjv` projects for playing, and exporting them as MP4.
 use super::*;
-use crate::{error::ApiResult, state::AppState};
+use crate::{error::{ApiError, ApiResult}, state::AppState};
 use axum::{
     body::{Body, Bytes},
     extract::{Path as AxumPath, Query},
-    http::{header, HeaderMap},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Extension, Json, Router,
@@ -21,6 +21,7 @@ pub fn router(manager: Arc<Workshop>) -> Router<Arc<AppState>> {
         .route("/api/kdjv/frame", get(kdjv_frame))
         .route("/api/kdjv/render", post(kdjv_render))
         .route("/api/kdjv/export", post(kdjv_export))
+        .route("/api/kdjv/export/cancel", post(kdjv_export_cancel))
         .route("/api/kdjv/title-image", post(kdjv_title_image).layer(axum::extract::DefaultBodyLimit::max(TITLE_IMAGE_BYTES * 2)))
         .layer(Extension(manager))
 }
@@ -232,13 +233,16 @@ async fn kdjv_frame(
         .into_response())
 }
 /// Starts a project's render, or the wait for one under way (kdjv.rs keeps one per project).
-/// It runs on its own: a caller that goes away leaves it to finish. `kdjv.progress` tells the
-/// window how far it is, and so does the returned watch: percent and what is being done.
+/// It runs on its own until `cancel` (a caller that goes away leaves it to finish unless it
+/// cancels). `kdjv.progress` tells the window how far it is, and so does the returned watch:
+/// percent and what is being done; its events name the export they are for (`export`), if any.
 fn spawn_render(
     m: &Arc<Workshop>,
     file: std::path::PathBuf,
     track_id: Option<i64>,
     options: kdjv::RenderOptions,
+    cancel: CancellationToken,
+    export: Option<String>,
 ) -> (tokio::task::JoinHandle<Result<std::path::PathBuf>>, tokio::sync::watch::Receiver<(u32, String)>) {
     let worker = m.clone();
     let shown = file.to_string_lossy().into_owned();
@@ -248,11 +252,10 @@ fn spawn_render(
         let publish = |progress: f64, detail: &str, error: Option<&str>| {
             state.hub.publish(
                 "kdjv.progress",
-                &serde_json::json!({"path": shown, "track_id": track_id, "progress": progress, "detail": detail, "error": error}),
+                &serde_json::json!({"path": shown, "track_id": track_id, "export": export, "progress": progress, "detail": detail, "error": error}),
             );
         };
         let last = Mutex::new((u32::MAX, String::new()));
-        let cancel = CancellationToken::new();
         let rendered = worker
             .kdjv_render(&file, &options, &cancel, &|progress, detail| {
                 let step = (progress * 100.) as u32;
@@ -283,7 +286,7 @@ async fn kdjv_render(
     Json(target): Json<KdjvTarget>,
 ) -> ApiResult<Response> {
     let (file, track_id) = kdjv_file(&m, &target)?;
-    let (job, watch) = spawn_render(&m, file, track_id, kdjv::RenderOptions::default());
+    let (job, watch) = spawn_render(&m, file, track_id, kdjv::RenderOptions::default(), CancellationToken::new(), None);
     if !target.stream {
         let result = job.await.map_err(|error| anyhow::anyhow!("渲染中断：{error}"))??;
         return Ok(Json(serde_json::json!({"path": result, "track_id": track_id})).into_response());
@@ -319,41 +322,131 @@ struct KdjvExport {
     target: KdjvTarget,
     #[serde(default)]
     options: kdjv::RenderOptions,
+    /// The caller's name for it (the export queue's task): what `/api/kdjv/export/cancel` stops,
+    /// and what its `kdjv.progress` events carry as `export`.
+    #[serde(default)]
+    id: Option<String>,
 }
 
-/// The project written out as one file beside it (the library's 导出, the editor's 导出): rendered
-/// as for playing, or with the options given (size, frame rate, quality, a stretch, the sound
+/// How often an export looks whether its project has been written since it started.
+const EXPORT_WATCH: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// A project file as it is on disk: its length and when it was written; None once it is gone.
+fn written(file: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
+    let meta = std::fs::metadata(file).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+/// An export leaves the list of those under way however its request ends.
+struct Listed<'a>(&'a Workshop, String);
+impl Drop for Listed<'_> {
+    fn drop(&mut self) {
+        self.0.exports.lock().unwrap().remove(&self.1);
+    }
+}
+
+/// The project written out as one file beside it (the export queue's 剪辑 tasks): rendered as
+/// for playing, or with the options given (size, frame rate, quality, a stretch, the sound
 /// alone), then copied to `<project>.mp4` (`.wav`), or `<project> 2.mp4`… — an existing file is
-/// never replaced.
+/// never replaced. It stops at once, and is not made again, when the project is written while
+/// it runs (an edit in the editor or by the AI, a rename): `kdjv_project_changed`. It stops too
+/// when cancelled by its id or when its caller goes away: `kdjv_export_stopped`.
 async fn kdjv_export(
     Extension(m): Extension<Arc<Workshop>>,
     Json(export): Json<KdjvExport>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let (file, track_id) = kdjv_file(&m, &export.target)?;
     let extension = if export.options.audio_only { "wav" } else { "mp4" };
-    let (job, _) = spawn_render(&m, file.clone(), track_id, export.options);
-    let render = job.await.map_err(|error| anyhow::anyhow!("渲染中断：{error}"))??;
-    let exported = tokio::task::spawn_blocking(move || -> Result<std::path::PathBuf> {
-        let folder = file.parent().context("工程没有所在的文件夹")?;
-        let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "工程".into());
-        for n in 1..1000 {
-            let name = if n == 1 { format!("{stem}.{extension}") } else { format!("{stem} {n}.{extension}") };
-            let path = folder.join(name);
-            // create_new: two exports at once never take the same name.
-            let Ok(mut out) = std::fs::OpenOptions::new().write(true).create_new(true).open(&path) else { continue };
-            let copied = std::fs::File::open(&render).and_then(|mut from| std::io::copy(&mut from, &mut out));
-            if let Err(error) = copied {
-                drop(out);
-                let _ = std::fs::remove_file(&path);
-                bail!("写入 {} 失败：{error}", path.display());
-            }
-            return Ok(path);
+    let name = export.id.unwrap_or_else(id);
+    let cancel = CancellationToken::new();
+    {
+        let mut exports = m.exports.lock().unwrap();
+        if exports.contains_key(&name) {
+            return Err(ApiError::new(StatusCode::CONFLICT, "这个导出已经在进行"));
         }
-        bail!("{} 旁边已经有太多同名的导出", file.display())
+        exports.insert(name.clone(), cancel.clone());
+    }
+    let _listed = Listed(&m, name.clone());
+    // A caller that went away (the window closed or reloaded) would never hear of it.
+    let _stop = cancel.clone().drop_guard();
+    let changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let before = written(&file);
+    tokio::spawn({
+        let (file, changed, cancel) = (file.clone(), changed.clone(), cancel.clone());
+        async move {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = tokio::time::sleep(EXPORT_WATCH) => {}
+                }
+                if written(&file) != before {
+                    changed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    cancel.cancel();
+                    return;
+                }
+            }
+        }
+    });
+    let was_changed = || changed.load(std::sync::atomic::Ordering::SeqCst);
+    let project_changed = || {
+        ApiError::new(StatusCode::CONFLICT, "工程在导出时被改动，导出已停止").coded("kdjv_project_changed").expected()
+    };
+    let (job, _) = spawn_render(&m, file.clone(), track_id, export.options, cancel.clone(), Some(name));
+    let rendered = job.await.map_err(|error| anyhow::anyhow!("渲染中断：{error}"))?;
+    if was_changed() {
+        return Err(project_changed());
+    }
+    if cancel.is_cancelled() {
+        return Err(ApiError::new(StatusCode::CONFLICT, "导出已停止").coded("kdjv_export_stopped").expected());
+    }
+    let render = rendered?;
+    let exported = tokio::task::spawn_blocking({
+        let file = file.clone();
+        move || -> Result<std::path::PathBuf> {
+            let folder = file.parent().context("工程没有所在的文件夹")?;
+            let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "工程".into());
+            for n in 1..1000 {
+                let name = if n == 1 { format!("{stem}.{extension}") } else { format!("{stem} {n}.{extension}") };
+                let path = folder.join(name);
+                // create_new: two exports at once never take the same name.
+                let Ok(mut out) = std::fs::OpenOptions::new().write(true).create_new(true).open(&path) else { continue };
+                let copied = std::fs::File::open(&render).and_then(|mut from| std::io::copy(&mut from, &mut out));
+                if let Err(error) = copied {
+                    drop(out);
+                    let _ = std::fs::remove_file(&path);
+                    bail!("写入 {} 失败：{error}", path.display());
+                }
+                return Ok(path);
+            }
+            bail!("{} 旁边已经有太多同名的导出", file.display())
+        }
     })
     .await
     .map_err(|error| anyhow::anyhow!("导出中断：{error}"))??;
+    // Written while it was being copied: what was copied is the version before.
+    if was_changed() || written(&file) != before {
+        let _ = std::fs::remove_file(&exported);
+        return Err(project_changed());
+    }
     Ok(Json(serde_json::json!({"path": exported, "track_id": track_id})))
+}
+
+#[derive(Deserialize)]
+struct KdjvExportId {
+    id: String,
+}
+
+/// Stops an export under way (the export queue's 停止); its own request then answers
+/// `kdjv_export_stopped`. One that has already ended is no error: `stopped` says which it was.
+async fn kdjv_export_cancel(
+    Extension(m): Extension<Arc<Workshop>>,
+    Json(target): Json<KdjvExportId>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let running = m.exports.lock().unwrap().get(&target.id).cloned();
+    if let Some(cancel) = &running {
+        cancel.cancel();
+    }
+    Ok(Json(serde_json::json!({"stopped": running.is_some()})))
 }
 
 /// The most a title's picture may weigh.
