@@ -9,7 +9,10 @@
  * Asking again for a project the listener left (another song was started meanwhile) only
  * finishes the mix, so the next play is immediate; it does not take the player back.
  */
+import { createElement } from "react";
 import { create } from "zustand";
+import { FolderOpen } from "lucide-react";
+import { getBridge } from "./bridge";
 import { api } from "./api";
 import { dismissTask, showTask } from "../components/tasks/taskBubbleStore";
 import { getPlayerSession, requestPlayerCommand } from "./playerSession";
@@ -139,7 +142,17 @@ export function exportProject(track: { id: number; title: string; filename: stri
   void api
     .exportKdjv(track.id, options)
     .then(({ path }) => {
-      showTask({ id: exportId(track.id), kind: "export", title, detail: `已导出 ${path.split(/[\\/]/).pop() ?? path}`, progress: null, tone: "success" });
+      // Where it went, and a key that shows it there: beside the project, wherever that is.
+      const parts = path.split(/[\\/]/);
+      const file = parts.pop() ?? path, folder = parts.pop() ?? "";
+      showTask({
+        id: exportId(track.id), kind: "export", title, progress: null, tone: "success",
+        detail: folder ? `已导出到「${folder}」· ${file}` : `已导出 ${file}`,
+        actions: [{
+          id: "reveal", label: "打开所在文件夹", icon: createElement(FolderOpen, { size: 13, "aria-hidden": true }),
+          onSelect: () => { void getBridge().revealPath(path).catch(() => undefined); },
+        }],
+      });
     })
     .catch((error: unknown) => {
       showTask({ id: exportId(track.id), kind: "export", title: `${title} 导出失败`, detail: error instanceof Error ? error.message : String(error), progress: null, tone: "error" });
