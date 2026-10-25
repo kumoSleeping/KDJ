@@ -586,6 +586,7 @@ pub fn project(doc: &Doc, base: &Path, probed: &HashMap<PathBuf, Probed>) -> Res
             layers.push(Layer { grid: None, id: format!("track-{t}"), source_id: first.source_id.clone(), clips });
         }
     }
+    crossfade_handles(&mut layers, &sources);
     let canvas = match &doc.canvas {
         Some(c) => Canvas { width: c.width, height: c.height, fps: c.fps, initialized: true, ..Canvas::default() },
         None => sources.iter().find(|s| s.video).map_or_else(
@@ -614,6 +615,63 @@ pub fn project(doc: &Doc, base: &Path, probed: &HashMap<PathBuf, Probed>) -> Res
     };
     p.validate().map_err(|e| anyhow::anyhow!(e))?;
     Ok(p)
+}
+
+/// How far before a fading clip's start the picture before it may end and still be its seam.
+const SEAM_MS: f64 = 50.;
+
+/// A picture clip fading in where the picture before it simply ends is a crossfade: the clip that
+/// ended is carried on under the fading one for the fade, from where it stopped in its source (as
+/// far as the source goes; a still or a gif just holds on), picture only, in a layer of its own
+/// right under the fading clip. Not where a picture already shows under the fade's start (that is
+/// a crossfade as it stands), nor after a clip that fades out itself (a dip the user made). The
+/// document is untouched: the render and the live preview both draw from this project.
+fn crossfade_handles(layers: &mut Vec<Layer>, sources: &[Source]) {
+    let seen = |c: &Clip| sources.iter().any(|s| s.id == c.source_id && s.visual()) && c.picture.opacity > 0.;
+    let mut handles: Vec<(usize, Clip)> = vec![];
+    for (l, layer) in layers.iter().enumerate() {
+        for b in layer.clips.iter().filter(|b| b.fades.video_in_ms > 0. && seen(b)) {
+            let (start, fade) = (b.start_ms, b.fades.video_in_ms);
+            let shows = |c: &Clip| seen(c) && c.start_ms <= start + 1. && c.start_ms + c.duration() > start + 1.;
+            if layers[l + 1..].iter().flat_map(|layer| &layer.clips).any(shows) {
+                continue;
+            }
+            // The picture seen before the cut: the topmost clip ending there.
+            let Some(a) = layers.iter().flat_map(|layer| &layer.clips).filter(|a| {
+                let end = a.start_ms + a.duration();
+                !std::ptr::eq(*a, b) && seen(a) && a.fades.video_out_ms <= 0. && end >= start - SEAM_MS && end <= start + 1.
+            }).next() else { continue };
+            let end = a.start_ms + a.duration();
+            let want = start + fade - end;
+            let mut c = a.clone();
+            c.id = format!("{}-under-{}", a.id, b.id);
+            c.start_ms = end;
+            c.sound = Sound { muted: true, gain: 0., manual: true };
+            if a.display_duration_ms.is_some() {
+                c.animation_offset_ms = a.animation_offset_ms + a.duration();
+                c.display_duration_ms = Some(want);
+            } else {
+                let Some(source) = sources.iter().find(|s| s.id == a.source_id) else { continue };
+                let rate = a.speed.rate(a.source_out_ms).max(0.01);
+                let out = (a.source_out_ms + want * rate).min(source.duration_ms);
+                if out - a.source_out_ms < 1. {
+                    continue;
+                }
+                c.source_in_ms = a.source_out_ms;
+                c.source_out_ms = out;
+                c.speed.domain_start_ms = c.source_in_ms;
+                c.speed.domain_end_ms = out;
+            }
+            // Carried on as it was seen at its end; it ends under the fading clip, so no fade of its own.
+            c.fades = Fades { offset_ms: 0., span_ms: c.duration(), video_in_ms: 0., video_out_ms: 0., audio_in_ms: 0., audio_out_ms: 0., linear: false };
+            handles.push((l, c));
+        }
+    }
+    // Each under the layer of its fading clip, the latest first so the indices still hold.
+    for (l, c) in handles.into_iter().rev() {
+        let id = format!("track-{l}-{}", c.id);
+        layers.insert(l + 1, Layer { grid: None, id, source_id: c.source_id.clone(), clips: vec![c] });
+    }
 }
 
 pub use kdj_providers::tags::is_project_path;
@@ -1314,6 +1372,37 @@ mod kdjv_tests {
         assert_eq!(p.canvas.width, 1280, "the canvas follows the first video, evened");
         assert_eq!(p.duration(), 15_000.);
         assert_eq!(doc.duration(), 15.);
+    }
+
+    #[test]
+    fn a_clip_fading_in_where_the_picture_before_it_ends_crossfades_with_it() {
+        let base = Path::new("/projects");
+        let probed = HashMap::from([(PathBuf::from("/media/a.mp4"), video()), (PathBuf::from("/media/b.mp4"), video())]);
+        let built = |text: &str| project(&parse(text).unwrap(), base, &probed).unwrap();
+        // Same track, end to end: a carries on under b for b's fade, from where it stopped.
+        let p = built(r#"{"kdjv":3,"tracks":[{"kind":"picture","clips":[
+            {"src":"/media/a.mp4","at":0,"in":10,"out":20,"speed":2},
+            {"src":"/media/b.mp4","at":5,"in":0,"out":10,"fade_in":1}]}]}"#);
+        assert_eq!(p.layers.len(), 2, "one layer more, under the fading clip");
+        let under = &p.layers[1].clips[0];
+        assert_eq!((under.start_ms, under.source_in_ms, under.source_out_ms), (5_000., 20_000., 22_000.), "a second at twice the speed");
+        assert!(under.sound.muted && under.fades.video_in_ms == 0. && under.duration() == 1_000.);
+        assert_eq!(p.duration(), 15_000., "the project is as long as before");
+        assert_eq!(live(&p).clips.len(), 3, "the preview draws it too");
+        // As far as the source goes.
+        let short = built(r#"{"kdjv":3,"tracks":[{"kind":"picture","clips":[
+            {"src":"/media/a.mp4","at":0,"in":0,"out":59.5},
+            {"src":"/media/b.mp4","at":59.5,"in":0,"out":10,"fade_in":2}]}]}"#);
+        assert_eq!(short.layers[1].clips[0].source_out_ms, 60_000.);
+        // A picture already under the fade, or a clip that fades out itself: nothing is added.
+        let overlapped = built(r#"{"kdjv":3,"tracks":[
+            {"kind":"picture","clips":[{"src":"/media/b.mp4","at":5,"in":0,"out":10,"fade_in":1}]},
+            {"kind":"picture","clips":[{"src":"/media/a.mp4","at":0,"in":0,"out":6}]}]}"#);
+        assert_eq!(overlapped.layers.len(), 2);
+        let dip = built(r#"{"kdjv":3,"tracks":[{"kind":"picture","clips":[
+            {"src":"/media/a.mp4","at":0,"in":0,"out":5,"fade_out":1},
+            {"src":"/media/b.mp4","at":5,"in":0,"out":10,"fade_in":1}]}]}"#);
+        assert_eq!(dip.layers.len(), 1);
     }
 
     #[test]
