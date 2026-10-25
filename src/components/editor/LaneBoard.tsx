@@ -44,6 +44,8 @@ const DRAG_PX = 3;
 const NEW_TRACK_PX = 7;
 /** A dragged clip's or title's start or end this close to another edge, in pixels, lands on it. */
 const SNAP_PX = 8;
+/** What is dragged lands on a beat only this near one, in seconds: no songs there, no beats to land on. */
+const BEAT_REACH_SEC = 0.75;
 /** The picture tracks' frames: drawn this high (twice for sharp screens), 16:9 wide. */
 const FRAME_PX = 40;
 const FRAME_W = Math.round(FRAME_PX * 16 / 9);
@@ -315,10 +317,23 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
     };
   }, []);
 
-  /** The beat nearest `t` in a project with songs (when not let free, and N has not turned it off), else `t`. */
-  const snap = (t: number, free: boolean) => {
-    if (free || !snapOn || !vj || beats.length === 0) return Math.max(0, t);
-    return beats.reduce((best, b) => (Math.abs(b - t) < Math.abs(best - t) ? b : best), beats[0]);
+  /**
+   * The beat nearest `t` in a project with songs (when not let free, and N has not turned it off),
+   * else `t`. A song moved lines up with the other songs only: its own beats move with it, and
+   * snapping to them held it where it was. A song's end pulled lands on its own beats, also on the
+   * part trimmed off, so a trim can be undone by pulling it out again.
+   */
+  const snap = (t: number, free: boolean, kind: Drag["kind"] = "clip", key = "", grip: Grip = "move") => {
+    if (free || !snapOn || !vj) return Math.max(0, t);
+    const songs = grid?.songs ?? [];
+    const song = kind === "clip" ? songs.find(s => s.clip === key) : undefined;
+    const pool = !song ? beats : songs.flatMap(s => s === song
+      ? (grip === "move" ? [] : s.beats)
+      : s.beats.filter(b => b >= s.from - 1e-3 && b < s.to - 1e-3));
+    if (pool.length === 0) return Math.max(0, t);
+    const best = pool.reduce((near, b) => (Math.abs(b - t) < Math.abs(near - t) ? b : near), pool[0]);
+    // Far from every beat (before the songs, after them, between two): where it was let go.
+    return Math.abs(best - t) <= BEAT_REACH_SEC ? best : Math.max(0, t);
   };
 
   // ---- where the pointer is among the rows ----
@@ -404,15 +419,15 @@ export function LaneBoard({ area, project, zoom, onZoom, selected, select, playh
       // Held straight up or down it keeps its time; moved along, its start or its end meets an edge, else the beat.
       if (Math.abs(now.x - now.x0) <= DRAG_PX) return { at, length };
       const moved = at + now.dt, edge = meet([moved, moved + length], kind, key, now.free);
-      return edge ? { at: Math.max(0, moved + edge.by), length, edge: edge.at } : { at: snap(moved, now.free), length };
+      return edge ? { at: Math.max(0, moved + edge.by), length, edge: edge.at } : { at: snap(moved, now.free, kind, key, now.grip), length };
     }
     if (now.grip === "in") {
       const pulled = at + now.dt, edge = meet([pulled], kind, key, now.free);
-      const start = Math.min(at + length - 0.1, edge ? edge.at : snap(pulled, now.free));
+      const start = Math.min(at + length - 0.1, edge ? edge.at : snap(pulled, now.free, kind, key, now.grip));
       return { at: start, length: at + length - start, ...(edge ? { edge: edge.at } : {}) };
     }
     const pulled = at + length + now.dt, edge = meet([pulled], kind, key, now.free);
-    const end = Math.max(at + 0.1, edge ? edge.at : snap(pulled, now.free));
+    const end = Math.max(at + 0.1, edge ? edge.at : snap(pulled, now.free, kind, key, now.grip));
     return { at, length: end - at, ...(edge ? { edge: edge.at } : {}) };
   };
   /** The fade a corner dot pulled so far, in seconds of the project. */

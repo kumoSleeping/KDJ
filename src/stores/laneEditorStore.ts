@@ -24,6 +24,11 @@ export interface LaneGrid {
   tempo: Array<{ from: number; to: number; bpm: number }>;
   /** A song whose first beat of the bar is not known: its bar lines are every fourth beat. */
   guessedBars: boolean;
+  /**
+   * Each song's beats, the whole song where it is placed (also the parts trimmed off), and the
+   * span it plays: a drag of a song lines up with the others, not its own beats that move with it.
+   */
+  songs: Array<{ clip: string; from: number; to: number; beats: number[] }>;
 }
 
 /** One song's own grid, in seconds of the song; `precise` once the full analysis has answered. */
@@ -191,7 +196,8 @@ export function songsOf(doc: LaneDocument): LaneClip[] {
 function projectGrid(doc: LaneDocument, layout: LaneLayout, songIds: Array<number | null>): LaneGrid | null {
   const songs = layout.songs ?? [];
   if (songs.length === 0) return null;
-  const grid: LaneGrid = { downbeats: [], beats: [], tempo: [], guessedBars: false };
+  const grid: LaneGrid = { downbeats: [], beats: [], tempo: [], guessedBars: false, songs: [] };
+  const clips = songsOf(doc);
   songs.forEach((placed, n) => {
     const id = songIds[n];
     const own = id === null || id === undefined ? undefined : songGrids.get(id);
@@ -206,12 +212,13 @@ function projectGrid(doc: LaneDocument, layout: LaneLayout, songIds: Array<numbe
     grid.guessedBars ||= guessed;
     grid.downbeats.push(...move(guessed ? own.beats.filter((_, i) => i % 4 === 0) : own.downbeats));
     grid.beats.push(...move(own.beats));
+    const clip = clips[placed.index]?.id;
+    if (clip) grid.songs.push({ clip, from: placed.at, to: placed.at + placed.length, beats: own.beats.map(at) });
     for (const stretch of own.tempo) {
       const a = Math.max(from, stretch.from), b = Math.min(to, stretch.to);
       if (b > a) grid.tempo.push({ from: at(a), to: at(b), bpm: Math.round(stretch.bpm * k * 10) / 10 });
     }
   });
-  void doc;
   return grid;
 }
 
