@@ -526,7 +526,9 @@ mod macos {
         /// Places the view at a rectangle given in the page's CSS pixels; returns the drawable
         /// size in pixels.
         #[allow(clippy::too_many_arguments)]
-        unsafe fn place(&self, x: f64, y: f64, width: f64, height: f64, visible: bool, opacity: f64, cgl_context: *mut c_void) -> (i32, i32) {
+        /// Returns the drawable size in pixels when it changed (the render thread redraws then);
+        /// a move alone (the window dragged) touches neither the GL surface nor the picture.
+        unsafe fn place(&self, x: f64, y: f64, width: f64, height: f64, visible: bool, opacity: f64, cgl_context: *mut c_void) -> Option<(i32, i32)> {
             unsafe {
                 let webview = self.webview();
                 let superview: *mut AnyObject = msg_send![webview, superview];
@@ -539,10 +541,16 @@ mod macos {
                 // The view is the WebView's sibling, right under it.
                 let frame: CGRect = msg_send![webview, convertRect: in_webview, toView: superview];
                 let view = self.view();
+                let before: CGRect = msg_send![view, frame];
+                let resized = (before.size.width - frame.size.width).abs() > 0.01
+                    || (before.size.height - frame.size.height).abs() > 0.01;
                 let _: () = msg_send![view, setFrame: frame];
                 let hidden = !visible || width < 2.0 || height < 2.0;
                 let _: () = msg_send![view, setHidden: hidden];
                 let _: () = msg_send![view, setAlphaValue: opacity.clamp(0.0, 1.0)];
+                if !resized && !self.fresh() {
+                    return None;
+                }
                 if let Some(cgl) = cgl() {
                     (cgl.lock)(cgl_context);
                     let _: () = msg_send![self.context(), update];
@@ -550,7 +558,15 @@ mod macos {
                 }
                 let local: CGRect = msg_send![view, bounds];
                 let backing: CGRect = msg_send![view, convertRectToBacking: local];
-                (backing.size.width.round() as i32, backing.size.height.round() as i32)
+                Some((backing.size.width.round() as i32, backing.size.height.round() as i32))
+            }
+        }
+
+        /// Whether the view has never been placed (it is still the 1×1 it was made at).
+        unsafe fn fresh(&self) -> bool {
+            unsafe {
+                let frame: CGRect = msg_send![self.view(), frame];
+                frame.size.width <= 1.0 && frame.size.height <= 1.0
             }
         }
 
@@ -1018,7 +1034,7 @@ mod macos {
         rx
     }
 
-    async fn place(webview: &tauri::Webview, player: (MainObjects, usize), bounds: (f64, f64, f64, f64), visible: bool, opacity: f64) -> Result<(i32, i32), String> {
+    async fn place(webview: &tauri::Webview, player: (MainObjects, usize), bounds: (f64, f64, f64, f64), visible: bool, opacity: f64) -> Result<Option<(i32, i32)>, String> {
         let (objects, cgl_context) = player;
         let (x, y, width, height) = bounds;
         on_main(webview, move |_| unsafe { objects.place(x, y, width, height, visible, opacity, cgl_context as *mut c_void) })
@@ -1097,11 +1113,11 @@ mod macos {
                 let _ = webview.with_webview(move |_| unsafe { objects.destroy() });
                 fail(error)
             };
-            let (pixel_width, pixel_height) = match place(&webview, (objects, cgl_context), request.bounds, false, 1.0).await {
-                Ok(size) => size,
+            match place(&webview, (objects, cgl_context), request.bounds, false, 1.0).await {
+                Ok(Some((pixel_width, pixel_height))) => render.resize(pixel_width, pixel_height),
+                Ok(None) => {}
                 Err(error) => return Err(teardown(&mut render, error)),
-            };
-            render.resize(pixel_width, pixel_height);
+            }
 
             for (name, format) in [
                 ("time-pos", FORMAT_DOUBLE),
@@ -1190,8 +1206,10 @@ mod macos {
                 .await
                 .map_err(|_| "视频窗口已关闭".to_string())?;
             }
-            let (width, height) = place(webview, target, bounds, visible, opacity).await?;
-            self.with_player(generation, |player| player.render.resize(width, height))
+            match place(webview, target, bounds, visible, opacity).await? {
+                Some((width, height)) => self.with_player(generation, |player| player.render.resize(width, height)),
+                None => Ok(()),
+            }
         }
 
         pub fn control(&self, generation: u64, action: &str, value: Option<f64>) -> Result<(), String> {

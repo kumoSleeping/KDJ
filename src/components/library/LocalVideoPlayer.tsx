@@ -32,6 +32,7 @@ import { playTrack } from "./TrackTable";
 import {
   MpvVideoController,
   SeekHold,
+  clockReadout,
   nativeSlotBounds,
   trackNativeSlot,
   useMpvAvailable,
@@ -223,7 +224,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
       start: mpvClock(trackId)?.position ?? getLatestPlayerSync(trackId)?.position ?? 0,
       paused: true,
       onStatus: status => {
-        if (scrubPosition.current === null && seekHold.current.accept(status.position)) setPosition(status.position);
+        // The bar shows the song's clock (below); mpv's position lags a jump of the song.
         if (status.duration > 0) setDuration(status.duration);
         setPlaying(status.playing);
       },
@@ -241,8 +242,8 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     });
     // The overlay of controls follows the slot in its own effect below.
     const stop = trackNativeSlot(slot, (bounds, visible, state) => {
-      // Covered or out of sight: at once. Scrolled: after the overlay's veil has faded in.
-      void controller.setBounds(bounds, visible, undefined, state === "covered" || state === "out").catch(() => undefined);
+      // Covered or out of sight: at once.
+      void controller.setBounds(bounds, visible, undefined, state !== "shown").catch(() => undefined);
     });
     return () => {
       stop();
@@ -256,17 +257,18 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   useEffect(() => {
     const slot = mpvSlotRef.current;
     if (!nativeChrome || !slot) return;
-    // While it scrolls the overlay stays, veiled; covered or out of sight it goes (it would lie
-    // over what covers the slot).
-    const stop = trackNativeSlot(slot, (bounds, visible, state) =>
-      setOverlay(visible || state === "moving" ? { ...bounds, shown: visible } : null));
+    // Covered or out of sight it goes (it would lie over what covers the slot).
+    const stop = trackNativeSlot(slot, (bounds, visible) => setOverlay(visible ? { ...bounds, shown: true } : null));
     return () => { stop(); setOverlay(null); };
   }, [nativeChrome, track.id]);
 
   useEffect(() => {
     if (!useMpv) return;
+    const readout = clockReadout(setPosition);
     const apply = () => {
       if (scrubPosition.current === null) mpvRef.current?.follow(mpvClock(track.id));
+      const clock = getLocalVideoClock(track.id);
+      if (clock && scrubPosition.current === null && seekHold.current.accept(clock.position)) readout(clock.position);
     };
     const unsubscribe = subscribeLocalVideoClock(track.id, apply);
     apply();

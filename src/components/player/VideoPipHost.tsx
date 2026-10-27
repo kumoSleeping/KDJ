@@ -52,6 +52,7 @@ import { PanelErrorBoundary } from "../RootErrorBoundary";
 import {
   MpvVideoController,
   SeekHold,
+  clockReadout,
   mpvAvailable,
   prefersMpv,
   webVideoOff,
@@ -312,10 +313,6 @@ export function VideoPipHost() {
   const [nativeFallbackSessionKey, setNativeFallbackSessionKey] = useState<string | null>(null);
   // mpv has opened: the stage turns transparent over the hole its picture shows through.
   const [nativeReady, setNativeReady] = useState(false);
-  // The window is being dragged or resized: its mpv picture waits under the veil until it rests
-  // (a native view and the page's hole moving every frame made the drag stutter and smear).
-  const [nativeMoving, setNativeMoving] = useState(false);
-  const nativeMoveRef = useRef({ rect: "", timer: 0 });
   const [videoFullscreen, setVideoFullscreen] = useState(false);
   // The picture's own width / height, once the source has told it. The floating window is the
   // shape of the video it holds, not of a 16:9 frame; a change (metadata arriving, another
@@ -850,7 +847,8 @@ export function VideoPipHost() {
               return;
             }
             const pip = useVideoPip.getState();
-            if (pendingScrubRef.current === null && seekHoldRef.current.accept(status.position)) pip.setPosition(status.position);
+            // A local video's bar shows the song's clock (the clock effect); an online one, mpv's.
+            if (!local && pendingScrubRef.current === null && seekHoldRef.current.accept(status.position)) pip.setPosition(status.position);
             pip.setDuration(status.duration);
             pip.setPlaying(status.playing || status.buffering);
             if (status.width > 0 && status.height > 0) {
@@ -1201,19 +1199,11 @@ export function VideoPipHost() {
     const frame = requestAnimationFrame(() => {
       const bounds = nativeBounds(nativeSlotRef.current);
       if (!cancelled) {
-        const move = nativeMoveRef.current;
-        const rect = bounds ? `${bounds.x},${bounds.y},${bounds.width},${bounds.height}` : "";
-        const moved = move.rect !== "" && rect !== "" && rect !== move.rect;
-        move.rect = rect;
-        if (moved) {
-          window.clearTimeout(move.timer);
-          move.timer = window.setTimeout(() => setNativeMoving(false), 150);
-          setNativeMoving(true);
-        }
-        const shown = Boolean(showSurface && bounds) && !moved && !nativeMoving;
+        const shown = Boolean(showSurface && bounds);
         const radius = docked || videoFullscreen ? 0 : FLOAT_RADIUS_PX;
-        // Hidden with the surface: at once. Moving: after the veil has faded in.
-        void controller.setBounds(bounds ?? { x: 0, y: 0, width: 0, height: 0 }, shown, radius, !showSurface).catch((reason: unknown) => {
+        // The picture moves with the window, dragged or resized (the hole moves on the GPU,
+        // videoHoles.ts); hidden with the surface it goes at once.
+        void controller.setBounds(bounds ?? { x: 0, y: 0, width: 0, height: 0 }, shown, radius, true).catch((reason: unknown) => {
           if (cancelled || nativePlayerRef.current !== controller) return;
           useVideoPip
             .getState()
@@ -1225,8 +1215,7 @@ export function VideoPipHost() {
       cancelled = true;
       cancelAnimationFrame(frame);
     };
-  }, [floatRect.w, floatRect.h, floatRect.x, floatRect.y, isNativePlayer, showSurface, videoFullscreen, panelBounds, sourceRatio, nativeReady, docked, nativeMoving]);
-  useEffect(() => () => window.clearTimeout(nativeMoveRef.current.timer), []);
+  }, [floatRect.w, floatRect.h, floatRect.x, floatRect.y, isNativePlayer, showSurface, videoFullscreen, panelBounds, sourceRatio, nativeReady, docked]);
 
   // 切走应用（窗口失焦 / 页面隐藏）时，默认把正在播的浮动预览送进系统画中画
   useEffect(() => {
@@ -1387,6 +1376,7 @@ export function VideoPipHost() {
   useEffect(() => {
     if (!isLocal || session?.source !== "local" || !usesLocalVideoDeviceClock()) return;
     const trackId = session.trackId;
+    const readout = clockReadout(position => useVideoPip.getState().setPosition(position));
     const apply = () => {
       const pip = useVideoPip.getState();
       if (!pip.active || pip.mode !== "float" || pip.session?.source !== "local" || pip.session.trackId !== trackId) return;
@@ -1396,6 +1386,7 @@ export function VideoPipHost() {
         if (pendingScrubRef.current === null) nativePlayerRef.current?.follow(mpvClock(trackId));
         const clock = getLocalVideoClock(trackId);
         if (clock) desiredPlayingRef.current = clock.playing;
+        if (clock && pendingScrubRef.current === null) readout(clock.position);
         return;
       }
       const video = activeVideo();
@@ -1929,9 +1920,9 @@ export function VideoPipHost() {
             />
           )}
           {showSurface && (isNativePlayer || (live && webVideoOff())) && (
-            // Black over mpv's picture until it shows, and while the window moves: it fades.
+            // Black over mpv's picture until its first frame can show; then it fades away.
             <div className="kd-native-veil" aria-hidden="true"
-              data-shown={(isNativePlayer ? nativeReady : true) && !nativeMoving ? "true" : undefined} />
+              data-shown={isNativePlayer ? (nativeReady ? "true" : undefined) : "true"} />
           )}
           <video
             ref={localSwap.bindVideo(0)}

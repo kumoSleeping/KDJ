@@ -129,15 +129,14 @@ export function pageCovers(bounds: MpvBounds, slot: HTMLElement): boolean {
  * there (all of it in sight, nothing of the page over it). Calls `onPlace` when either changes,
  * while the panel scrolls, resizes, moves, or a menu opens. Returns the stop.
  */
-/** Why a slot's picture is not shown: moving (scrolled, dragged), covered by the page, out of sight. */
-export type NativeSlotState = "shown" | "moving" | "covered" | "out";
+/** Why a slot's picture is not shown: covered by the page, or out of sight. */
+export type NativeSlotState = "shown" | "covered" | "out";
 
 export function trackNativeSlot(
   slot: HTMLElement,
   onPlace: (bounds: MpvBounds, visible: boolean, state: NativeSlotState) => void,
 ): () => void {
   let last = "";
-  let lastRect = "";
   let frame = 0;
   let settle = 0;
   let moving = false;
@@ -148,14 +147,10 @@ export function trackNativeSlot(
       const placed = nativeSlotBounds(slot);
       const { bounds } = placed;
       const rect = `${bounds.x},${bounds.y},${bounds.width},${bounds.height}`;
-      // A native view moves a frame or two after the page: while the slot is scrolled or dragged
-      // along it would trail behind (smear), so the picture waits, veiled, until it stops.
-      const travelling = moving && lastRect !== "" && rect !== lastRect;
-      lastRect = rect;
       // A menu, sheet or other window over the slot would be cut by the hole: the picture is
       // hidden while it is there. Looked for when nothing moves: the scan is not free.
       if (!moving) covered = pageCovers(bounds, slot);
-      const state: NativeSlotState = !placed.visible ? "out" : covered ? "covered" : travelling ? "moving" : "shown";
+      const state: NativeSlotState = !placed.visible ? "out" : covered ? "covered" : "shown";
       const next = `${rect},${state}`;
       if (next === last) return;
       last = next;
@@ -167,7 +162,6 @@ export function trackNativeSlot(
     window.clearTimeout(settle);
     settle = window.setTimeout(() => {
       moving = false;
-      lastRect = "";
       place();
     }, 150);
     place();
@@ -195,6 +189,23 @@ export function trackNativeSlot(
     window.removeEventListener("scroll", nudge, true);
     for (const type of types) window.removeEventListener(type, soon, true);
     window.removeEventListener("pointermove", drag, true);
+  };
+}
+
+/**
+ * A progress readout fed from the song's clock (a local video's bar), at most ten times a second
+ * but at once for a jump. mpv's own position runs a moment behind a jump of the song (old spot,
+ * seek target, landed frame), which made the bar bounce.
+ */
+export function clockReadout(show: (position: number) => void): (position: number) => void {
+  let shown = -Infinity;
+  let at = 0;
+  return position => {
+    const now = performance.now();
+    if (Math.abs(position - shown) < 0.25 && now - at < 100) return;
+    shown = position;
+    at = now;
+    show(position);
   };
 }
 
@@ -268,6 +279,7 @@ export class MpvVideoController {
   private unlisten: (() => void) | null = null;
   /** The clock sent last, to send only what mpv could not have predicted from it. */
   private lastClock: (MpvClock & { at: number }) | null | undefined = undefined;
+  private nullTimer = 0;
   private readonly options: MpvVideoOptions;
   private readonly hole: ReturnType<typeof createVideoHole> | null;
   private opacity: number;
@@ -368,9 +380,9 @@ export class MpvVideoController {
   setBounds(bounds: MpvBounds, visible = true, radius?: number, immediate = false): Promise<void> {
     this.bounds = bounds;
     if (radius !== undefined) this.radius = radius;
-    window.clearTimeout(this.hideTimer);
-    this.hideTimer = 0;
     if (!visible && this.visible && !immediate) {
+      // Already fading: a later call (the window still moving) must not push the hide back.
+      if (this.hideTimer) return this.pushBounds();
       this.hideTimer = window.setTimeout(() => {
         this.hideTimer = 0;
         this.visible = false;
@@ -378,6 +390,8 @@ export class MpvVideoController {
       }, NATIVE_VEIL_MS);
       return this.pushBounds();
     }
+    window.clearTimeout(this.hideTimer);
+    this.hideTimer = 0;
     this.visible = visible;
     return this.pushBounds();
   }
@@ -392,6 +406,26 @@ export class MpvVideoController {
 
   /** The audio clock to follow; null holds the picture where it is. */
   follow(clock: MpvClock | null): void {
+    const mpv = getBridge().mpv;
+    if (!mpv || this.generation === null || this.disposed) return;
+    // The song's clock is unreadable for a moment while a jump swaps the decks. Sent as a stop,
+    // the picture paused, sought and started again: it flashed. Only a clock gone for longer is.
+    if (!clock) {
+      if (!this.nullTimer && this.lastClock) {
+        this.nullTimer = window.setTimeout(() => {
+          this.nullTimer = 0;
+          this.sendClock(null);
+        }, 400);
+      }
+      if (this.lastClock !== undefined && this.lastClock !== null) return;
+    } else if (this.nullTimer) {
+      window.clearTimeout(this.nullTimer);
+      this.nullTimer = 0;
+    }
+    this.sendClock(clock);
+  }
+
+  private sendClock(clock: MpvClock | null): void {
     const mpv = getBridge().mpv;
     if (!mpv || this.generation === null || this.disposed) return;
     // The clock updates many times a second. mpv extrapolates it by itself, so a new sample is
@@ -416,6 +450,7 @@ export class MpvVideoController {
     this.unlisten = null;
     this.hole?.dispose();
     window.clearTimeout(this.hideTimer);
+    window.clearTimeout(this.nullTimer);
     const mpv = getBridge().mpv;
     if (mpv && this.generation !== null) void mpv.close(this.generation).catch(() => undefined);
     void this.options.release?.().catch((reason: unknown) => console.warn(asError(reason).message));

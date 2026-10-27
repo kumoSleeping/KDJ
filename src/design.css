@@ -3279,6 +3279,9 @@ body[data-kd-search-pointer-dragging="true"] * {
 }
 :root[data-video-holes="true"] #root {
   background: var(--kd-bg);
+  /* Its own compositing layer: WebKit then applies the clip-path as a shape mask on the GPU, and
+     moving a hole (the floating window dragged) updates the mask instead of repainting the app. */
+  will-change: transform;
 }
 .kd-pip-video {
   display: block;
