@@ -49,6 +49,7 @@ import { KdjvLivePicture } from "./KdjvLivePicture";
 import { PanelErrorBoundary } from "../RootErrorBoundary";
 import {
   MpvVideoController,
+  mpvAvailable,
   prefersMpv,
   useMpvAvailable,
   type MpvBounds,
@@ -60,6 +61,7 @@ import {
   type YoutubeVideoPreviewController,
 } from "../../lib/youtubeVideoPreview";
 import { reportLoginNeeded } from "../../lib/loginNeeded";
+import { tracePlayback } from "../../lib/playbackTrace";
 import {
   APPLY_VIDEO_MODE_EVENT,
   LOCAL_VIDEO_EVENT,
@@ -90,10 +92,10 @@ import {
 import { SEEK_EVENT, type SeekDetail } from "../library/Waveform";
 
 // mpv's picture is a native view over the page: HTML cannot draw on it, so the title row sits
-// above it and the progress bar below it (see .kd-pip-native-slot).
+// above it, the progress bar and the play/time row below it (see .kd-pip-native-slot).
 const NATIVE_MIN_W = 280;
 const NATIVE_HEADER_H = 28;
-const NATIVE_FOOTER_H = 14;
+const NATIVE_FOOTER_H = 36;
 const NATIVE_EXTRA_H = NATIVE_HEADER_H + NATIVE_FOOTER_H;
 const NETWORK_VIDEO_START_TIMEOUT_MS = 15_000;
 const NETWORK_VIDEO_STALL_TIMEOUT_MS = 12_000;
@@ -1151,6 +1153,9 @@ export function VideoPipHost() {
     let cancelled = false;
     const frame = requestAnimationFrame(() => {
       if (cancelled) return;
+      tracePlayback("video-window", {
+        source: session.source, engine: shouldUseNativePlayer(session) ? "mpv" : "web", mpv: mpvAvailable() ? 1 : 0,
+      });
       ensureHostPlaying(session);
     });
     return () => {

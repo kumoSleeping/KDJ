@@ -27,9 +27,17 @@ import { isProjectTrack } from "../../lib/format";
 import { KdjvLivePicture } from "../player/KdjvLivePicture";
 import { PanelErrorBoundary } from "../RootErrorBoundary";
 import { playTrack } from "./TrackTable";
+import { MpvVideoController, nativeSlotBounds, useMpvAvailable, type MpvClock } from "../../lib/mpvPlayer";
+import { tracePlayback } from "../../lib/playbackTrace";
+import { useAppStore } from "../../stores/appStore";
 import type { Track } from "../../types";
 
 const VIDEO_SWAP_SLOTS = [0, 1] as const;
+
+function mpvClock(trackId: number): MpvClock | null {
+  const clock = getLocalVideoClock(trackId);
+  return clock ? { position: clock.position, rate: clock.rate, playing: clock.playing } : null;
+}
 
 export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidden?: boolean }) {
   const desiredPlayingRef = useRef(false);
@@ -99,9 +107,18 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   const live = useKdjvLive(state => state.live[track.id]);
   // A project is never loaded as a video, also before its live picture is there (ensureProjectLive).
   const project = isProjectTrack(track.format);
+  // The picture plays in mpv's native view when the build carries libmpv (mpvPlayer.ts); the
+  // WebView elements below stay for builds without it, the web setting and a file mpv refuses.
+  const mpvReady = useMpvAvailable();
+  const videoPlayer = useAppStore(state => state.settings?.video_player ?? "mpv");
+  const [mpvRefused, setMpvRefused] = useState<number | null>(null);
+  const useMpv = mpvReady && videoPlayer === "mpv" && !hidden && !live && !project
+    && usesLocalVideoDeviceClock() && mpvRefused !== track.id;
+  const mpvSlotRef = useRef<HTMLDivElement | null>(null);
+  const mpvRef = useRef<MpvVideoController | null>(null);
   const localSwap = useLocalVideoSwap({
-    enabled: !hidden && !live && !project,
-    trackId: hidden || live || project ? null : track.id,
+    enabled: !hidden && !live && !project && !useMpv,
+    trackId: hidden || live || project || useMpv ? null : track.id,
     desiredPlayingRef,
     getRate: () => getLocalVideoClock(track.id)?.rate ?? getLatestPlayerSync(track.id)?.rate ?? 1,
     onActivate: (video) => {
@@ -170,8 +187,78 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   useEffect(() => {
     if (live) { localSwap.unload(); setDuration(live.duration); return; }
     if (project) { localSwap.unload(); ensureProjectLive(track.id); return; }
+    if (useMpv) { localSwap.unload(); return; }
     localSwap.load(`local:${track.id}`, api.videoUrl(track.id));
-  }, [localSwap.load, localSwap.unload, track.id, live, project]);
+  }, [localSwap.load, localSwap.unload, track.id, live, project, useMpv]);
+
+  // mpv: one native view on the slot, following the song's clock; kept on the slot while the
+  // panel scrolls or resizes, hidden while any of it is out of sight.
+  useEffect(() => {
+    const slot = mpvSlotRef.current;
+    if (!useMpv || !slot) return;
+    const trackId = track.id;
+    const first = nativeSlotBounds(slot);
+    const controller = new MpvVideoController({
+      url: api.videoUrl(trackId),
+      follow: true,
+      bounds: first.bounds,
+      volume: 0,
+      start: mpvClock(trackId)?.position ?? getLatestPlayerSync(trackId)?.position ?? 0,
+      paused: true,
+      onStatus: status => {
+        if (scrubPosition.current === null) setPosition(status.position);
+        if (status.duration > 0) setDuration(status.duration);
+        setPlaying(status.playing);
+      },
+      onError: reason => {
+        tracePlayback("mpv-fallback", { track: trackId, error: reason.message });
+        setMpvRefused(trackId);
+      },
+    });
+    mpvRef.current = controller;
+    void controller.done.then(() => controller.follow(mpvClock(trackId))).catch((reason: unknown) => {
+      if (reason instanceof DOMException && reason.name === "AbortError") return;
+      setMpvRefused(trackId);
+    });
+    let last = "";
+    let frame = 0;
+    const place = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const { bounds, visible } = nativeSlotBounds(slot);
+        const next = `${bounds.x},${bounds.y},${bounds.width},${bounds.height},${visible}`;
+        if (next === last) return;
+        last = next;
+        void controller.setBounds(bounds, visible).catch(() => undefined);
+      });
+    };
+    const observer = new ResizeObserver(place);
+    for (let node: HTMLElement | null = slot; node; node = node.parentElement) observer.observe(node);
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    // A sibling growing above the panel moves the slot without resizing anything it watches.
+    const poll = window.setInterval(place, 250);
+    place();
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearInterval(poll);
+      observer.disconnect();
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+      controller.dispose();
+      if (mpvRef.current === controller) mpvRef.current = null;
+    };
+  }, [useMpv, track.id]);
+
+  useEffect(() => {
+    if (!useMpv) return;
+    const apply = () => {
+      if (scrubPosition.current === null) mpvRef.current?.follow(mpvClock(track.id));
+    };
+    const unsubscribe = subscribeLocalVideoClock(track.id, apply);
+    apply();
+    return unsubscribe;
+  }, [useMpv, track.id]);
 
   useEffect(() => {
     const onFocus = (event: Event) => {
@@ -183,7 +270,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   }, []);
 
   useEffect(() => {
-    if (hidden || live || project || !usesLocalVideoDeviceClock()) return;
+    if (hidden || live || project || useMpv || !usesLocalVideoDeviceClock()) return;
     const apply = () => {
       const video = activeVideo();
       if (!video || localSwap.isHoldingPosition()) return;
@@ -198,7 +285,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     video?.addEventListener("seeked", apply);
     apply();
     return () => { unsubscribe(); video?.removeEventListener("loadeddata", apply); video?.removeEventListener("seeked", apply); };
-  }, [track.id, hidden, Boolean(live), project, localSwap.activeSlot]);
+  }, [track.id, hidden, Boolean(live), project, localSwap.activeSlot, useMpv]);
 
   useEffect(() => {
     const onMediaSync = (event: Event) => {
@@ -304,6 +391,8 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     if (rect.width <= 0) return;
     scrubPosition.current = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) * duration;
     setPosition(scrubPosition.current);
+    // mpv shows the dragged spot at once; the song seeks on release and the picture follows it.
+    mpvRef.current?.follow({ position: scrubPosition.current, rate: 0, playing: false });
   };
   const finishScrub = () => {
     const at = scrubPosition.current;
@@ -329,8 +418,10 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
       }
     >
       <div className="kd-preview-frame kd-pip-float" data-fullscreen={fullscreen || undefined}
+        data-native-player={useMpv || undefined}
         // Keep the viewport stable while switching sources; native frames are contain-fitted.
         style={{ "--kd-preview-ratio": 16 / 9, aspectRatio: fullscreen ? "auto" : "16 / 9" } as CSSProperties}>
+        {useMpv && <div ref={mpvSlotRef} className="kd-pip-native-slot" data-no-title="true" aria-hidden="true" />}
         {VIDEO_SWAP_SLOTS.map((slot) => (
           <video
             key={slot}

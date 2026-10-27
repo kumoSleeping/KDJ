@@ -96,6 +96,7 @@ mod macos {
     const FORMAT_DOUBLE: c_int = 5;
 
     const EVENT_SHUTDOWN: c_int = 1;
+    const EVENT_LOG_MESSAGE: c_int = 2;
     const EVENT_END_FILE: c_int = 7;
     const EVENT_FILE_LOADED: c_int = 8;
     const EVENT_PLAYBACK_RESTART: c_int = 21;
@@ -123,6 +124,13 @@ mod macos {
         name: *const c_char,
         format: c_int,
         data: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct EventLogMessage {
+        prefix: *const c_char,
+        level: *const c_char,
+        text: *const c_char,
     }
 
     #[repr(C)]
@@ -161,9 +169,12 @@ mod macos {
         terminate_destroy: unsafe extern "C" fn(*mut Handle),
         set_option_string: unsafe extern "C" fn(*mut Handle, *const c_char, *const c_char) -> c_int,
         set_property_async: unsafe extern "C" fn(*mut Handle, u64, *const c_char, c_int, *mut c_void) -> c_int,
+        // Only the smoke test reads properties; playback observes them (never blocks on mpv's core).
+        #[cfg_attr(not(test), allow(dead_code))]
         get_property: unsafe extern "C" fn(*mut Handle, *const c_char, c_int, *mut c_void) -> c_int,
         command_async: unsafe extern "C" fn(*mut Handle, u64, *mut *const c_char) -> c_int,
         observe_property: unsafe extern "C" fn(*mut Handle, u64, *const c_char, c_int) -> c_int,
+        request_log_messages: unsafe extern "C" fn(*mut Handle, *const c_char) -> c_int,
         wait_event: unsafe extern "C" fn(*mut Handle, f64) -> *mut Event,
         wakeup: unsafe extern "C" fn(*mut Handle),
         error_string: unsafe extern "C" fn(c_int) -> *const c_char,
@@ -233,6 +244,7 @@ mod macos {
                 get_property: symbol!("mpv_get_property"),
                 command_async: symbol!("mpv_command_async"),
                 observe_property: symbol!("mpv_observe_property"),
+                request_log_messages: symbol!("mpv_request_log_messages"),
                 wait_event: symbol!("mpv_wait_event"),
                 wakeup: symbol!("mpv_wakeup"),
                 error_string: symbol!("mpv_error_string"),
@@ -254,7 +266,17 @@ mod macos {
 
     fn api() -> Result<&'static Api, String> {
         static API: OnceLock<Result<(&'static Api, String), String>> = OnceLock::new();
-        API.get_or_init(load_api).as_ref().map(|(api, _)| *api).map_err(Clone::clone)
+        API.get_or_init(|| {
+            let loaded = load_api();
+            match &loaded {
+                Ok((_, version)) => tracing::info!(version, "libmpv loaded"),
+                Err(error) => tracing::warn!(%error, "libmpv unavailable"),
+            }
+            loaded
+        })
+        .as_ref()
+        .map(|(api, _)| *api)
+        .map_err(Clone::clone)
     }
 
     pub fn availability() -> MpvAvailability {
@@ -340,6 +362,7 @@ mod macos {
             unsafe { (self.api.set_property_async)(self.handle, 0, c(name).as_ptr(), FORMAT_STRING, (&mut pointer as *mut *const c_char).cast()) };
         }
 
+        #[cfg_attr(not(test), allow(dead_code))]
         fn get_double(&self, name: &str) -> Option<f64> {
             let mut number = 0.0f64;
             let code = unsafe { (self.api.get_property)(self.handle, c(name).as_ptr(), FORMAT_DOUBLE, (&mut number as *mut f64).cast()) };
@@ -711,6 +734,8 @@ mod macos {
         /// How long the last seek took to show its frame; a seek while playing aims that far ahead.
         lead: f64,
         speed: f64,
+        /// Speed correction is on until the drift is back under the inner band.
+        correcting: bool,
         paused: Option<bool>,
     }
 
@@ -734,7 +759,8 @@ mod macos {
             }
         }
 
-        fn tick(&mut self, mpv: &Mpv, duration: f64) {
+        /// `position` is mpv's last observed `time-pos` (frame-accurate, no blocking read).
+        fn tick(&mut self, mpv: &Mpv, duration: f64, position: Option<f64>) {
             let Some(clock) = self.clock else {
                 self.pause(mpv, true);
                 return;
@@ -746,7 +772,7 @@ mod macos {
             let elapsed = clock.at.elapsed().as_secs_f64();
             let end = (duration - 0.05).max(0.0);
             let target = (clock.position + if moving { elapsed * clock.rate } else { 0.0 }).clamp(0.0, end);
-            let Some(position) = mpv.get_double("time-pos") else { return };
+            let Some(position) = position else { return };
             let drift = target - position;
             if let Some((sent, pending)) = self.pending {
                 // A seek is on its way: send another only when the clock has left its target.
@@ -771,8 +797,15 @@ mod macos {
                 return;
             }
             self.pause(mpv, false);
-            let speed = clock.rate * (1.0 + (drift * 0.5).clamp(-0.1, 0.1));
-            if (speed - self.speed).abs() > 0.002 {
+            // time-pos moves a frame at a time: under ~1.5 frames of drift play at the clock's
+            // own rate, and only a drift beyond that is pulled in (by at most 10%).
+            if drift.abs() > 0.05 {
+                self.correcting = true;
+            } else if drift.abs() < 0.015 {
+                self.correcting = false;
+            }
+            let speed = if self.correcting { clock.rate * (1.0 + (drift * 0.5).clamp(-0.1, 0.1)) } else { clock.rate };
+            if (speed - self.speed).abs() > 0.005 || (!self.correcting && speed != self.speed) {
                 mpv.set_double("speed", speed.clamp(0.05, 8.0));
                 self.speed = speed;
             }
@@ -788,7 +821,6 @@ mod macos {
     }
 
     struct Player {
-        generation: u64,
         mode: Mode,
         mpv: Mpv,
         objects: MainObjects,
@@ -801,7 +833,7 @@ mod macos {
 
     #[derive(Default)]
     pub struct MpvState {
-        current: Mutex<Option<Player>>,
+        players: Mutex<std::collections::HashMap<u64, Player>>,
         generation: AtomicU64,
         lifecycle: tokio::sync::Mutex<()>,
     }
@@ -819,6 +851,11 @@ mod macos {
             let event = unsafe { &*(mpv.api.wait_event)(mpv.handle, timeout) };
             match event.event_id {
                 EVENT_SHUTDOWN => break,
+                EVENT_LOG_MESSAGE => {
+                    let message = unsafe { &*(event.data as *const EventLogMessage) };
+                    let text = |pointer: *const c_char| unsafe { CStr::from_ptr(pointer) }.to_string_lossy();
+                    tracing::warn!(generation, module = %text(message.prefix), level = %text(message.level), "mpv: {}", text(message.text).trim_end());
+                }
                 EVENT_PROPERTY_CHANGE => {
                     let property = unsafe { &*(event.data as *const EventProperty) };
                     let name = unsafe { CStr::from_ptr(property.name) }.to_bytes();
@@ -847,13 +884,15 @@ mod macos {
                     let end = unsafe { &*(event.data as *const EventEndFile) };
                     if end.reason == END_FILE_REASON_ERROR {
                         status.error = Some(format!("视频无法播放：{}", mpv.error(end.error)));
+                        tracing::warn!(generation, error = %mpv.error(end.error), "mpv could not play the file");
                     }
                 }
                 _ => {}
             }
             if mode == Mode::Follow {
                 if let Ok(mut follow) = follow.lock() {
-                    follow.tick(&mpv, status.duration);
+                    let position = (status.duration > 0.0).then_some(status.position);
+                    follow.tick(&mpv, status.duration, position);
                 }
             }
             status.playing = !paused && !eof;
@@ -919,9 +958,6 @@ mod macos {
         pub async fn open(&self, app: tauri::AppHandle, webview: tauri::Webview, request: OpenRequest) -> Result<u64, String> {
             let _lifecycle = self.lifecycle.lock().await;
             let api = api()?;
-            if let Some(previous) = self.current.lock().map_err(|_| "视频播放器状态损坏")?.take() {
-                shutdown(webview.clone(), previous);
-            }
             let mpv = Mpv::create(api).ok_or_else(|| "无法创建 mpv 播放器".to_string())?;
             let fail = |error: String| {
                 mpv.destroy();
@@ -953,6 +989,7 @@ mod macos {
                 mpv.option(name, value).map_err(fail)?;
             }
             let code = unsafe { (api.initialize)(mpv.handle) };
+            unsafe { (api.request_log_messages)(mpv.handle, c"warn".as_ptr()) };
             if code < 0 {
                 return Err(fail(format!("mpv 初始化失败：{}", mpv.error(code))));
             }
@@ -1013,8 +1050,8 @@ mod macos {
                 Ok(events) => events,
                 Err(error) => return Err(teardown(&mut render, format!("无法启动视频事件线程：{error}"))),
             };
-            *self.current.lock().map_err(|_| "视频播放器状态损坏")? = Some(Player {
-                generation,
+            tracing::info!(generation, follow = request.follow, "mpv window opened");
+            self.players.lock().map_err(|_| "视频播放器状态损坏")?.insert(generation, Player {
                 mode,
                 mpv,
                 objects,
@@ -1028,11 +1065,8 @@ mod macos {
         }
 
         fn with_player<R>(&self, generation: u64, work: impl FnOnce(&Player) -> R) -> Result<R, String> {
-            let current = self.current.lock().map_err(|_| "视频播放器状态损坏")?;
-            match current.as_ref() {
-                Some(player) if player.generation == generation => Ok(work(player)),
-                _ => Err("视频播放器已切换".into()),
-            }
+            let players = self.players.lock().map_err(|_| "视频播放器状态损坏")?;
+            players.get(&generation).map(work).ok_or_else(|| "视频播放器已切换".into())
         }
 
         pub async fn set_bounds(&self, webview: &tauri::Webview, generation: u64, bounds: (f64, f64, f64, f64), visible: bool) -> Result<(), String> {
@@ -1074,10 +1108,12 @@ mod macos {
 
         pub async fn close(&self, webview: tauri::Webview, generation: Option<u64>) -> Result<(), String> {
             let _lifecycle = self.lifecycle.lock().await;
-            let mut current = self.current.lock().map_err(|_| "视频播放器状态损坏")?;
-            if current.as_ref().is_some_and(|player| generation.is_none_or(|wanted| wanted == player.generation)) {
-                if let Some(player) = current.take() {
-                    shutdown(webview, player);
+            let mut players = self.players.lock().map_err(|_| "视频播放器状态损坏")?;
+            let closing: Vec<u64> = players.keys().copied().filter(|key| generation.is_none_or(|wanted| wanted == *key)).collect();
+            for key in closing {
+                if let Some(player) = players.remove(&key) {
+                    tracing::info!(generation = key, "mpv window closed");
+                    shutdown(webview.clone(), player);
                 }
             }
             Ok(())
@@ -1292,13 +1328,14 @@ pub async fn mpv_set_bounds(
 }
 
 #[tauri::command]
-pub fn mpv_control(
+pub async fn mpv_control(
     webview: tauri::Webview,
     state: tauri::State<'_, MpvState>,
     generation: u64,
     action: String,
     value: Option<f64>,
 ) -> Result<(), String> {
+    // async: a plain command would run on the main thread, beside the UI and the native views.
     require_main(&webview)?;
     #[cfg(target_os = "macos")]
     return state.control(generation, &action, value);
@@ -1310,7 +1347,7 @@ pub fn mpv_control(
 }
 
 #[tauri::command]
-pub fn mpv_follow(
+pub async fn mpv_follow(
     webview: tauri::Webview,
     state: tauri::State<'_, MpvState>,
     generation: u64,

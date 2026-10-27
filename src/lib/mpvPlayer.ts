@@ -8,6 +8,7 @@
  */
 import { useEffect, useState } from "react";
 import { getBridge } from "./bridge";
+import { tracePlayback } from "./playbackTrace";
 import { useAppStore } from "../stores/appStore";
 import type { MpvAvailability, MpvPlaybackStatus } from "../types";
 
@@ -33,6 +34,7 @@ export function loadMpvAvailability(): Promise<MpvAvailability> {
     .catch((error: unknown) => unavailable(error instanceof Error ? error.message : String(error)))
     .then(result => {
       availability = result;
+      tracePlayback("mpv-available", { available: result.available ? 1 : 0, error: result.error });
       for (const listener of availabilityListeners) listener();
       return result;
     });
@@ -64,6 +66,26 @@ export interface MpvBounds {
   y: number;
   width: number;
   height: number;
+}
+
+/**
+ * The slot's rectangle, and whether all of it can be seen: a native view is not clipped by the
+ * page, so a slot scrolled partly out of its panel hides the picture instead of overlapping
+ * what is around it.
+ */
+export function nativeSlotBounds(node: HTMLElement): { bounds: MpvBounds; visible: boolean } {
+  const rect = node.getBoundingClientRect();
+  const bounds = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+  let visible = rect.width >= 40 && rect.height >= 24 && rect.top >= -1 && rect.left >= -1
+    && rect.bottom <= window.innerHeight + 1 && rect.right <= window.innerWidth + 1;
+  for (let parent = node.parentElement; visible && parent && parent !== document.body; parent = parent.parentElement) {
+    const style = getComputedStyle(parent);
+    if (style.overflowX === "visible" && style.overflowY === "visible") continue;
+    const clip = parent.getBoundingClientRect();
+    visible = rect.top >= clip.top - 1 && rect.bottom <= clip.bottom + 1
+      && rect.left >= clip.left - 1 && rect.right <= clip.right + 1;
+  }
+  return { bounds, visible };
 }
 
 export interface MpvClock {
@@ -101,6 +123,8 @@ export class MpvVideoController {
   private visible = true;
   private volume: number;
   private unlisten: (() => void) | null = null;
+  /** The clock sent last, to send only what mpv could not have predicted from it. */
+  private lastClock: (MpvClock & { at: number }) | null | undefined = undefined;
   private readonly options: MpvVideoOptions;
 
   constructor(options: MpvVideoOptions) {
@@ -109,7 +133,11 @@ export class MpvVideoController {
     this.bounds = options.bounds;
     this.volume = options.volume;
     this.done = this.open();
-    this.done.catch(() => this.dispose());
+    this.done.catch((reason: unknown) => {
+      const error = asError(reason);
+      if (error.name !== "AbortError") tracePlayback("mpv-open-failed", { error: error.message });
+      this.dispose();
+    });
   }
 
   private async open(): Promise<void> {
@@ -120,6 +148,7 @@ export class MpvVideoController {
     if (this.disposed) throw new DOMException("mpv playback disposed", "AbortError");
     this.unlisten = mpv.onStatus(status => {
       if (this.disposed || status.generation !== this.generation) return;
+      if (status.error) tracePlayback("mpv-error", { generation: status.generation, error: status.error });
       if (status.error) options.onError(new Error(status.error));
       else options.onStatus(status);
     });
@@ -133,6 +162,7 @@ export class MpvVideoController {
       paused: options.paused,
     });
     this.generation = generation;
+    tracePlayback("mpv-open", { generation, follow: options.follow ? 1 : 0 });
     if (this.disposed) {
       void mpv.close(generation).catch(() => undefined);
       throw new DOMException("mpv playback disposed", "AbortError");
@@ -184,6 +214,17 @@ export class MpvVideoController {
   follow(clock: MpvClock | null): void {
     const mpv = getBridge().mpv;
     if (!mpv || this.generation === null || this.disposed) return;
+    // The clock updates many times a second. mpv extrapolates it by itself, so a new sample is
+    // sent only when transport or rate changed, it left the extrapolation by 20 ms, or once a second.
+    const now = performance.now();
+    const last = this.lastClock;
+    if (last !== undefined && (last === null) === (clock === null)) {
+      if (!clock || !last) return;
+      const predicted = last.position + (last.playing ? (now - last.at) / 1000 * last.rate : 0);
+      if (clock.playing === last.playing && Math.abs(clock.rate - last.rate) < 1e-3
+        && Math.abs(clock.position - predicted) < 0.02 && now - last.at < 1000) return;
+    }
+    this.lastClock = clock ? { ...clock, at: now } : null;
     void mpv.follow(this.generation, clock ? clock.position : null, clock?.rate ?? 1, clock?.playing ?? false)
       .catch(() => undefined);
   }
