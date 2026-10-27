@@ -3224,32 +3224,42 @@ body[data-kd-search-pointer-dragging="true"] * {
   height: 100%;
   aspect-ratio: auto;
 }
-.kd-pip-float[data-native-player="true"] .kd-pip-float-stage {
-  height: 100%;
-  aspect-ratio: auto;
-}
-/* mpv draws its picture in a native view laid exactly over this slot (mpvPlayer.ts). Nothing
-   in HTML can show above it: the title row is the 28px above it, the bar and the play/time row
-   the 36px below it (NATIVE_HEADER_H / NATIVE_FOOTER_H in VideoPipHost). */
+/* mpv draws its picture in a native view under the page, exactly behind this slot, and the page
+   leaves a hole there (videoHoles.ts). Once it shows, the window is see-through over the slot
+   and its controls draw over the picture as they do over a <video>. */
 .kd-pip-native-slot {
   position: absolute;
-  left: 0;
-  right: 0;
-  top: 28px;
-  height: calc(100% - 64px);
-  z-index: 2;
-  background: #000;
+  inset: 0;
   pointer-events: none;
 }
-.kd-pip-native-slot[data-no-title="true"] {
-  top: 0;
-  height: calc(100% - 36px);
+.kd-pip-float[data-native-player="true"],
+.kd-pip-float[data-native-player="true"] .kd-pip-float-stage {
+  background: transparent;
 }
-.kd-pip-float[data-native-player="true"] .kd-pip-float-scrub,
-.kd-pip-float[data-native-player="true"]:hover .kd-pip-float-scrub,
-.kd-pip-float[data-native-player="true"]:has(:focus-visible, .kd-pip-volume[data-open]) .kd-pip-float-scrub {
-  bottom: 30px;
-  height: 4px;
+.kd-pip-float[data-native-player="true"] .kd-pip-video,
+.kd-pip-float[data-native-player="true"] .kd-local-video-swap {
+  display: none;
+}
+/* A project drawn by mpv (KdjvMpvPicture): its clips are native views under the canvas's hole. */
+.kd-kdjv-live[data-native="true"],
+.kd-kdjv-live[data-native="true"] .kd-kdjv-live-canvas {
+  background: transparent;
+}
+/* The library panel's controls over its mpv picture, drawn outside #root on the slot's box. */
+.kd-native-overlay {
+  z-index: 70;
+  max-width: none;
+  border-radius: 0;
+  box-shadow: none;
+  cursor: default;
+}
+/* While a video shows through the page, only #root paints the app's background. */
+:root[data-video-holes="true"],
+:root[data-video-holes="true"] body {
+  background: transparent !important;
+}
+:root[data-video-holes="true"] #root {
+  background: var(--kd-bg);
 }
 .kd-pip-video {
   display: block;
@@ -3326,25 +3336,6 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-pip-float:hover .kd-pip-float-chrome,
 .kd-pip-float:has(:focus-visible, .kd-pip-volume[data-open]) .kd-pip-float-chrome {
   opacity: 1;
-}
-.kd-pip-float[data-native-player="true"] .kd-pip-float-chrome {
-  z-index: 3;
-  opacity: 1;
-  background: none;
-}
-.kd-pip-float[data-native-player="true"] .kd-pip-float-top,
-.kd-pip-float[data-native-player="true"] .kd-pip-float-bottom {
-  pointer-events: auto;
-  background: rgb(12, 12, 12);
-}
-.kd-pip-float[data-native-player="true"] .kd-pip-float-top {
-  height: 28px;
-  padding: 0 0.3rem 0 0.45rem;
-}
-.kd-pip-float[data-native-player="true"] .kd-pip-float-bottom {
-  height: 30px;
-  margin-top: auto;
-  padding: 0 0.45rem;
 }
 .kd-pip-float-top,
 .kd-pip-float-bottom {
@@ -3474,14 +3465,6 @@ body[data-kd-search-pointer-dragging="true"] * {
   font-size: var(--kd-size-xs);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
-.kd-pip-float[data-native-player="true"] .kd-pip-float-error {
-  top: 2.5rem;
-  bottom: auto;
-  padding: 0.45rem;
-  border-radius: 0.3rem;
-  background: rgba(0, 0, 0, 0.78);
-  text-align: center;
-}
 /* 四边 + 四角拖边缩放：热区常在，视觉只在悬停小窗时略显 */
 .kd-pip-resize {
   position: absolute;
@@ -3524,10 +3507,6 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-pip-resize[data-edge="sw"] {
   width: 0.75rem;
   height: 0.75rem;
-}
-.kd-pip-float[data-native-player="true"] .kd-pip-resize[data-edge="se"] {
-  bottom: 0;
-  z-index: 5;
 }
 .kd-pip-resize[data-edge="ne"] {
   top: 0;

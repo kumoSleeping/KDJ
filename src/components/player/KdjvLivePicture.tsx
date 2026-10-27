@@ -50,7 +50,7 @@ export interface LiveTransport {
   playing: boolean;
 }
 
-type Heard = { position: number; at: number; playing: boolean; rate: number };
+export type Heard = { position: number; at: number; playing: boolean; rate: number };
 /**
  * A clip waiting for the clock: paused on `at` (source seconds), the frame due at `local` seconds
  * into the clip, which the clock reaches only after the seek there has landed.
@@ -66,7 +66,7 @@ const CARRY_MS = 1_500;
  * on (and held after a while), never put back to 0, which threw the picture and the window's
  * progress back to the start and forth again.
  */
-function projectTime(trackId: number, heard: Heard | null, known: { current: Heard | null }) {
+export function projectTime(trackId: number, heard: Heard | null, known: { current: Heard | null }) {
   const carried = () => {
     const last = known.current;
     if (!last) return null;

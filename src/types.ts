@@ -1131,6 +1131,10 @@ export interface KdjBridge {
       volume: number;
       start: number;
       paused: boolean;
+      /** A project clip's part of its source, `WxH+X+Y` in source pixels. */
+      crop?: string;
+      /** Fill the view exactly (it is already the picture's shape). */
+      stretch?: boolean;
     }) => Promise<number>;
     setBounds: (options: {
       generation: number;
@@ -1139,6 +1143,8 @@ export interface KdjBridge {
       width: number;
       height: number;
       visible: boolean;
+      opacity?: number;
+      layer?: number;
     }) => Promise<void>;
     control: (
       generation: number,

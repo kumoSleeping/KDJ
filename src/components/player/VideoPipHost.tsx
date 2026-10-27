@@ -20,13 +20,14 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./AndroidVideoPip.css";
 import { canAndroidVideoPip, configureAndroidVideoPip, enterAndroidVideoPip } from "../../lib/androidVideoPip";
 import { mediaProductionAvailable } from "../../lib/platformFeatures";
 import { PictureInPicture2 } from "lucide-react";
 import { FloatingMediaResizeHandles, useFloatingMediaWindow } from "./FloatingMediaWindow";
-import { FloatingVideoControls, FloatingVideoScrub, PreviewVolume } from "./FloatingVideoControls";
+import { FloatingVideoControls, FloatingVideoScrub } from "./FloatingVideoControls";
 import { api } from "../../lib/api";
 import { observeVideoPreview } from "../../lib/videoPreviewDiagnostics";
 import {
@@ -46,11 +47,14 @@ import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
 import { ensureProjectLive, useKdjvLive } from "../../lib/kdjvPlay";
 import { isProjectTrack } from "../../lib/format";
 import { KdjvLivePicture } from "./KdjvLivePicture";
+import { KdjvMpvPicture } from "./KdjvMpvPicture";
 import { PanelErrorBoundary } from "../RootErrorBoundary";
 import {
   MpvVideoController,
+  SeekHold,
   mpvAvailable,
   prefersMpv,
+  webVideoOff,
   useMpvAvailable,
   type MpvBounds,
   type MpvClock,
@@ -91,12 +95,8 @@ import {
 } from "../download/VideoPreview";
 import { SEEK_EVENT, type SeekDetail } from "../library/Waveform";
 
-// mpv's picture is a native view over the page: HTML cannot draw on it, so the title row sits
-// above it, the progress bar and the play/time row below it (see .kd-pip-native-slot).
-const NATIVE_MIN_W = 280;
-const NATIVE_HEADER_H = 28;
-const NATIVE_FOOTER_H = 36;
-const NATIVE_EXTRA_H = NATIVE_HEADER_H + NATIVE_FOOTER_H;
+/** Corner radius of the floating window, which mpv's hole follows (design.css .kd-pip-float). */
+const FLOAT_RADIUS_PX = 7.2;
 const NETWORK_VIDEO_START_TIMEOUT_MS = 15_000;
 const NETWORK_VIDEO_STALL_TIMEOUT_MS = 12_000;
 
@@ -104,8 +104,6 @@ function currentNetworkVolume(): number {
   return getPreviewOutputGain();
 }
 
-/** The mpv picture is a native view: only the corner below it can take a handle. */
-const PLATFORM_RESIZE_EDGES = ["se"] as const;
 
 type WebKitPresentationMode = "inline" | "picture-in-picture" | "fullscreen";
 type WebKitPipVideo = HTMLVideoElement & {
@@ -277,6 +275,7 @@ export function VideoPipHost() {
   const nativeFallbackSessionKeyRef = useRef<string | null>(null);
   const desiredPlayingRef = useRef(false);
   const pendingScrubRef = useRef<number | null>(null);
+  const seekHoldRef = useRef(new SeekHold());
   const nativeVideoSeekTimerRef = useRef(0);
   const networkVideoWatchdogRef = useRef(0);
   const networkRetryRef = useRef({ key: "", count: 0 });
@@ -311,6 +310,8 @@ export function VideoPipHost() {
   // Re-render once the shell has said whether libmpv could be loaded.
   const mpvReady = useMpvAvailable();
   const [nativeFallbackSessionKey, setNativeFallbackSessionKey] = useState<string | null>(null);
+  // mpv has opened: the stage turns transparent over the hole its picture shows through.
+  const [nativeReady, setNativeReady] = useState(false);
   const [videoFullscreen, setVideoFullscreen] = useState(false);
   // The picture's own width / height, once the source has told it. The floating window is the
   // shape of the video it holds, not of a 16:9 frame; a change (metadata arriving, another
@@ -425,10 +426,10 @@ export function VideoPipHost() {
     locked: videoFullscreen,
     shared: true,
     content: {
-      // The picture's own shape; mpv's view also has the title row above and the bar below it.
+      // The picture's own shape, whichever player draws it.
       ratio: sourceRatio ?? 16 / 9,
-      extraHeight: isNativePlayer ? NATIVE_EXTRA_H : 0,
-      minWidth: isNativePlayer ? NATIVE_MIN_W : 0,
+      extraHeight: 0,
+      minWidth: 0,
     },
     // A transform cannot carry the native view of mpv's picture.
     motion: !isNativePlayer && !videoFullscreen,
@@ -613,6 +614,7 @@ export function VideoPipHost() {
   };
 
   const stopHost = () => {
+    setNativeReady(false);
     nativePlayerRef.current?.dispose();
     nativePlayerRef.current = null;
     void youtubePreviewRef.current?.dispose();
@@ -803,6 +805,18 @@ export function VideoPipHost() {
           nativeFallbackSessionKeyRef.current = fallbackKey;
           setNativeFallbackSessionKey(fallbackKey);
         };
+        // macOS has no WebView player to fall back to (webVideoOff): the window says what failed.
+        const failNative = (reason: unknown) => {
+          if (nativePlayerRef.current !== controller || loadedKeyRef.current !== nextKey) return;
+          if (!webVideoOff()) {
+            fallbackToWebPlayer();
+            return;
+          }
+          if (isYoutubeSession(next)) reportLoginNeeded("youtube", reason);
+          const pip = useVideoPip.getState();
+          pip.setPlaying(false);
+          pip.setError(`视频无法播放：${reason instanceof Error ? reason.message : String(reason)}`);
+        };
         const local = next.source === "local";
         const youtube = isYoutubeSession(next)
           ? startYoutubePlayback({ platform: "youtube", bvid: next.bvid, page: next.page })
@@ -824,7 +838,7 @@ export function VideoPipHost() {
               return;
             }
             const pip = useVideoPip.getState();
-            if (pendingScrubRef.current === null) pip.setPosition(status.position);
+            if (pendingScrubRef.current === null && seekHoldRef.current.accept(status.position)) pip.setPosition(status.position);
             pip.setDuration(status.duration);
             pip.setPlaying(status.playing || status.buffering);
             if (status.width > 0 && status.height > 0) {
@@ -841,8 +855,7 @@ export function VideoPipHost() {
           },
           onError: (reason: Error) => {
             if (nativePlayerRef.current !== controller) return;
-            console.warn(reason.message);
-            fallbackToWebPlayer();
+            failNative(reason);
           },
         });
         nativePlayerRef.current = controller;
@@ -856,6 +869,7 @@ export function VideoPipHost() {
               return;
             }
             nativeReadyKeyRef.current = nextKey;
+            setNativeReady(true);
             if (local) {
               controller.follow(mpvClock(next.trackId));
               return;
@@ -877,7 +891,7 @@ export function VideoPipHost() {
           .catch((reason: unknown) => {
             if (nativePlayerRef.current !== controller) return;
             if (reason instanceof DOMException && reason.name === "AbortError") return;
-            fallbackToWebPlayer();
+            failNative(reason);
           });
         return;
       }
@@ -1165,8 +1179,8 @@ export function VideoPipHost() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, hostLifecycle, panelReady, Boolean(live)]);
 
-  // mpv draws in a native view over the page. Keep it on the black slot while the KDJ window is
-  // dragged, resized, or switched between videos, and hide it with the surface.
+  // mpv draws in a native view under the page. Keep it (and the page's hole) on the slot while
+  // the KDJ window is dragged, resized, or switched between videos, and hide it with the surface.
   useEffect(() => {
     if (!isNativePlayer) return;
     const controller = nativePlayerRef.current;
@@ -1176,7 +1190,8 @@ export function VideoPipHost() {
       const bounds = nativeBounds(nativeSlotRef.current);
       if (!cancelled) {
         const shown = Boolean(showSurface && bounds);
-        void controller.setBounds(bounds ?? { x: 0, y: 0, width: 0, height: 0 }, shown).catch((reason: unknown) => {
+        const radius = docked || videoFullscreen ? 0 : FLOAT_RADIUS_PX;
+        void controller.setBounds(bounds ?? { x: 0, y: 0, width: 0, height: 0 }, shown, radius).catch((reason: unknown) => {
           if (cancelled || nativePlayerRef.current !== controller) return;
           useVideoPip
             .getState()
@@ -1188,7 +1203,7 @@ export function VideoPipHost() {
       cancelled = true;
       cancelAnimationFrame(frame);
     };
-  }, [floatRect.w, floatRect.h, floatRect.x, floatRect.y, isNativePlayer, showSurface, videoFullscreen, panelBounds, sourceRatio]);
+  }, [floatRect.w, floatRect.h, floatRect.x, floatRect.y, isNativePlayer, showSurface, videoFullscreen, panelBounds, sourceRatio, nativeReady, docked]);
 
   // 切走应用（窗口失焦 / 页面隐藏）时，默认把正在播的浮动预览送进系统画中画
   useEffect(() => {
@@ -1782,6 +1797,7 @@ export function VideoPipHost() {
       // While dragging, the picture shows the dragged spot; on release the song seeks and the
       // picture follows its clock again.
       if (!syncPlayer) nativePlayerRef.current?.follow({ position: next, rate: 0, playing: false });
+      else seekHoldRef.current.set(next);
       window.dispatchEvent(
         new CustomEvent<SeekDetail>(SEEK_EVENT, {
           detail: {
@@ -1852,7 +1868,8 @@ export function VideoPipHost() {
 
   const title = session?.title || "视频预览";
 
-  return (
+  // Outside #root: the page's hole over mpv's picture cuts everything inside it (videoHoles.ts).
+  return createPortal(
     <div
       className="kd-pip-host"
       data-floating={showFloating ? "true" : undefined}
@@ -1863,7 +1880,7 @@ export function VideoPipHost() {
         className={showSurface ? "kd-pip-float" : "kd-pip-shell"}
         data-docked={docked ? "true" : undefined}
         data-fullscreen={showSurface && videoFullscreen ? "true" : undefined}
-        data-native-player={showSurface && isNativePlayer ? "true" : undefined}
+        data-native-player={showSurface && ((isNativePlayer && nativeReady) || (live && webVideoOff())) ? "true" : undefined}
         style={
           showSurface && docked && panelBounds
             ? { left: panelBounds.x, top: panelBounds.y, width: panelBounds.width, height: panelBounds.height }
@@ -1872,16 +1889,15 @@ export function VideoPipHost() {
                 left: floatRect.x,
                 top: floatRect.y,
                 width: floatRect.w,
-                ...(isNativePlayer && !videoFullscreen ? { height: floatRect.h } : {}),
               }
             : undefined
         }
         {...(showFloating ? floatWindow.frameProps : {})}
       >
         <div className="kd-pip-float-stage"
-          // Floating and decoded here: the stage is the video's own shape, live. Docked,
-          // fullscreen and mpv's view fill the box they are given (see the stylesheet).
-          style={showFloating && !isNativePlayer && !videoFullscreen && sourceRatio ? { aspectRatio: String(sourceRatio) } : undefined}>
+          // Floating: the stage is the video's own shape, live. Docked and fullscreen fill the
+          // box they are given (see the stylesheet).
+          style={showFloating && !videoFullscreen && sourceRatio ? { aspectRatio: String(sourceRatio) } : undefined}>
           {isNativePlayer && (
             <div
               ref={nativeSlotRef}
@@ -1911,11 +1927,17 @@ export function VideoPipHost() {
           />
           {live && showSurface && session?.source === "local" && (
             <PanelErrorBoundary name="工程画面" turn={session.trackId}>
-              <KdjvLivePicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
-                const pip = useVideoPip.getState();
-                if (pendingScrubRef.current === null) pip.setPosition(position);
-                if (pip.playing !== playing) pip.setPlaying(playing);
-              }} />
+              {webVideoOff()
+                ? <KdjvMpvPicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
+                    const pip = useVideoPip.getState();
+                    if (pendingScrubRef.current === null) pip.setPosition(position);
+                    if (pip.playing !== playing) pip.setPlaying(playing);
+                  }} />
+                : <KdjvLivePicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
+                    const pip = useVideoPip.getState();
+                    if (pendingScrubRef.current === null) pip.setPosition(position);
+                    if (pip.playing !== playing) pip.setPlaying(playing);
+                  }} />}
             </PanelErrorBoundary>
           )}
           <canvas ref={pipCanvasRef} className="kd-pip-compositor" aria-hidden="true" />
@@ -1931,8 +1953,6 @@ export function VideoPipHost() {
             <FloatingVideoControls title={title} playing={playing} position={position} duration={duration}
               fullscreen={videoFullscreen} onClose={close} onToggle={toggle}
               onFullscreen={() => void applyVideoFullscreen(!videoFullscreen)} error={error}
-              // mpv's picture covers the bottom row; an online preview's level still follows the master.
-              titleExtra={isNativePlayer && session?.source === "network" ? <PreviewVolume layout="inline" /> : undefined}
               extra={showFloating && !isNativePlayer && canSystemPip() ? <button type="button" aria-label="系统画中画"
                 title="系统画中画（切走应用时也会自动打开）" onClick={event => {
                   event.stopPropagation();
@@ -1991,11 +2011,11 @@ export function VideoPipHost() {
             />
           )}
           {showFloating && !videoFullscreen && (
-            <FloatingMediaResizeHandles window={floatWindow} name="视频小窗"
-              edges={isNativePlayer ? PLATFORM_RESIZE_EDGES : undefined} />
+            <FloatingMediaResizeHandles window={floatWindow} name="视频小窗" />
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

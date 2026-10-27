@@ -27,7 +27,7 @@ import { api } from "../../lib/api";
 import { chooseAutoAnalysisMode } from "../../lib/autoAnalyze";
 import { resolveAutoAnalysisMode } from "../../lib/autoAnalysisMode";
 import { getBridge } from "../../lib/bridge";
-import { useMpvAvailable } from "../../lib/mpvPlayer";
+import { useMpvAvailable, webVideoOff } from "../../lib/mpvPlayer";
 import { formatBytes } from "../../lib/format";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
@@ -622,7 +622,8 @@ export function SettingsPanel({ preferences = false, page }: {
                   video_playback_max_height: Number(next),
                 }).catch(() => undefined)}
               />
-              {mpvAvailable && (
+              {/* macOS plays every video in mpv for now (webVideoOff): no choice to offer there. */}
+              {mpvAvailable && !webVideoOff() && (
                 <CycleToggle
                   label="视频播放器"
                   value={settings?.video_player ?? "mpv"}

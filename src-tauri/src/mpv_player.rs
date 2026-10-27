@@ -5,8 +5,9 @@
 //! (`scripts/build-libmpv-macos.sh`). Without it `mpv_status` reports unavailable and the page
 //! keeps its WebView `<video>` player.
 //!
-//! One player at a time, drawn by mpv's OpenGL render API into an NSView laid over the main
-//! WebView at the rectangle the page reports. The view lets mouse events through to the page.
+//! Each player is drawn by mpv's OpenGL render API into an NSView placed *under* the main
+//! WebView, which stops painting its background: the page leaves a hole over the video
+//! (videoHoles.ts), so its own controls draw over the picture as they do over a `<video>`.
 //! Two ways to drive it:
 //! - `network`: mpv owns transport and sound (online previews read from KDJ's loopback server);
 //! - `follow`: picture only, following the clock of KDJ's native audio (`mpv_follow`): exact seeks
@@ -408,7 +409,7 @@ mod macos {
         const ENCODING: Encoding = Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
     }
 
-    const NS_WINDOW_ABOVE: isize = 1;
+    const NS_WINDOW_BELOW: isize = -1;
     const NS_OPENGL_PFA_DOUBLE_BUFFER: u32 = 5;
     const NS_OPENGL_PFA_COLOR_SIZE: u32 = 8;
     const NS_OPENGL_PFA_ALPHA_SIZE: u32 = 11;
@@ -524,19 +525,24 @@ mod macos {
 
         /// Places the view at a rectangle given in the page's CSS pixels; returns the drawable
         /// size in pixels.
-        unsafe fn place(&self, x: f64, y: f64, width: f64, height: f64, visible: bool, cgl_context: *mut c_void) -> (i32, i32) {
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn place(&self, x: f64, y: f64, width: f64, height: f64, visible: bool, opacity: f64, cgl_context: *mut c_void) -> (i32, i32) {
             unsafe {
                 let webview = self.webview();
+                let superview: *mut AnyObject = msg_send![webview, superview];
                 let bounds: CGRect = msg_send![webview, bounds];
                 let flipped: bool = msg_send![webview, isFlipped];
-                let frame = CGRect {
+                let in_webview = CGRect {
                     origin: CGPoint { x, y: if flipped { y } else { bounds.size.height - y - height } },
                     size: CGSize { width: width.max(1.0), height: height.max(1.0) },
                 };
+                // The view is the WebView's sibling, right under it.
+                let frame: CGRect = msg_send![webview, convertRect: in_webview, toView: superview];
                 let view = self.view();
                 let _: () = msg_send![view, setFrame: frame];
                 let hidden = !visible || width < 2.0 || height < 2.0;
                 let _: () = msg_send![view, setHidden: hidden];
+                let _: () = msg_send![view, setAlphaValue: opacity.clamp(0.0, 1.0)];
                 if let Some(cgl) = cgl() {
                     (cgl.lock)(cgl_context);
                     let _: () = msg_send![self.context(), update];
@@ -545,6 +551,15 @@ mod macos {
                 let local: CGRect = msg_send![view, bounds];
                 let backing: CGRect = msg_send![view, convertRectToBacking: local];
                 (backing.size.width.round() as i32, backing.size.height.round() as i32)
+            }
+        }
+
+        /// Puts the view right under the WebView, above every other video view.
+        unsafe fn raise(&self) {
+            unsafe {
+                let webview = self.webview();
+                let superview: *mut AnyObject = msg_send![webview, superview];
+                let _: () = msg_send![superview, addSubview: self.view(), positioned: NS_WINDOW_BELOW, relativeTo: webview];
             }
         }
 
@@ -593,7 +608,17 @@ mod macos {
             let view: *mut AnyObject = msg_send![view, initWithFrame: CGRect { origin: CGPoint::default(), size: CGSize { width: 1.0, height: 1.0 } }];
             let _: () = msg_send![view, setWantsBestResolutionOpenGLSurface: true];
             let _: () = msg_send![view, setHidden: true];
-            let _: () = msg_send![webview, addSubview: view, positioned: NS_WINDOW_ABOVE, relativeTo: std::ptr::null_mut::<AnyObject>()];
+            let superview: *mut AnyObject = msg_send![webview, superview];
+            if superview.is_null() {
+                let _: () = msg_send![view, release];
+                let _: () = msg_send![context, release];
+                return Err("主界面尚未放进窗口".into());
+            }
+            let _: () = msg_send![superview, addSubview: view, positioned: NS_WINDOW_BELOW, relativeTo: webview];
+            // The page shows the video through the holes it leaves (videoHoles.ts).
+            let no: *mut AnyObject = msg_send![class!(NSNumber), numberWithBool: false];
+            let key: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c"drawsBackground".as_ptr()];
+            let _: () = msg_send![webview, setValue: no, forKey: key];
             let _: () = msg_send![context, setView: view];
             let _: *mut AnyObject = msg_send![webview, retain];
             let cgl_context: *mut c_void = msg_send![context, CGLContextObj];
@@ -859,6 +884,7 @@ mod macos {
 
     struct Player {
         mode: Mode,
+        layer: i32,
         mpv: Mpv,
         objects: MainObjects,
         cgl_context: usize,
@@ -935,6 +961,12 @@ mod macos {
             status.playing = !paused && !eof;
             status.ended = eof;
             status.buffering = cache_wait || (seeking && mode == Mode::Network);
+            // Until a seek has shown its frame, time-pos still reads the old spot: report the
+            // target, or the progress bar jumps back and forth on every jump.
+            let observed = status.position;
+            if let Some(target) = follow.lock().ok().and_then(|follow| follow.pending.map(|(_, target)| target)) {
+                status.position = target;
+            }
             let moved = (status.position - sent.position).abs() > 1e-3;
             let changed = MpvPlaybackStatus { position: sent.position, ..status.clone() } != sent;
             if changed || (moved && sent_at.elapsed() >= Duration::from_millis(100)) {
@@ -942,6 +974,7 @@ mod macos {
                 sent = status.clone();
                 sent_at = Instant::now();
             }
+            status.position = observed;
         }
     }
 
@@ -959,10 +992,10 @@ mod macos {
         rx
     }
 
-    async fn place(webview: &tauri::Webview, player: (MainObjects, usize), bounds: (f64, f64, f64, f64), visible: bool) -> Result<(i32, i32), String> {
+    async fn place(webview: &tauri::Webview, player: (MainObjects, usize), bounds: (f64, f64, f64, f64), visible: bool, opacity: f64) -> Result<(i32, i32), String> {
         let (objects, cgl_context) = player;
         let (x, y, width, height) = bounds;
-        on_main(webview, move |_| unsafe { objects.place(x, y, width, height, visible, cgl_context as *mut c_void) })
+        on_main(webview, move |_| unsafe { objects.place(x, y, width, height, visible, opacity, cgl_context as *mut c_void) })
             .await
             .map_err(|_| "视频窗口已关闭".to_string())
     }
@@ -985,6 +1018,8 @@ mod macos {
     pub struct OpenRequest {
         pub url: String,
         pub follow: bool,
+        pub crop: Option<String>,
+        pub stretch: bool,
         pub bounds: (f64, f64, f64, f64),
         pub volume: f64,
         pub start: f64,
@@ -1002,6 +1037,17 @@ mod macos {
             };
             let mode = if request.follow { Mode::Follow } else { Mode::Network };
             apply_options(&mpv, request.follow, request.volume).map_err(fail)?;
+            // A project clip: its part of the source, stretched over a view already its shape.
+            if let Some(crop) = &request.crop {
+                if let Err(error) = mpv.option("video-crop", crop) {
+                    tracing::warn!(%error, "mpv crop skipped");
+                }
+            }
+            if request.stretch {
+                if let Err(error) = mpv.option("keepaspect", "no") {
+                    tracing::warn!(%error, "mpv stretch skipped");
+                }
+            }
             let code = unsafe { (api.initialize)(mpv.handle) };
             unsafe { (api.request_log_messages)(mpv.handle, c"warn".as_ptr()) };
             if code < 0 {
@@ -1025,7 +1071,7 @@ mod macos {
                 let _ = webview.with_webview(move |_| unsafe { objects.destroy() });
                 fail(error)
             };
-            let (pixel_width, pixel_height) = match place(&webview, (objects, cgl_context), request.bounds, true).await {
+            let (pixel_width, pixel_height) = match place(&webview, (objects, cgl_context), request.bounds, false, 1.0).await {
                 Ok(size) => size,
                 Err(error) => return Err(teardown(&mut render, error)),
             };
@@ -1067,6 +1113,7 @@ mod macos {
             tracing::info!(generation, follow = request.follow, "mpv window opened");
             self.players.lock().map_err(|_| "视频播放器状态损坏")?.insert(generation, Player {
                 mode,
+                layer: 0,
                 mpv,
                 objects,
                 cgl_context,
@@ -1083,9 +1130,41 @@ mod macos {
             players.get(&generation).map(work).ok_or_else(|| "视频播放器已切换".into())
         }
 
-        pub async fn set_bounds(&self, webview: &tauri::Webview, generation: u64, bounds: (f64, f64, f64, f64), visible: bool) -> Result<(), String> {
+        #[allow(clippy::too_many_arguments)]
+        pub async fn set_bounds(
+            &self,
+            webview: &tauri::Webview,
+            generation: u64,
+            bounds: (f64, f64, f64, f64),
+            visible: bool,
+            opacity: f64,
+            layer: i32,
+        ) -> Result<(), String> {
             let target = self.with_player(generation, |player| (player.objects, player.cgl_context))?;
-            let (width, height) = place(webview, target, bounds, visible).await?;
+            // A new layer number re-stacks every view, lowest first, so the order is the layers'.
+            let restack = {
+                let mut players = self.players.lock().map_err(|_| "视频播放器状态损坏")?;
+                match players.get_mut(&generation) {
+                    Some(player) if player.layer != layer => {
+                        player.layer = layer;
+                        let mut views: Vec<(i32, u64, MainObjects)> =
+                            players.iter().map(|(key, player)| (player.layer, *key, player.objects)).collect();
+                        views.sort_by_key(|(layer, key, _)| (*layer, *key));
+                        Some(views.into_iter().map(|(_, _, objects)| objects).collect::<Vec<_>>())
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(views) = restack {
+                on_main(webview, move |_| unsafe {
+                    for objects in views {
+                        objects.raise();
+                    }
+                })
+                .await
+                .map_err(|_| "视频窗口已关闭".to_string())?;
+            }
+            let (width, height) = place(webview, target, bounds, visible, opacity).await?;
             self.with_player(generation, |player| player.render.resize(width, height))
         }
 
@@ -1095,7 +1174,11 @@ mod macos {
                 match (action, value) {
                     ("play", _) => mpv.set_flag("pause", false),
                     ("pause", _) => mpv.set_flag("pause", true),
-                    ("seek", Some(position)) if position.is_finite() => mpv.seek(position),
+                    ("seek", Some(position)) if position.is_finite() => {
+                        if let Ok(mut follow) = player.follow.lock() {
+                            follow.seek(mpv, position);
+                        }
+                    }
                     ("volume", Some(volume)) if volume.is_finite() => mpv.set_double("volume", volume.clamp(0.0, 1.0) * 100.0),
                     _ => return Err(format!("未知的视频播放器动作：{action}")),
                 }
@@ -1295,8 +1378,15 @@ pub async fn mpv_open(
     volume: f64,
     start: f64,
     paused: bool,
+    crop: Option<String>,
+    stretch: Option<bool>,
 ) -> Result<u64, String> {
     require_main(&webview)?;
+    // `WxH+X+Y` in source pixels, nothing else reaches mpv's option parser.
+    let crop = crop.filter(|crop| {
+        !crop.is_empty() && crop.len() <= 40 && crop.bytes().all(|byte| byte.is_ascii_digit() || byte == b'x' || byte == b'+')
+    });
+    let stretch = stretch.unwrap_or(false);
     if !valid_bounds(x, y, width, height) {
         return Err("视频窗口位置无效".into());
     }
@@ -1307,12 +1397,12 @@ pub async fn mpv_open(
     }
     #[cfg(target_os = "macos")]
     {
-        let request = macos::OpenRequest { url, follow, bounds: (x, y, width, height), volume, start, paused };
+        let request = macos::OpenRequest { url, follow, crop, stretch, bounds: (x, y, width, height), volume, start, paused };
         state.open(app, webview, request).await
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, state, url, follow, volume, start, paused);
+        let _ = (app, state, url, follow, volume, start, paused, crop, stretch);
         Err("当前系统尚未接入 mpv 视频窗口".into())
     }
 }
@@ -1328,16 +1418,19 @@ pub async fn mpv_set_bounds(
     width: f64,
     height: f64,
     visible: bool,
+    opacity: Option<f64>,
+    layer: Option<i32>,
 ) -> Result<(), String> {
     require_main(&webview)?;
     if !valid_bounds(x, y, width, height) {
         return Err("视频窗口位置无效".into());
     }
+    let opacity = opacity.filter(|value| value.is_finite()).unwrap_or(1.0);
     #[cfg(target_os = "macos")]
-    return state.set_bounds(&webview, generation, (x, y, width, height), visible).await;
+    return state.set_bounds(&webview, generation, (x, y, width, height), visible, opacity, layer.unwrap_or(0)).await;
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (state, generation, visible);
+        let _ = (state, generation, visible, opacity, layer);
         Err("当前系统尚未接入 mpv 视频窗口".into())
     }
 }

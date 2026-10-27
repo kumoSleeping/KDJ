@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent } from "react";
+import { createPortal } from "react-dom";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { FloatingVideoControls, FloatingVideoScrub } from "../player/FloatingVideoControls";
 import { api } from "../../lib/api";
@@ -25,9 +26,19 @@ import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
 import { ensureProjectLive, useKdjvLive } from "../../lib/kdjvPlay";
 import { isProjectTrack } from "../../lib/format";
 import { KdjvLivePicture } from "../player/KdjvLivePicture";
+import { KdjvMpvPicture } from "../player/KdjvMpvPicture";
 import { PanelErrorBoundary } from "../RootErrorBoundary";
 import { playTrack } from "./TrackTable";
-import { MpvVideoController, nativeSlotBounds, useMpvAvailable, type MpvClock } from "../../lib/mpvPlayer";
+import {
+  MpvVideoController,
+  SeekHold,
+  nativeSlotBounds,
+  trackNativeSlot,
+  useMpvAvailable,
+  webVideoOff,
+  type MpvBounds,
+  type MpvClock,
+} from "../../lib/mpvPlayer";
 import { tracePlayback } from "../../lib/playbackTrace";
 import { useAppStore } from "../../stores/appStore";
 import type { Track } from "../../types";
@@ -112,10 +123,16 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   const mpvReady = useMpvAvailable();
   const videoPlayer = useAppStore(state => state.settings?.video_player ?? "mpv");
   const [mpvRefused, setMpvRefused] = useState<number | null>(null);
-  const useMpv = mpvReady && videoPlayer === "mpv" && !hidden && !live && !project
-    && usesLocalVideoDeviceClock() && mpvRefused !== track.id;
+  // macOS: always mpv, no WebView fallback (webVideoOff); a refused file shows its error.
+  const useMpv = (webVideoOff() || (mpvReady && videoPlayer === "mpv" && mpvRefused !== track.id))
+    && !hidden && !live && !project && usesLocalVideoDeviceClock();
+  // A project's live picture drawn by mpv (KdjvMpvPicture) needs the same outside controls.
+  const liveNative = Boolean(live) && !hidden && webVideoOff();
+  const nativeChrome = useMpv || liveNative;
   const mpvSlotRef = useRef<HTMLDivElement | null>(null);
   const mpvRef = useRef<MpvVideoController | null>(null);
+  const seekHold = useRef(new SeekHold());
+  const [overlay, setOverlay] = useState<MpvBounds | null>(null);
   const localSwap = useLocalVideoSwap({
     enabled: !hidden && !live && !project && !useMpv,
     trackId: hidden || live || project || useMpv ? null : track.id,
@@ -206,49 +223,41 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
       start: mpvClock(trackId)?.position ?? getLatestPlayerSync(trackId)?.position ?? 0,
       paused: true,
       onStatus: status => {
-        if (scrubPosition.current === null) setPosition(status.position);
+        if (scrubPosition.current === null && seekHold.current.accept(status.position)) setPosition(status.position);
         if (status.duration > 0) setDuration(status.duration);
         setPlaying(status.playing);
       },
       onError: reason => {
         tracePlayback("mpv-fallback", { track: trackId, error: reason.message });
+        setError(`视频无法播放：${reason.message}`);
         setMpvRefused(trackId);
       },
     });
     mpvRef.current = controller;
     void controller.done.then(() => controller.follow(mpvClock(trackId))).catch((reason: unknown) => {
       if (reason instanceof DOMException && reason.name === "AbortError") return;
+      setError(`视频无法播放：${reason instanceof Error ? reason.message : String(reason)}`);
       setMpvRefused(trackId);
     });
-    let last = "";
-    let frame = 0;
-    const place = () => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        const { bounds, visible } = nativeSlotBounds(slot);
-        const next = `${bounds.x},${bounds.y},${bounds.width},${bounds.height},${visible}`;
-        if (next === last) return;
-        last = next;
-        void controller.setBounds(bounds, visible).catch(() => undefined);
-      });
-    };
-    const observer = new ResizeObserver(place);
-    for (let node: HTMLElement | null = slot; node; node = node.parentElement) observer.observe(node);
-    window.addEventListener("resize", place);
-    window.addEventListener("scroll", place, true);
-    // A sibling growing above the panel moves the slot without resizing anything it watches.
-    const poll = window.setInterval(place, 250);
-    place();
+    // The overlay of controls follows the slot in its own effect below.
+    const stop = trackNativeSlot(slot, (bounds, visible) => {
+      void controller.setBounds(bounds, visible).catch(() => undefined);
+    });
     return () => {
-      cancelAnimationFrame(frame);
-      window.clearInterval(poll);
-      observer.disconnect();
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place, true);
+      stop();
       controller.dispose();
       if (mpvRef.current === controller) mpvRef.current = null;
     };
   }, [useMpv, track.id]);
+
+  // mpv's picture (the file's, or a project's clips) shows through a hole in #root: the controls
+  // draw over it from outside #root, on the slot's rectangle, and go with the picture.
+  useEffect(() => {
+    const slot = mpvSlotRef.current;
+    if (!nativeChrome || !slot) return;
+    const stop = trackNativeSlot(slot, (bounds, visible) => setOverlay(visible ? bounds : null));
+    return () => { stop(); setOverlay(null); };
+  }, [nativeChrome, track.id]);
 
   useEffect(() => {
     if (!useMpv) return;
@@ -383,6 +392,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
 
   const seek = (at: number) => {
     const position = Math.max(0, Math.min(duration, at));
+    seekHold.current.set(position);
     setPosition(position);
     broadcastMediaSync({ owner: "local-video", action: "seek", trackId: track.id, position });
   };
@@ -399,6 +409,35 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     scrubPosition.current = null;
     if (at !== null) seek(at);
   };
+
+  const controls = <>
+          <FloatingVideoControls title={track.title || track.filename} showTitle={false} playing={playing}
+            position={position} duration={duration} fullscreen={fullscreen}
+            onToggle={() => {
+              if (playing) broadcastMediaSync({ owner: "local-video", action: "pause", trackId: track.id });
+              else {
+                playTrack(track);
+                broadcastMediaSync({ owner: "local-video", action: "play", trackId: track.id });
+              }
+            }} onFullscreen={() => void setVideoFullscreen(!fullscreen)} />
+          <FloatingVideoScrub position={position} duration={duration}
+            onPointerDown={event => {
+              if (event.button !== 0) return;
+              event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); scrub(event);
+            }}
+            onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event); }}
+            onPointerUp={event => {
+              if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+              scrub(event); finishScrub(); event.currentTarget.releasePointerCapture(event.pointerId);
+            }}
+            onPointerCancel={() => { scrubPosition.current = null; }}
+            onLostPointerCapture={() => { scrubPosition.current = null; }}
+            onKeyDown={event => {
+              if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+              event.preventDefault(); event.stopPropagation();
+              seek(event.key === "Home" ? 0 : event.key === "End" ? duration : position + (event.key === "ArrowRight" ? 5 : -5));
+            }} />
+  </>;
 
   return (
     <div
@@ -418,10 +457,10 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
       }
     >
       <div className="kd-preview-frame kd-pip-float" data-fullscreen={fullscreen || undefined}
-        data-native-player={useMpv || undefined}
+        data-native-player={nativeChrome || undefined}
         // Keep the viewport stable while switching sources; native frames are contain-fitted.
         style={{ "--kd-preview-ratio": 16 / 9, aspectRatio: fullscreen ? "auto" : "16 / 9" } as CSSProperties}>
-        {useMpv && <div ref={mpvSlotRef} className="kd-pip-native-slot" data-no-title="true" aria-hidden="true" />}
+        {nativeChrome && <div ref={mpvSlotRef} className="kd-pip-native-slot" aria-hidden="true" />}
         {VIDEO_SWAP_SLOTS.map((slot) => (
           <video
             key={slot}
@@ -487,42 +526,29 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
         ))}
         {live && !hidden && (
           <PanelErrorBoundary name="工程画面" turn={track.id}>
-            <KdjvLivePicture trackId={track.id} project={live} onTransport={transport => {
-              if (scrubPosition.current === null) setPosition(transport.position);
-              setPlaying(transport.playing);
-            }} />
+            {webVideoOff()
+              ? <KdjvMpvPicture trackId={track.id} project={live} onTransport={transport => {
+                  if (scrubPosition.current === null) setPosition(transport.position);
+                  setPlaying(transport.playing);
+                }} />
+              : <KdjvLivePicture trackId={track.id} project={live} onTransport={transport => {
+                  if (scrubPosition.current === null) setPosition(transport.position);
+                  setPlaying(transport.playing);
+                }} />}
           </PanelErrorBoundary>
         )}
-        {!hidden && <>
-          <FloatingVideoControls title={track.title || track.filename} showTitle={false} playing={playing}
-            position={position} duration={duration} fullscreen={fullscreen}
-            onToggle={() => {
-              if (playing) broadcastMediaSync({ owner: "local-video", action: "pause", trackId: track.id });
-              else {
-                playTrack(track);
-                broadcastMediaSync({ owner: "local-video", action: "play", trackId: track.id });
-              }
-            }} onFullscreen={() => void setVideoFullscreen(!fullscreen)} />
-          <FloatingVideoScrub position={position} duration={duration}
-            onPointerDown={event => {
-              if (event.button !== 0) return;
-              event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); scrub(event);
-            }}
-            onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event); }}
-            onPointerUp={event => {
-              if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-              scrub(event); finishScrub(); event.currentTarget.releasePointerCapture(event.pointerId);
-            }}
-            onPointerCancel={() => { scrubPosition.current = null; }}
-            onLostPointerCapture={() => { scrubPosition.current = null; }}
-            onKeyDown={event => {
-              if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-              event.preventDefault(); event.stopPropagation();
-              seek(event.key === "Home" ? 0 : event.key === "End" ? duration : position + (event.key === "ArrowRight" ? 5 : -5));
-            }} />
-        </>}
+        {!hidden && !nativeChrome && controls}
       </div>
       {error && !hidden && <p className="kd-djp-note">{error}</p>}
+      {/* mpv's picture shows through a hole in #root, which would cut controls inside it away:
+          they draw over the picture from outside #root, on the slot's rectangle. */}
+      {nativeChrome && overlay && createPortal(
+        <div className="kd-pip-float kd-native-overlay" data-native-player="true" data-fullscreen={fullscreen || undefined}
+          style={{ left: overlay.x, top: overlay.y, width: overlay.width, height: overlay.height }}>
+          {controls}
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }
