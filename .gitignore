@@ -49,3 +49,6 @@ sidecar/kumodeck.egg-info/
 themes/*/
 !themes/official/
 !themes/local/
+
+# Playback-only libmpv built by scripts/build-libmpv-macos.sh (optional, bundled by tauri.mpv.conf.json)
+/src-tauri/vendor/libmpv/
