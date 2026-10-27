@@ -814,6 +814,43 @@ mod macos {
 
     // ---- the player -----------------------------------------------------------------------
 
+    /// mpv's options for one player. Only the first three are required; the build leaves out
+    /// whole features (scripting, for one), and an option such a feature owns does not exist
+    /// there: it is logged and skipped instead of refusing the video.
+    fn player_options(follow: bool, volume: f64) -> Vec<(&'static str, String)> {
+        vec![
+            ("vo", "libmpv".into()),
+            ("pause", "yes".into()),
+            ("audio", if follow { "no".into() } else { "auto".into() }),
+            ("hwdec", "videotoolbox,videotoolbox-copy".into()),
+            ("config", "no".into()),
+            ("input-default-bindings", "no".into()),
+            ("input-vo-keyboard", "no".into()),
+            ("osd-level", "0".into()),
+            ("sid", "no".into()),
+            ("sub-auto", "no".into()),
+            ("idle", "yes".into()),
+            ("keep-open", "yes".into()),
+            ("hr-seek", "yes".into()),
+            ("cache", "yes".into()),
+            ("demuxer-max-bytes", "150MiB".into()),
+            ("demuxer-max-back-bytes", "100MiB".into()),
+            ("network-timeout", "15".into()),
+            ("volume", format!("{:.1}", volume.clamp(0.0, 1.0) * 100.0)),
+        ]
+    }
+
+    fn apply_options(mpv: &Mpv, follow: bool, volume: f64) -> Result<(), String> {
+        for (index, (name, value)) in player_options(follow, volume).iter().enumerate() {
+            match mpv.option(name, value) {
+                Ok(()) => {}
+                Err(error) if index < 3 => return Err(error),
+                Err(error) => tracing::warn!(%error, "mpv option skipped"),
+            }
+        }
+        Ok(())
+    }
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Mode {
         Network,
@@ -964,30 +1001,7 @@ mod macos {
                 error
             };
             let mode = if request.follow { Mode::Follow } else { Mode::Network };
-            let options: Vec<(&str, String)> = vec![
-                ("vo", "libmpv".into()),
-                ("hwdec", "videotoolbox,videotoolbox-copy".into()),
-                ("config", "no".into()),
-                ("load-scripts", "no".into()),
-                ("input-default-bindings", "no".into()),
-                ("input-vo-keyboard", "no".into()),
-                ("osd-level", "0".into()),
-                ("sid", "no".into()),
-                ("sub-auto", "no".into()),
-                ("idle", "yes".into()),
-                ("keep-open", "yes".into()),
-                ("hr-seek", "yes".into()),
-                ("cache", "yes".into()),
-                ("demuxer-max-bytes", "150MiB".into()),
-                ("demuxer-max-back-bytes", "100MiB".into()),
-                ("network-timeout", "15".into()),
-                ("pause", "yes".into()),
-                ("audio", if request.follow { "no".into() } else { "auto".into() }),
-                ("volume", format!("{:.1}", (request.volume.clamp(0.0, 1.0) * 100.0))),
-            ];
-            for (name, value) in &options {
-                mpv.option(name, value).map_err(fail)?;
-            }
+            apply_options(&mpv, request.follow, request.volume).map_err(fail)?;
             let code = unsafe { (api.initialize)(mpv.handle) };
             unsafe { (api.request_log_messages)(mpv.handle, c"warn".as_ptr()) };
             if code < 0 {
@@ -1183,10 +1197,11 @@ mod macos {
                 attach(0x8D40, 0x8CE0, 0x0DE1, texture, 0);
 
                 let mpv = Mpv::create(api).expect("mpv_create");
-                for (name, value) in [("vo", "libmpv"), ("hwdec", "videotoolbox,videotoolbox-copy"), ("audio", "no"),
-                    ("config", "no"), ("keep-open", "yes"), ("hr-seek", "yes")] {
-                    mpv.option(name, value).unwrap();
+                // Exactly the options playback sets, each of which must exist in this build.
+                for (name, value) in player_options(true, 0.0) {
+                    mpv.option(name, &value).unwrap();
                 }
+                mpv.option("pause", "no").unwrap();
                 assert!((api.initialize)(mpv.handle) >= 0);
                 let mut init = OpenGlInitParams { get_proc_address: gl_proc_address, get_proc_address_ctx: std::ptr::null_mut() };
                 let mut params = [
