@@ -15,8 +15,6 @@
 #[cfg(target_os = "android")]
 mod android_media;
 #[cfg(desktop)]
-mod bilibili_embed;
-#[cfg(desktop)]
 pub mod cli;
 #[cfg(desktop)]
 mod data_recovery;
@@ -42,11 +40,11 @@ mod media_tools;
 #[cfg(target_os = "macos")]
 mod macos_window_drag;
 #[cfg(desktop)]
+mod mpv_player;
+#[cfg(desktop)]
 mod release_version;
 #[cfg(desktop)]
 mod share_clipboard;
-#[cfg(desktop)]
-mod youtube_embed;
 #[cfg(any(desktop, target_os = "android"))]
 mod youtube_proof;
 #[cfg(desktop)]
@@ -2238,14 +2236,6 @@ pub fn run() {
     let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
     #[cfg(desktop)]
     let builder = builder.on_window_event(folder_drop::handle_event).on_webview_event(folder_drop::handle_webview_event);
-    #[cfg(target_os = "macos")]
-    let builder = builder.register_uri_scheme_protocol("kdj-youtube", |_context, request| {
-        youtube_embed::blank_protocol_response(request.uri().path())
-    });
-    #[cfg(target_os = "macos")]
-    let builder = builder.register_uri_scheme_protocol("kdj-bilibili", |_context, request| {
-        bilibili_embed::blank_protocol_response(request.uri().path())
-    });
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_dialog::init());
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -2280,9 +2270,7 @@ pub fn run() {
         #[cfg(any(desktop, target_os = "android"))]
         app.manage(youtube_proof::YoutubeProofState::default());
         #[cfg(desktop)]
-        app.manage(youtube_embed::YoutubeEmbedState::default());
-        #[cfg(desktop)]
-        app.manage(bilibili_embed::BilibiliEmbedState::default());
+        app.manage(mpv_player::MpvState::default());
         #[cfg(desktop)]
         app.manage(midi::MidiHub::spawn(app.handle().clone()));
         #[cfg(any(desktop, target_os = "android"))]
@@ -2392,17 +2380,12 @@ pub fn run() {
         midi::midi_send,
         youtube_proof::youtube_mint_gvs_po_token,
         youtube_proof::youtube_run_player,
-        youtube_embed::youtube_embed_prewarm,
-        youtube_embed::youtube_embed_open,
-        youtube_embed::youtube_embed_set_bounds,
-        youtube_embed::youtube_embed_status,
-        youtube_embed::youtube_embed_control,
-        youtube_embed::youtube_embed_close,
-        bilibili_embed::bilibili_embed_open,
-        bilibili_embed::bilibili_embed_set_bounds,
-        bilibili_embed::bilibili_embed_status,
-        bilibili_embed::bilibili_embed_control,
-        bilibili_embed::bilibili_embed_close,
+        mpv_player::mpv_status,
+        mpv_player::mpv_open,
+        mpv_player::mpv_set_bounds,
+        mpv_player::mpv_control,
+        mpv_player::mpv_follow,
+        mpv_player::mpv_close,
         mini_player::mini_player_state,
         mini_player::mini_player_collapse,
         mini_player::mini_player_reveal,

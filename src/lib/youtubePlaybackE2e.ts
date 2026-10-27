@@ -195,7 +195,7 @@ async function seekIntegratedVideo(store: VideoPipStore): Promise<number> {
     }
     await sleep(100);
   }
-  throw new Error("YouTube 官方播放器拖动后没有继续播放");
+  throw new Error("YouTube 视频拖动后没有继续播放");
 }
 
 async function runIntegratedVideoSequence(): Promise<{
@@ -212,11 +212,9 @@ async function runIntegratedVideoSequence(): Promise<{
       import("./videoPip"),
       import("../stores/appStore"),
     ]);
-  // This sequence exercises the official embedded player, not the user's chosen HLS preview
-  // path. Set the test choice only in memory, never via putSettings.
+  // This sequence exercises the video window the user has chosen (mpv or the WebView player).
   const initialSettings = useAppStore.getState().settings;
-  const settings = initialSettings ?? await api.getSettings();
-  useAppStore.setState({ settings: { ...settings, youtube_preview_player: "platform" } });
+  if (!initialSettings) useAppStore.setState({ settings: await api.getSettings() });
   const host = document.createElement("div");
   host.id = "kdj-youtube-e2e-pip-host";
   host.style.cssText = "position:relative;z-index:2147483647";
@@ -296,9 +294,7 @@ export async function runYoutubePlaybackE2e(): Promise<void> {
   await report(result);
   try {
     const prewarmStartedAt = performance.now();
-    const official = getBridge().youtubeEmbed;
-    if (!official) throw new Error("当前系统没有隔离的 YouTube 官方播放器");
-    await Promise.all([official.prewarm(), api.prewarmYtmPlayback()]);
+    await api.prewarmYtmPlayback();
     result.startupPrewarmMs = rounded(performance.now() - prewarmStartedAt);
 
     result.stage = "cold-video";
@@ -322,8 +318,8 @@ export async function runYoutubePlaybackE2e(): Promise<void> {
     result.ytmAudioPlayableMs = audio.playableMs;
     result.ytmAudioAdvancingMs = audio.advancingMs;
     if (videoError) {
-      // Audio passed: do not mislabel an official-player failure as a YTM failure.
-      result.stage = "official-video";
+      // Audio passed: do not mislabel a video-window failure as a YTM failure.
+      result.stage = "video";
       throw videoError;
     }
     result.status = "passed";

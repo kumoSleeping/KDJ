@@ -32,8 +32,7 @@ const SETTINGS_FIELDS: &[&str] = &[
     "stream_quality",
     "stream_cache_enabled",
     "video_playback_max_height",
-    "youtube_preview_player",
-    "bilibili_preview_player",
+    "video_player",
     "filename_template",
     "concurrent_downloads",
     "auto_analyze",
@@ -75,13 +74,13 @@ impl AutoAnalysisMode {
     }
 }
 
-/// 在线视频的预览窗口。下载完成后的本地文件始终交给 KDJ 本地播放器。
+/// 视频窗口的播放器。`Mpv` 只在安装包带了 libmpv 时生效，否则仍用 WebView 的 `<video>`。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OnlineVideoPlayer {
-    Platform,
+pub enum VideoPlayerEngine {
     #[default]
-    Kdj,
+    Mpv,
+    Web,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -100,12 +99,9 @@ pub struct Settings {
     /// 视频在线播放的画质上限；下载画质仍由 video_max_height 控制。
     #[serde(default = "default_video_playback_height")]
     pub video_playback_max_height: i64,
-    /// 在线 YouTube 预览默认使用内置播放器，可手动切到 YouTube 官方播放器。
+    /// 本地视频和在线视频预览共用的视频窗口播放器。
     #[serde(default)]
-    pub youtube_preview_player: OnlineVideoPlayer,
-    /// 在线 B 站预览默认使用内置播放器，可手动切到哔哩哔哩官方播放器。
-    #[serde(default)]
-    pub bilibili_preview_player: OnlineVideoPlayer,
+    pub video_player: VideoPlayerEngine,
     #[serde(default = "default_filename_template")]
     pub filename_template: String,
     #[serde(default = "default_concurrent")]
@@ -172,8 +168,7 @@ impl Settings {
             stream_quality: Quality::Q128,
             stream_cache_enabled: false,
             video_playback_max_height: default_video_playback_height(),
-            youtube_preview_player: OnlineVideoPlayer::Kdj,
-            bilibili_preview_player: OnlineVideoPlayer::Kdj,
+            video_player: VideoPlayerEngine::Mpv,
             filename_template: default_filename_template(),
             concurrent_downloads: default_concurrent(),
             auto_analyze: true,
@@ -756,14 +751,7 @@ mod tests {
         );
         assert_eq!(config.to_settings().filter_resonance, FilterResonance::High);
         assert_eq!(config.to_settings().key_notation, KeyNotation::Camelot);
-        assert_eq!(
-            config.to_settings().youtube_preview_player,
-            OnlineVideoPlayer::Kdj
-        );
-        assert_eq!(
-            config.to_settings().bilibili_preview_player,
-            OnlineVideoPlayer::Kdj
-        );
+        assert_eq!(config.to_settings().video_player, VideoPlayerEngine::Mpv);
     }
 
     #[test]

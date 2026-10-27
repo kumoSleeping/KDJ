@@ -27,6 +27,7 @@ import { api } from "../../lib/api";
 import { chooseAutoAnalysisMode } from "../../lib/autoAnalyze";
 import { resolveAutoAnalysisMode } from "../../lib/autoAnalysisMode";
 import { getBridge } from "../../lib/bridge";
+import { useMpvAvailable } from "../../lib/mpvPlayer";
 import { formatBytes } from "../../lib/format";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
@@ -272,6 +273,7 @@ export function SettingsPanel({ preferences = false, page }: {
 }) {
   const on = (id: SettingsPage) => !page || page === id;
   const settings = useAppStore((state) => state.settings);
+  const mpvAvailable = useMpvAvailable();
   const saveSettings = useAppStore((state) => state.saveSettings);
   const [appFontScale, setFontScale] = useState(() => Number.parseFloat(document.documentElement.style.fontSize) || readAppFontScale());
   useEffect(() => {
@@ -620,30 +622,20 @@ export function SettingsPanel({ preferences = false, page }: {
                   video_playback_max_height: Number(next),
                 }).catch(() => undefined)}
               />
-              <CycleToggle
-                label="YouTube 预览"
-                value={settings?.youtube_preview_player ?? "kdj"}
-                options={[
-                  { id: "platform", text: "平台播放器" },
-                  { id: "kdj", text: "内置播放器" },
-                ]}
-                title="默认使用内置播放器；只影响尚未下载的在线视频，下载完成后的本地视频始终使用内置播放器。"
-                onChange={(next) => void saveSettings({
-                  youtube_preview_player: next,
-                }).catch(() => undefined)}
-              />
-              <CycleToggle
-                label="B站预览"
-                value={settings?.bilibili_preview_player ?? "kdj"}
-                options={[
-                  { id: "platform", text: "平台播放器" },
-                  { id: "kdj", text: "内置播放器" },
-                ]}
-                title="默认使用内置播放器；只影响尚未下载的在线视频，下载完成后的本地视频始终使用内置播放器。"
-                onChange={(next) => void saveSettings({
-                  bilibili_preview_player: next,
-                }).catch(() => undefined)}
-              />
+              {mpvAvailable && (
+                <CycleToggle
+                  label="视频播放器"
+                  value={settings?.video_player ?? "mpv"}
+                  options={[
+                    { id: "mpv", text: "mpv" },
+                    { id: "web", text: "系统 WebView" },
+                  ]}
+                  title="本地视频和在线视频预览的小窗。mpv 原生解码，跳转更快；系统 WebView 是原来的播放器。"
+                  onChange={(next) => void saveSettings({
+                    video_player: next,
+                  }).catch(() => undefined)}
+                />
+              )}
               <Switch
                 checked={settings?.stream_cache_enabled ?? false}
                 disabled={!settings || streamCacheBusy}

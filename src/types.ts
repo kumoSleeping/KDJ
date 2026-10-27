@@ -70,7 +70,8 @@ export type KeyNotation = "camelot" | "traditional";
 /** 播放控制面板双极滤波器的共振档位；后端将其映射为稳定的 DSP Q。 */
 export type FilterResonance = "low" | "medium" | "high";
 export type AutoAnalysisMode = "light" | "full" | "paused";
-export type OnlineVideoPlayer = "platform" | "kdj";
+/** The video window: libmpv (when the build carries it) or the WebView `<video>` player. */
+export type VideoPlayerEngine = "mpv" | "web";
 
 export interface Settings {
   download_dir: string;
@@ -82,10 +83,8 @@ export interface Settings {
   stream_cache_enabled: boolean;
   /** 视频在线播放的画质上限，与视频下载画质分开。 */
   video_playback_max_height: number;
-  /** 在线 YouTube 预览窗口；本地文件不受影响。 */
-  youtube_preview_player: OnlineVideoPlayer;
-  /** 在线 B 站预览窗口；本地文件不受影响。 */
-  bilibili_preview_player: OnlineVideoPlayer;
+  /** 视频窗口用哪个播放器；没有 libmpv 的安装包始终是 WebView。 */
+  video_player: VideoPlayerEngine;
   filename_template: string;
   concurrent_downloads: number;
   auto_analyze: boolean;
@@ -1073,6 +1072,24 @@ export interface MiniPlayerBridge {
   fit(width: number, height: number): Promise<void>;
 }
 
+export interface MpvAvailability {
+  available: boolean;
+  version: string | null;
+  error: string | null;
+}
+
+export interface MpvPlaybackStatus {
+  generation: number;
+  playing: boolean;
+  buffering: boolean;
+  ended: boolean;
+  position: number;
+  duration: number;
+  width: number;
+  height: number;
+  error: string | null;
+}
+
 export interface KdjBridge {
   baseUrl: string;
   /** 每次进程启动重新生成；只用于认证本机 HTTP/WS，不得写入日志或持久化到前端。 */
@@ -1100,76 +1117,42 @@ export interface KdjBridge {
     operation: "config" | "decipher" | "transform_n";
     value: string;
   }) => Promise<string>;
-  /**
-   * macOS 上与主 renderer 权限完全分离的官方 YouTube 播放子视图。页面本身没有
-   * Tauri IPC；这里只暴露固定视频编号、几何位置和播放器动作。
-   */
-  youtubeEmbed?: {
-    prewarm: () => Promise<void>;
+  /** macOS: the video window drawn by libmpv in a native view over the page (mpv_player.rs). */
+  mpv?: {
+    status: () => Promise<MpvAvailability>;
     open: (options: {
-      videoId: string;
+      url: string;
+      /** Picture only, following KDJ's audio clock (`follow`), instead of its own transport. */
+      follow: boolean;
       x: number;
       y: number;
       width: number;
       height: number;
-    }) => Promise<void>;
+      volume: number;
+      start: number;
+      paused: boolean;
+    }) => Promise<number>;
     setBounds: (options: {
-      videoId: string;
+      generation: number;
       x: number;
       y: number;
       width: number;
       height: number;
+      visible: boolean;
     }) => Promise<void>;
-    status: (videoId: string) => Promise<{
-      ready: boolean;
-      playing: boolean;
-      buffering: boolean;
-      ended: boolean;
-      position: number;
-      duration: number;
-      hasError: boolean;
-    }>;
     control: (
-      videoId: string,
-      action: "play" | "pause" | "mute" | "unmute" | "seek" | "volume",
+      generation: number,
+      action: "play" | "pause" | "seek" | "volume",
       value?: number,
     ) => Promise<void>;
-    close: (videoId: string) => Promise<void>;
-  };
-  /** 与主 renderer 权限分离的 B站官方播放器子视图。 */
-  bilibiliEmbed?: {
-    open: (options: {
-      bvid: string;
-      page: number;
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-    }) => Promise<void>;
-    setBounds: (options: {
-      bvid: string;
-      page: number;
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-    }) => Promise<void>;
-    status: (bvid: string, page: number) => Promise<{
-      ready: boolean;
-      playing: boolean;
-      buffering: boolean;
-      ended: boolean;
-      position: number;
-      duration: number;
-      hasError: boolean;
-    }>;
-    control: (
-      bvid: string,
-      page: number,
-      action: "play" | "pause" | "mute" | "unmute" | "seek" | "volume",
-      value?: number,
+    follow: (
+      generation: number,
+      position: number | null,
+      rate: number,
+      playing: boolean,
     ) => Promise<void>;
-    close: (bvid: string, page: number) => Promise<void>;
+    close: (generation?: number) => Promise<void>;
+    onStatus: (handler: (status: MpvPlaybackStatus) => void) => () => void;
   };
   openPath: (path: string) => Promise<void>;
   revealPath: (path: string) => Promise<void>;

@@ -617,37 +617,6 @@ test('source teardown cancels both in-flight waits and queued targets before a n
   assert.deepEqual(video.seeks, [10]); assert.equal(e.timers.size, 0);
 });
 
-test('official-player command adapters share bounded latest-target scheduling and cancel on disposal', async () => {
-  for (const platform of ['youtube', 'bilibili']) {
-    const queue = load('src/lib/videoSeekQueue.ts', {}, { AbortController });
-    const pending = [], commands = [];
-    const bridge = {
-      open: async () => {}, status: async () => ({ ready: true }), close: async () => {},
-      control(...args) {
-        if (args.at(-2) !== 'seek') return Promise.resolve();
-        commands.push(args.at(-1));
-        return new Promise(resolve => pending.push(resolve));
-      },
-    };
-    const e = environment();
-    const module = load(`src/lib/${platform}Embed.ts`, {
-      './videoSeekQueue': queue,
-      './bridge': { getBridge: () => ({ [`${platform}Embed`]: bridge }) },
-      './activityLog': { finishApiActivity() {} },
-    }, e.globals);
-    const Controller = module[platform === 'youtube' ? 'YoutubeEmbedController' : 'BilibiliEmbedController'];
-    const controller = new Controller({ videoId: 'id', bvid: 'id', page: 0, bounds: {}, muted: true, volume: 1,
-      onStatus() {}, onError(error) { assert.fail(String(error)); } });
-    await controller.done;
-    const first = controller.seek(10); await flush();
-    const skipped = controller.seek(20), latest = controller.seek(30);
-    await skipped; assert.deepEqual(commands, [10]); pending.shift()(); await first; await flush();
-    assert.deepEqual(commands, [10, 30]);
-    const abandoned = controller.seek(40); controller.dispose(); await abandoned;
-    pending.shift()(); await latest; assert.deepEqual(commands, [10, 30]); assert.equal(e.timers.size, 0);
-  }
-});
-
 test('rapid relative nudges retain every increment while absolute decoder targets are coalesced', async () => {
   const e = environment(), video = new Video(), engine = new e.sync.VideoPlaybackEngine();
   video.time = 10;

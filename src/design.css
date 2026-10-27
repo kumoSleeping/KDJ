@@ -3224,19 +3224,27 @@ body[data-kd-search-pointer-dragging="true"] * {
   height: 100%;
   aspect-ratio: auto;
 }
-.kd-pip-float[data-platform-player="true"] .kd-pip-float-stage {
+.kd-pip-float[data-native-player="true"] .kd-pip-float-stage {
   height: 100%;
   aspect-ratio: auto;
 }
-.kd-pip-platform-native-slot {
+/* mpv draws its picture in a native view laid exactly over this slot (mpvPlayer.ts). Nothing
+   in HTML can show above it, so the title row is the 28px above and the bar the 14px below. */
+.kd-pip-native-slot {
   position: absolute;
   left: 0;
   right: 0;
   top: 28px;
-  height: calc((100% - 36px));
+  height: calc(100% - 42px);
   z-index: 2;
   background: #000;
   pointer-events: none;
+}
+.kd-pip-float[data-native-player="true"] .kd-pip-float-scrub,
+.kd-pip-float[data-native-player="true"]:hover .kd-pip-float-scrub,
+.kd-pip-float[data-native-player="true"]:has(:focus-visible, .kd-pip-volume[data-open]) .kd-pip-float-scrub {
+  bottom: 4px;
+  height: 6px;
 }
 .kd-pip-video {
   display: block;
@@ -3314,7 +3322,7 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-pip-float:has(:focus-visible, .kd-pip-volume[data-open]) .kd-pip-float-chrome {
   opacity: 1;
 }
-.kd-pip-float[data-platform-player="true"] .kd-pip-float-chrome {
+.kd-pip-float[data-native-player="true"] .kd-pip-float-chrome {
   inset: 0 0 auto;
   height: 28px;
   z-index: 3;
@@ -3322,11 +3330,11 @@ body[data-kd-search-pointer-dragging="true"] * {
   pointer-events: auto;
   background: linear-gradient(to bottom, rgba(18, 18, 18, 0.98), rgba(8, 8, 8, 0.96));
 }
-.kd-pip-float[data-platform-player="true"] .kd-pip-float-top {
+.kd-pip-float[data-native-player="true"] .kd-pip-float-top {
   height: 28px;
   padding: 0 0.3rem 0 0.45rem;
 }
-.kd-pip-float[data-platform-player="true"] .kd-pip-float-bottom {
+.kd-pip-float[data-native-player="true"] .kd-pip-float-bottom {
   display: none;
 }
 .kd-pip-float-top,
@@ -3457,7 +3465,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   font-size: var(--kd-size-xs);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
-.kd-pip-float[data-platform-player="true"] .kd-pip-float-error {
+.kd-pip-float[data-native-player="true"] .kd-pip-float-error {
   top: 2.5rem;
   bottom: auto;
   padding: 0.45rem;
@@ -3508,7 +3516,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   width: 0.75rem;
   height: 0.75rem;
 }
-.kd-pip-float[data-platform-player="true"] .kd-pip-resize[data-edge="se"] {
+.kd-pip-float[data-native-player="true"] .kd-pip-resize[data-edge="se"] {
   bottom: 0;
   z-index: 5;
 }

@@ -13,7 +13,7 @@ pub mod paths;
 pub mod thread_qos;
 pub mod work_scheduler;
 
-pub use config::{AppConfig, OnlineVideoPlayer, Settings};
+pub use config::{AppConfig, Settings, VideoPlayerEngine};
 pub use events::EventHub;
 pub use models::*;
 

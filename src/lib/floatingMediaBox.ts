@@ -38,7 +38,7 @@ export interface FloatViewport {
 export interface FloatContent {
   /** Picture width / height. */
   ratio: number;
-  /** Fixed rows outside the picture (the title strip of an embedded platform player). */
+  /** Fixed rows outside the picture (the title row and bar around mpv's native picture). */
   extraHeight?: number;
   minWidth?: number;
 }

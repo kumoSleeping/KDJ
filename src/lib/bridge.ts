@@ -17,6 +17,8 @@ import {
 import type {
   CliInstallStatus,
   KdjBridge,
+  MpvAvailability,
+  MpvPlaybackStatus,
   SavedLoginQr,
   UpdateInfo,
   UpdateProgress,
@@ -120,44 +122,30 @@ async function createTauriBridge(): Promise<KdjBridge> {
     runYoutubePlayer: desktop || android
       ? (options) => tauriInvoke<string>("youtube_run_player", options)
       : undefined,
-    youtubeEmbed: info.platform === "darwin"
+    mpv: info.platform === "darwin"
       ? {
-          prewarm: () => tauriInvoke<void>("youtube_embed_prewarm"),
-          open: (options) => tauriInvoke<void>("youtube_embed_open", options),
-          setBounds: (options) => tauriInvoke<void>("youtube_embed_set_bounds", options),
-          status: (videoId) =>
-            tauriInvoke<{
-              ready: boolean;
-              playing: boolean;
-              buffering: boolean;
-              ended: boolean;
-              position: number;
-              duration: number;
-              hasError: boolean;
-            }>("youtube_embed_status", { videoId }),
-          control: (videoId, action, value) =>
-            tauriInvoke<void>("youtube_embed_control", { videoId, action, value }),
-          close: (videoId) => tauriInvoke<void>("youtube_embed_close", { videoId }),
-        }
-      : undefined,
-    bilibiliEmbed: info.platform === "darwin"
-      ? {
-          open: (options) => tauriInvoke<void>("bilibili_embed_open", options),
-          setBounds: (options) => tauriInvoke<void>("bilibili_embed_set_bounds", options),
-          status: (bvid, page) =>
-            tauriInvoke<{
-              ready: boolean;
-              playing: boolean;
-              buffering: boolean;
-              ended: boolean;
-              position: number;
-              duration: number;
-              hasError: boolean;
-            }>("bilibili_embed_status", { bvid, page }),
-          control: (bvid, page, action, value) =>
-            tauriInvoke<void>("bilibili_embed_control", { bvid, page, action, value }),
-          close: (bvid, page) =>
-            tauriInvoke<void>("bilibili_embed_close", { bvid, page }),
+          status: () => tauriInvoke<MpvAvailability>("mpv_status"),
+          open: (options) => tauriInvoke<number>("mpv_open", options),
+          setBounds: (options) => tauriInvoke<void>("mpv_set_bounds", options),
+          control: (generation, action, value) =>
+            tauriInvoke<void>("mpv_control", { generation, action, value }),
+          follow: (generation, position, rate, playing) =>
+            tauriInvoke<void>("mpv_follow", { generation, position, rate, playing }),
+          close: (generation) => tauriInvoke<void>("mpv_close", { generation }),
+          onStatus: (handler) => {
+            let unlisten: (() => void) | undefined;
+            let disposed = false;
+            void import("@tauri-apps/api/webviewWindow").then(({ getCurrentWebviewWindow }) =>
+              getCurrentWebviewWindow().listen<MpvPlaybackStatus>("kdj:mpv-status", event => handler(event.payload)))
+              .then(stop => {
+                if (disposed) stop();
+                else unlisten = stop;
+              });
+            return () => {
+              disposed = true;
+              unlisten?.();
+            };
+          },
         }
       : undefined,
     // 安卓：opener 的 reveal 不支持，open_path 也打不开 file://；走 MediaStore / FileProvider。

@@ -19,7 +19,6 @@ import { rememberVideoEnqueue } from "../../lib/queueTaskDraft";
 import { beginVideoPointerDrag } from "../../lib/searchDrag";
 import { TOSS_ITEM_ATTR, tossToDownloads } from "../../lib/downloadToss";
 import { clearTextSelection } from "../../lib/textSelection";
-import { prewarmYoutubeEmbed } from "../../lib/youtubeEmbed";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import type { MergedGroup, VideoDownloadRequest, VideoInfo, VideoPage } from "../../types";
@@ -359,17 +358,8 @@ export function VideoResultRow({
     }
   }, [buildRequest, title, author, displayCover, mergeTasks, openQueuePanel]);
 
-  const prewarmVideoPreview = () => {
-    if (platform === "youtube") {
-      // Only instantiate the isolated native view. Loading a specific video before the user's
-      // click would start the official player (and possibly an ad) under an unrelated hover.
-      prewarmYoutubeEmbed();
-    }
-  };
-
   const bindPointerDrag = (event: React.PointerEvent, pageIndex = 0) => {
     if (!bvid) return;
-    prewarmVideoPreview();
     pointerDragCleanupRef.current?.();
     const request = buildRequest(pageIndex);
     const page = pages[pageIndex];
