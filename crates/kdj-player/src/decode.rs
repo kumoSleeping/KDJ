@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::{FormatOptions, Track};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
@@ -67,6 +67,31 @@ impl DecodedTrack {
     }
 }
 
+/// Sample rate of the silence that stands in for a video file's missing sound.
+pub(crate) const SILENT_SAMPLE_RATE: u32 = 48_000;
+
+/// A file with no sound (a video without an audio track): how long it lasts, from the tracks it
+/// does have. Playing it as that much silence gives the player a clock for its picture; failing
+/// it left the video window with nothing to follow.
+pub(crate) fn silent_duration(tracks: &[Track]) -> Option<f64> {
+    let audible = tracks.iter().any(|track| {
+        let params = &track.codec_params;
+        params.codec != CODEC_TYPE_NULL && (params.channels.is_some() || params.sample_rate.is_some())
+    });
+    if audible {
+        return None;
+    }
+    tracks
+        .iter()
+        .filter_map(|track| {
+            let params = &track.codec_params;
+            let time = params.time_base?.calc_time(params.n_frames?);
+            Some(time.seconds as f64 + time.frac)
+        })
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        .reduce(f64::max)
+}
+
 /// Decodes a local file to finite interleaved stereo PCM on a worker thread.
 pub fn decode_file(path: &Path) -> Result<DecodedTrack> {
     decode_file_with_limit(path, usize::MAX)
@@ -107,6 +132,14 @@ where
         )
         .with_context(|| format!("unsupported audio format: {}", path.display()))?;
     let mut format = probed.format;
+    if let Some(seconds) = silent_duration(format.tracks()) {
+        let frames = (seconds * f64::from(SILENT_SAMPLE_RATE)).ceil() as usize;
+        let samples = frames.saturating_mul(2);
+        if samples.saturating_mul(std::mem::size_of::<f32>()) > max_pcm_bytes {
+            bail!("decoded PCM exceeds {} MiB limit", max_pcm_bytes / (1024 * 1024));
+        }
+        return DecodedTrack::from_interleaved_stereo(vec![0.0; samples.max(2)], SILENT_SAMPLE_RATE);
+    }
     let track = format
         .tracks()
         .iter()
@@ -219,6 +252,26 @@ fn finite(sample: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A video without sound plays as silence as long as the video (needs ffmpeg to make one).
+    #[test]
+    fn a_video_without_sound_decodes_as_silence() {
+        let path = std::env::temp_dir().join(format!("kdj-player-silent-{}.mp4", std::process::id()));
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=black:size=64x36:rate=25", "-t", "3"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&path)
+            .status()
+            .is_ok_and(|status| status.success());
+        if !made {
+            eprintln!("ffmpeg unavailable: skipped");
+            return;
+        }
+        let decoded = decode_file(&path).expect("a silent video decodes");
+        let _ = std::fs::remove_file(&path);
+        assert!((decoded.duration_seconds() - 3.0).abs() < 0.1, "{}", decoded.duration_seconds());
+        assert!(decoded.interleaved().iter().all(|sample| *sample == 0.0));
+    }
 
     #[test]
     fn decodes_stereo_pcm_and_seeks_by_frame() {

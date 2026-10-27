@@ -1742,6 +1742,9 @@ where
         )
         .with_context(|| format!("unsupported audio format: {source_label}"))?;
     let mut format = probed.format;
+    if let Some(seconds) = crate::decode::silent_duration(format.tracks()) {
+        return emit_silence(seconds, position, output_sample_rate, output_limit, sink, cancelled, seek);
+    }
     let track = format
         .tracks()
         .iter()
@@ -1924,6 +1927,57 @@ where
     Ok(StreamMetadata {
         duration,
         source_sample_rate,
+        output_sample_rate,
+    })
+}
+
+/// `seconds` of silence from `position` (a video file without sound, decode.rs
+/// `silent_duration`), following seeks as decoded audio does.
+fn emit_silence<S, F>(
+    seconds: f64,
+    position: f64,
+    output_sample_rate: u32,
+    output_limit: Option<u64>,
+    mut sink: S,
+    cancelled: F,
+    seek: Option<StreamSeekControl>,
+) -> Result<StreamMetadata>
+where
+    S: FnMut([f32; 2], f64) -> Result<()>,
+    F: Fn() -> bool + Copy,
+{
+    let rate = f64::from(output_sample_rate);
+    let total = (seconds * rate).floor() as u64;
+    let frame_at = |at: f64| (at.clamp(0.0, seconds) * rate).floor() as u64;
+    let mut frame = frame_at(position);
+    let mut seen_seek = seek.as_ref().map(StreamSeekControl::generation).unwrap_or(0);
+    let mut produced = 0u64;
+    let mut since_check = 0u32;
+    while frame < total {
+        since_check += 1;
+        if since_check >= 1024 {
+            since_check = 0;
+            if cancelled() {
+                bail!("stream preparation cancelled");
+            }
+            if let Some(at) = seek.as_ref().and_then(|control| control.observe(&mut seen_seek)) {
+                frame = frame_at(at);
+                continue;
+            }
+        }
+        sink([0.0, 0.0], frame as f64 / rate)?;
+        produced = produced.saturating_add(1);
+        if output_limit.is_some_and(|limit| produced >= limit) {
+            break;
+        }
+        frame += 1;
+    }
+    if produced == 0 {
+        bail!("decoded audio stream is empty");
+    }
+    Ok(StreamMetadata {
+        duration: Some(seconds),
+        source_sample_rate: output_sample_rate,
         output_sample_rate,
     })
 }

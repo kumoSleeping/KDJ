@@ -16,7 +16,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../../lib/api";
 import { MEDIA_SYNC_EVENT, type MediaSyncDetail } from "../../lib/mediaSync";
 import { clipAlpha, clipBox, clipSpeed, preparedClips, sourceTime, type LiveClip } from "../../lib/kdjvLive";
-import { MpvVideoController, trackNativeSlot, type MpvBounds, type MpvClock } from "../../lib/mpvPlayer";
+import { MpvVideoController, NATIVE_VEIL_MS, trackNativeSlot, type MpvBounds, type MpvClock } from "../../lib/mpvPlayer";
 import { createVideoHole } from "../../lib/videoHoles";
 import { projectTime, type Heard, type LiveTransport } from "./KdjvLivePicture";
 import type { KdjvLive } from "../../types";
@@ -94,11 +94,15 @@ export function KdjvMpvPicture({ trackId, project, onTransport }: {
     // Where the canvas is and whether it may show, kept by the tracker (it measures on changes,
     // scrolls and a slow poll): measuring the page on every frame made scrolling stutter.
     const node = canvas.current;
-    let placed: { bounds: MpvBounds; visible: boolean } = { bounds: { x: 0, y: 0, width: 0, height: 0 }, visible: false };
+    let placed = { bounds: { x: 0, y: 0, width: 0, height: 0 } as MpvBounds, visible: false, at_once: false };
+    // The hole closes with the clips' views: at once when the page lies over it, else after the veil.
+    let holeTimer = 0;
     const stopTracking = node
-      ? trackNativeSlot(node, (bounds, visible) => {
-          placed = { bounds, visible };
-          hole.set(visible ? bounds : null);
+      ? trackNativeSlot(node, (bounds, visible, state) => {
+          placed = { bounds, visible, at_once: state === "covered" || state === "out" };
+          window.clearTimeout(holeTimer);
+          if (visible || placed.at_once) hole.set(visible ? bounds : null);
+          else holeTimer = window.setTimeout(() => hole.set(null), NATIVE_VEIL_MS);
         })
       : () => undefined;
     let frame = 0, lastReport = -Infinity;
@@ -154,7 +158,10 @@ export function KdjvMpvPicture({ trackId, project, onTransport }: {
         if (key !== player.placed) {
           player.placed = key;
           void player.controller.setLook(alpha, layer).catch(() => undefined);
-          void player.controller.setBounds(rect, visible).catch(() => undefined);
+          // Only a canvas that moves fades (its veil is the window's); a clip at its end goes at once,
+          // or it would cover the clip coming in.
+          const atOnce = placed.at_once || !inside || alpha <= 0;
+          void player.controller.setBounds(rect, visible, undefined, atOnce).catch(() => undefined);
         }
         // Before its cut: still on its first frame. After its end: still on its last.
         const clock: MpvClock = local < 0
@@ -179,6 +186,7 @@ export function KdjvMpvPicture({ trackId, project, onTransport }: {
       cancelAnimationFrame(frame);
       window.removeEventListener(MEDIA_SYNC_EVENT, onSync);
       stopTracking();
+      window.clearTimeout(holeTimer);
       hole.dispose();
     };
   }, [trackId, project]);

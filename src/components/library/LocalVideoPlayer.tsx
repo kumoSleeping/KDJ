@@ -132,7 +132,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   const mpvSlotRef = useRef<HTMLDivElement | null>(null);
   const mpvRef = useRef<MpvVideoController | null>(null);
   const seekHold = useRef(new SeekHold());
-  const [overlay, setOverlay] = useState<MpvBounds | null>(null);
+  const [overlay, setOverlay] = useState<(MpvBounds & { shown: boolean }) | null>(null);
   const localSwap = useLocalVideoSwap({
     enabled: !hidden && !live && !project && !useMpv,
     trackId: hidden || live || project || useMpv ? null : track.id,
@@ -240,8 +240,9 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
       setMpvRefused(trackId);
     });
     // The overlay of controls follows the slot in its own effect below.
-    const stop = trackNativeSlot(slot, (bounds, visible) => {
-      void controller.setBounds(bounds, visible).catch(() => undefined);
+    const stop = trackNativeSlot(slot, (bounds, visible, state) => {
+      // Covered or out of sight: at once. Scrolled: after the overlay's veil has faded in.
+      void controller.setBounds(bounds, visible, undefined, state === "covered" || state === "out").catch(() => undefined);
     });
     return () => {
       stop();
@@ -255,7 +256,10 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   useEffect(() => {
     const slot = mpvSlotRef.current;
     if (!nativeChrome || !slot) return;
-    const stop = trackNativeSlot(slot, (bounds, visible) => setOverlay(visible ? bounds : null));
+    // While it scrolls the overlay stays, veiled; covered or out of sight it goes (it would lie
+    // over what covers the slot).
+    const stop = trackNativeSlot(slot, (bounds, visible, state) =>
+      setOverlay(visible || state === "moving" ? { ...bounds, shown: visible } : null));
     return () => { stop(); setOverlay(null); };
   }, [nativeChrome, track.id]);
 
@@ -545,6 +549,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
       {nativeChrome && overlay && createPortal(
         <div className="kd-pip-float kd-native-overlay" data-native-player="true" data-fullscreen={fullscreen || undefined}
           style={{ left: overlay.x, top: overlay.y, width: overlay.width, height: overlay.height }}>
+          <div className="kd-native-veil" aria-hidden="true" data-shown={overlay.shown ? "true" : undefined} />
           {controls}
         </div>,
         document.body,

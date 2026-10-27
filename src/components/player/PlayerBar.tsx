@@ -4343,13 +4343,17 @@ export function PlayerBar() {
   // leaving, which is not what comes next.
   const nextBarView = predictedDeckView;
   const deckPlaying = pipDriving && pipSession?.source === "network" ? pipPlaying : playing;
-  const playbackVisualRate = pipDriving
+  // A local video is the picture of the song playing: the song's clock is the time shown. Taking
+  // the video window's own position made a jump on the waveform bounce back and forth while the
+  // picture caught up with the song. An online preview has no song: its window is the clock.
+  const pipClock = pipDriving && pipSession?.source === "network";
+  const playbackVisualRate = pipClock
     ? 1
     : (nativePlayer?.state().rate ?? frontEl.playbackRate ?? 1);
-  const playbackPosition = pipDriving ? pipPosition : position;
+  const playbackPosition = pipClock ? pipPosition : position;
   // 音频元数据尚未加载（例如恢复上次的唱盘）时，曲库已有的时长仍应先显示；
   // 否则波形都在却只剩一串 --:--，看不出整首还有多久。
-  const playbackDuration = pipDriving ? pipDuration : duration || displayTrack?.duration || 0;
+  const playbackDuration = pipClock ? pipDuration : duration || displayTrack?.duration || pipDuration || 0;
   const elapsed = Math.max(0, Math.min(playbackDuration, playbackPosition));
   const remaining = Math.max(0, playbackDuration - playbackPosition);
   // 随机播放的右唱盘只是预告，不必先切走正在放的歌才能换一个候选。
@@ -5107,11 +5111,11 @@ export function PlayerBar() {
             songSwapMotion
             trackId={pipSession.trackId}
             track={track?.id === pipSession.trackId ? track : undefined}
-            position={pipPosition}
-            duration={pipDuration}
+            position={playbackPosition}
+            duration={playbackDuration}
             preserveBarPhase={autoBeatSync}
-            playing={pipPlaying}
-            playbackRate={1}
+            playing={playing}
+            playbackRate={playbackVisualRate}
             cueMs={
               track?.id === pipSession.trackId
                 ? selected?.id === track.id

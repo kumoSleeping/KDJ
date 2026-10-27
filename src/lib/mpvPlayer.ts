@@ -75,6 +75,9 @@ export function prefersMpv(): boolean {
   return webVideoOff() || (mpvAvailable() && (useAppStore.getState().settings?.video_player ?? "mpv") === "mpv");
 }
 
+/** How long a picture fades to black before its view is hidden (design.css .kd-native-veil). */
+export const NATIVE_VEIL_MS = 160;
+
 export interface MpvBounds {
   x: number;
   y: number;
@@ -126,12 +129,18 @@ export function pageCovers(bounds: MpvBounds, slot: HTMLElement): boolean {
  * there (all of it in sight, nothing of the page over it). Calls `onPlace` when either changes,
  * while the panel scrolls, resizes, moves, or a menu opens. Returns the stop.
  */
-export function trackNativeSlot(slot: HTMLElement, onPlace: (bounds: MpvBounds, visible: boolean) => void): () => void {
+/** Why a slot's picture is not shown: moving (scrolled, dragged), covered by the page, out of sight. */
+export type NativeSlotState = "shown" | "moving" | "covered" | "out";
+
+export function trackNativeSlot(
+  slot: HTMLElement,
+  onPlace: (bounds: MpvBounds, visible: boolean, state: NativeSlotState) => void,
+): () => void {
   let last = "";
   let lastRect = "";
   let frame = 0;
   let settle = 0;
-  let scrolling = false;
+  let moving = false;
   let covered = false;
   const place = () => {
     cancelAnimationFrame(frame);
@@ -139,26 +148,26 @@ export function trackNativeSlot(slot: HTMLElement, onPlace: (bounds: MpvBounds, 
       const placed = nativeSlotBounds(slot);
       const { bounds } = placed;
       const rect = `${bounds.x},${bounds.y},${bounds.width},${bounds.height}`;
-      // A native view moves a frame or two after the page: while the slot is scrolled along it
-      // would trail behind (smear), so the picture waits, black, until the scrolling stops.
-      const moving = scrolling && lastRect !== "" && rect !== lastRect;
+      // A native view moves a frame or two after the page: while the slot is scrolled or dragged
+      // along it would trail behind (smear), so the picture waits, veiled, until it stops.
+      const travelling = moving && lastRect !== "" && rect !== lastRect;
       lastRect = rect;
       // A menu, sheet or other window over the slot would be cut by the hole: the picture is
-      // hidden (the black frame shows) while it is there.
-      // Looked for again when not scrolling: a scroll opens no menu, and the scan is not free.
-      if (!scrolling) covered = pageCovers(bounds, slot);
-      const visible = placed.visible && !moving && !covered;
-      const next = `${rect},${visible}`;
+      // hidden while it is there. Looked for when nothing moves: the scan is not free.
+      if (!moving) covered = pageCovers(bounds, slot);
+      const state: NativeSlotState = !placed.visible ? "out" : covered ? "covered" : travelling ? "moving" : "shown";
+      const next = `${rect},${state}`;
       if (next === last) return;
       last = next;
-      onPlace(bounds, visible);
+      onPlace(bounds, state === "shown", state);
     });
   };
-  const onScroll = () => {
-    scrolling = true;
+  const nudge = () => {
+    moving = true;
     window.clearTimeout(settle);
     settle = window.setTimeout(() => {
-      scrolling = false;
+      moving = false;
+      lastRect = "";
       place();
     }, 150);
     place();
@@ -166,13 +175,13 @@ export function trackNativeSlot(slot: HTMLElement, onPlace: (bounds: MpvBounds, 
   const observer = new ResizeObserver(place);
   for (let node: HTMLElement | null = slot; node; node = node.parentElement) observer.observe(node);
   window.addEventListener("resize", place);
-  window.addEventListener("scroll", onScroll, true);
+  window.addEventListener("scroll", nudge, true);
   // Menus and sheets open on these; look again at once rather than at the next poll.
   const soon = () => window.setTimeout(place, 0);
   const types = ["pointerdown", "pointerup", "contextmenu", "keydown"];
   for (const type of types) window.addEventListener(type, soon, true);
   // A drag (the floating window, a splitter) moves the slot without a scroll or a resize.
-  const drag = (event: PointerEvent) => { if (event.buttons) place(); };
+  const drag = (event: PointerEvent) => { if (event.buttons) nudge(); };
   window.addEventListener("pointermove", drag, true);
   // A sibling growing above the panel moves the slot without resizing anything watched.
   const poll = window.setInterval(place, 250);
@@ -183,7 +192,7 @@ export function trackNativeSlot(slot: HTMLElement, onPlace: (bounds: MpvBounds, 
     window.clearTimeout(settle);
     observer.disconnect();
     window.removeEventListener("resize", place);
-    window.removeEventListener("scroll", onScroll, true);
+    window.removeEventListener("scroll", nudge, true);
     for (const type of types) window.removeEventListener(type, soon, true);
     window.removeEventListener("pointermove", drag, true);
   };
@@ -254,6 +263,7 @@ export class MpvVideoController {
   private paused: boolean;
   private bounds: MpvBounds;
   private visible = true;
+  private hideTimer = 0;
   private volume: number;
   private unlisten: (() => void) | null = null;
   /** The clock sent last, to send only what mpv could not have predicted from it. */
@@ -351,10 +361,24 @@ export class MpvVideoController {
   }
 
   /** `radius`: the corner radius of the hole, when the box around the picture is rounded. */
-  setBounds(bounds: MpvBounds, visible = true, radius?: number): Promise<void> {
+  /**
+   * `visible: false` hides the view only after NATIVE_VEIL_MS, while the caller's veil fades the
+   * picture to black over it; `immediate` hides it at once (something of the page lies over it).
+   */
+  setBounds(bounds: MpvBounds, visible = true, radius?: number, immediate = false): Promise<void> {
     this.bounds = bounds;
-    this.visible = visible;
     if (radius !== undefined) this.radius = radius;
+    window.clearTimeout(this.hideTimer);
+    this.hideTimer = 0;
+    if (!visible && this.visible && !immediate) {
+      this.hideTimer = window.setTimeout(() => {
+        this.hideTimer = 0;
+        this.visible = false;
+        void this.pushBounds().catch(() => undefined);
+      }, NATIVE_VEIL_MS);
+      return this.pushBounds();
+    }
+    this.visible = visible;
     return this.pushBounds();
   }
 
@@ -391,6 +415,7 @@ export class MpvVideoController {
     this.unlisten?.();
     this.unlisten = null;
     this.hole?.dispose();
+    window.clearTimeout(this.hideTimer);
     const mpv = getBridge().mpv;
     if (mpv && this.generation !== null) void mpv.close(this.generation).catch(() => undefined);
     void this.options.release?.().catch((reason: unknown) => console.warn(asError(reason).message));

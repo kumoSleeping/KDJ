@@ -3240,6 +3240,25 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-pip-float[data-native-player="true"] .kd-local-video-swap {
   display: none;
 }
+/* Black over an mpv picture while it is not shown: it fades rather than blinks (NATIVE_VEIL_MS). */
+.kd-native-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: #000;
+  opacity: 1;
+  transition: opacity 160ms ease;
+  pointer-events: none;
+}
+.kd-native-veil[data-shown="true"] {
+  opacity: 0;
+}
+/* A picture that is shown as soon as its veil appears still fades in. */
+@starting-style {
+  .kd-native-veil[data-shown="true"] {
+    opacity: 1;
+  }
+}
 /* A project drawn by mpv (KdjvMpvPicture): its clips are native views under the canvas's hole. */
 .kd-kdjv-live[data-native="true"],
 .kd-kdjv-live[data-native="true"] .kd-kdjv-live-canvas {

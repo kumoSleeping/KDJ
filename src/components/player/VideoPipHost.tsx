@@ -312,6 +312,10 @@ export function VideoPipHost() {
   const [nativeFallbackSessionKey, setNativeFallbackSessionKey] = useState<string | null>(null);
   // mpv has opened: the stage turns transparent over the hole its picture shows through.
   const [nativeReady, setNativeReady] = useState(false);
+  // The window is being dragged or resized: its mpv picture waits under the veil until it rests
+  // (a native view and the page's hole moving every frame made the drag stutter and smear).
+  const [nativeMoving, setNativeMoving] = useState(false);
+  const nativeMoveRef = useRef({ rect: "", timer: 0 });
   const [videoFullscreen, setVideoFullscreen] = useState(false);
   // The picture's own width / height, once the source has told it. The floating window is the
   // shape of the video it holds, not of a 16:9 frame; a change (metadata arriving, another
@@ -1197,9 +1201,19 @@ export function VideoPipHost() {
     const frame = requestAnimationFrame(() => {
       const bounds = nativeBounds(nativeSlotRef.current);
       if (!cancelled) {
-        const shown = Boolean(showSurface && bounds);
+        const move = nativeMoveRef.current;
+        const rect = bounds ? `${bounds.x},${bounds.y},${bounds.width},${bounds.height}` : "";
+        const moved = move.rect !== "" && rect !== "" && rect !== move.rect;
+        move.rect = rect;
+        if (moved) {
+          window.clearTimeout(move.timer);
+          move.timer = window.setTimeout(() => setNativeMoving(false), 150);
+          setNativeMoving(true);
+        }
+        const shown = Boolean(showSurface && bounds) && !moved && !nativeMoving;
         const radius = docked || videoFullscreen ? 0 : FLOAT_RADIUS_PX;
-        void controller.setBounds(bounds ?? { x: 0, y: 0, width: 0, height: 0 }, shown, radius).catch((reason: unknown) => {
+        // Hidden with the surface: at once. Moving: after the veil has faded in.
+        void controller.setBounds(bounds ?? { x: 0, y: 0, width: 0, height: 0 }, shown, radius, !showSurface).catch((reason: unknown) => {
           if (cancelled || nativePlayerRef.current !== controller) return;
           useVideoPip
             .getState()
@@ -1211,7 +1225,8 @@ export function VideoPipHost() {
       cancelled = true;
       cancelAnimationFrame(frame);
     };
-  }, [floatRect.w, floatRect.h, floatRect.x, floatRect.y, isNativePlayer, showSurface, videoFullscreen, panelBounds, sourceRatio, nativeReady, docked]);
+  }, [floatRect.w, floatRect.h, floatRect.x, floatRect.y, isNativePlayer, showSurface, videoFullscreen, panelBounds, sourceRatio, nativeReady, docked, nativeMoving]);
+  useEffect(() => () => window.clearTimeout(nativeMoveRef.current.timer), []);
 
   // 切走应用（窗口失焦 / 页面隐藏）时，默认把正在播的浮动预览送进系统画中画
   useEffect(() => {
@@ -1888,7 +1903,7 @@ export function VideoPipHost() {
         className={showSurface ? "kd-pip-float" : "kd-pip-shell"}
         data-docked={docked ? "true" : undefined}
         data-fullscreen={showSurface && videoFullscreen ? "true" : undefined}
-        data-native-player={showSurface && ((isNativePlayer && nativeReady) || (live && webVideoOff())) ? "true" : undefined}
+        data-native-player={showSurface && (isNativePlayer || (live && webVideoOff())) ? "true" : undefined}
         style={
           showSurface && docked && panelBounds
             ? { left: panelBounds.x, top: panelBounds.y, width: panelBounds.width, height: panelBounds.height }
@@ -1912,6 +1927,11 @@ export function VideoPipHost() {
               className="kd-pip-native-slot"
               aria-hidden="true"
             />
+          )}
+          {showSurface && (isNativePlayer || (live && webVideoOff())) && (
+            // Black over mpv's picture until it shows, and while the window moves: it fades.
+            <div className="kd-native-veil" aria-hidden="true"
+              data-shown={(isNativePlayer ? nativeReady : true) && !nativeMoving ? "true" : undefined} />
           )}
           <video
             ref={localSwap.bindVideo(0)}
