@@ -128,39 +128,64 @@ export function pageCovers(bounds: MpvBounds, slot: HTMLElement): boolean {
  */
 export function trackNativeSlot(slot: HTMLElement, onPlace: (bounds: MpvBounds, visible: boolean) => void): () => void {
   let last = "";
+  let lastRect = "";
   let frame = 0;
+  let settle = 0;
+  let scrolling = false;
+  let covered = false;
   const place = () => {
     cancelAnimationFrame(frame);
     frame = requestAnimationFrame(() => {
       const placed = nativeSlotBounds(slot);
       const { bounds } = placed;
+      const rect = `${bounds.x},${bounds.y},${bounds.width},${bounds.height}`;
+      // A native view moves a frame or two after the page: while the slot is scrolled along it
+      // would trail behind (smear), so the picture waits, black, until the scrolling stops.
+      const moving = scrolling && lastRect !== "" && rect !== lastRect;
+      lastRect = rect;
       // A menu, sheet or other window over the slot would be cut by the hole: the picture is
       // hidden (the black frame shows) while it is there.
-      const visible = placed.visible && !pageCovers(bounds, slot);
-      const next = `${bounds.x},${bounds.y},${bounds.width},${bounds.height},${visible}`;
+      // Looked for again when not scrolling: a scroll opens no menu, and the scan is not free.
+      if (!scrolling) covered = pageCovers(bounds, slot);
+      const visible = placed.visible && !moving && !covered;
+      const next = `${rect},${visible}`;
       if (next === last) return;
       last = next;
       onPlace(bounds, visible);
     });
   };
+  const onScroll = () => {
+    scrolling = true;
+    window.clearTimeout(settle);
+    settle = window.setTimeout(() => {
+      scrolling = false;
+      place();
+    }, 150);
+    place();
+  };
   const observer = new ResizeObserver(place);
   for (let node: HTMLElement | null = slot; node; node = node.parentElement) observer.observe(node);
   window.addEventListener("resize", place);
-  window.addEventListener("scroll", place, true);
+  window.addEventListener("scroll", onScroll, true);
   // Menus and sheets open on these; look again at once rather than at the next poll.
   const soon = () => window.setTimeout(place, 0);
   const types = ["pointerdown", "pointerup", "contextmenu", "keydown"];
   for (const type of types) window.addEventListener(type, soon, true);
+  // A drag (the floating window, a splitter) moves the slot without a scroll or a resize.
+  const drag = (event: PointerEvent) => { if (event.buttons) place(); };
+  window.addEventListener("pointermove", drag, true);
   // A sibling growing above the panel moves the slot without resizing anything watched.
   const poll = window.setInterval(place, 250);
   place();
   return () => {
     cancelAnimationFrame(frame);
     window.clearInterval(poll);
+    window.clearTimeout(settle);
     observer.disconnect();
     window.removeEventListener("resize", place);
-    window.removeEventListener("scroll", place, true);
+    window.removeEventListener("scroll", onScroll, true);
     for (const type of types) window.removeEventListener(type, soon, true);
+    window.removeEventListener("pointermove", drag, true);
   };
 }
 

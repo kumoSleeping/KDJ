@@ -16,7 +16,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../../lib/api";
 import { MEDIA_SYNC_EVENT, type MediaSyncDetail } from "../../lib/mediaSync";
 import { clipAlpha, clipBox, clipSpeed, preparedClips, sourceTime, type LiveClip } from "../../lib/kdjvLive";
-import { MpvVideoController, nativeSlotBounds, pageCovers, type MpvBounds, type MpvClock } from "../../lib/mpvPlayer";
+import { MpvVideoController, trackNativeSlot, type MpvBounds, type MpvClock } from "../../lib/mpvPlayer";
 import { createVideoHole } from "../../lib/videoHoles";
 import { projectTime, type Heard, type LiveTransport } from "./KdjvLivePicture";
 import type { KdjvLive } from "../../types";
@@ -91,15 +91,21 @@ export function KdjvMpvPicture({ trackId, project, onTransport }: {
     window.addEventListener(MEDIA_SYNC_EVENT, onSync);
     const hole = createVideoHole();
     const tracks = Math.max(0, ...project.clips.map(c => c.track)) + 1;
+    // Where the canvas is and whether it may show, kept by the tracker (it measures on changes,
+    // scrolls and a slow poll): measuring the page on every frame made scrolling stutter.
+    const node = canvas.current;
+    let placed: { bounds: MpvBounds; visible: boolean } = { bounds: { x: 0, y: 0, width: 0, height: 0 }, visible: false };
+    const stopTracking = node
+      ? trackNativeSlot(node, (bounds, visible) => {
+          placed = { bounds, visible };
+          hole.set(visible ? bounds : null);
+        })
+      : () => undefined;
     let frame = 0, lastReport = -Infinity;
     const tick = (now: number) => {
       frame = requestAnimationFrame(tick);
       const t = projectTime(trackId, heard, known);
-      const node = canvas.current;
-      if (!node) return;
-      const placed = nativeSlotBounds(node);
-      const shown = placed.visible && !pageCovers(placed.bounds, node);
-      hole.set(shown ? placed.bounds : null);
+      const shown = placed.visible;
 
       const wanted = new Set<string>();
       for (const n of preparedClips(project, t.position, t.playing)) {
@@ -172,6 +178,7 @@ export function KdjvMpvPicture({ trackId, project, onTransport }: {
     return () => {
       cancelAnimationFrame(frame);
       window.removeEventListener(MEDIA_SYNC_EVENT, onSync);
+      stopTracking();
       hole.dispose();
     };
   }, [trackId, project]);

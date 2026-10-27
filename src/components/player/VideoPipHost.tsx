@@ -432,7 +432,9 @@ export function VideoPipHost() {
       minWidth: 0,
     },
     // A transform cannot carry the native view of mpv's picture.
-    motion: !isNativePlayer && !videoFullscreen,
+    // mpv's pictures (a video's, a project's clips) and the page's holes over them do not follow
+    // a transform: the window moves without one while they are in it.
+    motion: !isNativePlayer && !(live && webVideoOff()) && !videoFullscreen,
     contentKey: session ? sessionKey(session) : "",
     title: session?.title ?? "",
     picture: activeVideo,
@@ -760,6 +762,12 @@ export function VideoPipHost() {
     if (projectSession(next)) {
       pauseHostVideos();
       localSwap.unload();
+      // The video played before (mpv) goes too: left open it stayed on screen under the project.
+      nativePlayerRef.current?.dispose();
+      nativePlayerRef.current = null;
+      nativeReadyKeyRef.current = null;
+      nativeAutoPlayKeyRef.current = null;
+      setNativeReady(false);
       loadedKeyRef.current = null;
       if (next.source === "local") ensureProjectLive(next.trackId);
       return;

@@ -574,6 +574,31 @@ mod macos {
         }
     }
 
+    /// A black view under the whole WebView, below every video view: a hole the page leaves where
+    /// no picture is (yet) shows black, never the window behind the app. Made once. Main thread only.
+    unsafe fn ensure_backing(webview: *mut AnyObject, superview: *mut AnyObject) {
+        static BACKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        if BACKING.load(Ordering::Relaxed) != 0 {
+            return;
+        }
+        unsafe {
+            let frame: CGRect = msg_send![webview, frame];
+            let view: *mut AnyObject = msg_send![class!(NSView), alloc];
+            let view: *mut AnyObject = msg_send![view, initWithFrame: frame];
+            let _: () = msg_send![view, setWantsLayer: true];
+            // Width and height follow the window (NSViewWidthSizable | NSViewHeightSizable).
+            let _: () = msg_send![view, setAutoresizingMask: 18usize];
+            let layer: *mut AnyObject = msg_send![view, layer];
+            let black: *mut AnyObject = msg_send![class!(NSColor), blackColor];
+            // A CGColorRef (a CF object, so KVC takes it as an id).
+            let color: *mut c_void = msg_send![black, CGColor];
+            let key: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c"backgroundColor".as_ptr()];
+            let _: () = msg_send![layer, setValue: color.cast::<AnyObject>(), forKey: key];
+            let _: () = msg_send![superview, addSubview: view, positioned: NS_WINDOW_BELOW, relativeTo: std::ptr::null_mut::<AnyObject>()];
+            BACKING.store(view as usize, Ordering::Relaxed);
+        }
+    }
+
     /// Creates the view inside the main WKWebView and its OpenGL context. Main thread only.
     unsafe fn create_view(webview: *mut AnyObject) -> Result<(MainObjects, usize), String> {
         unsafe {
@@ -614,6 +639,7 @@ mod macos {
                 let _: () = msg_send![context, release];
                 return Err("主界面尚未放进窗口".into());
             }
+            ensure_backing(webview, superview);
             let _: () = msg_send![superview, addSubview: view, positioned: NS_WINDOW_BELOW, relativeTo: webview];
             // The page shows the video through the holes it leaves (videoHoles.ts).
             let no: *mut AnyObject = msg_send![class!(NSNumber), numberWithBool: false];
