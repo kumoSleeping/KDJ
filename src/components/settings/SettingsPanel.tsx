@@ -28,6 +28,7 @@ import { chooseAutoAnalysisMode } from "../../lib/autoAnalyze";
 import { resolveAutoAnalysisMode } from "../../lib/autoAnalysisMode";
 import { getBridge } from "../../lib/bridge";
 import { useMpvAvailable, webVideoOff } from "../../lib/mpvPlayer";
+import { codecDecodeAvailable, setProjectPicture, useProjectPicture } from "../../lib/projectPicture";
 import { formatBytes } from "../../lib/format";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
@@ -274,6 +275,7 @@ export function SettingsPanel({ preferences = false, page }: {
   const on = (id: SettingsPage) => !page || page === id;
   const settings = useAppStore((state) => state.settings);
   const mpvAvailable = useMpvAvailable();
+  const projectPicture = useProjectPicture();
   const saveSettings = useAppStore((state) => state.saveSettings);
   const [appFontScale, setFontScale] = useState(() => Number.parseFloat(document.documentElement.style.fontSize) || readAppFontScale());
   useEffect(() => {
@@ -635,6 +637,18 @@ export function SettingsPanel({ preferences = false, page }: {
                   onChange={(next) => void saveSettings({
                     video_player: next,
                   }).catch(() => undefined)}
+                />
+              )}
+              {webVideoOff() && codecDecodeAvailable() && (
+                <CycleToggle
+                  label="工程画面"
+                  value={projectPicture}
+                  options={[
+                    { id: "codec", text: "WebCodecs" },
+                    { id: "mpv", text: "mpv" },
+                  ]}
+                  title="剪辑和 VJ 工程播放时的画面。WebCodecs 用系统解码器在页面里作画；mpv 是叠在页面下的原生视图。只记在这台电脑上。"
+                  onChange={(next) => setProjectPicture(next)}
                 />
               )}
               <Switch

@@ -27,6 +27,8 @@ import { ensureProjectLive, useKdjvLive } from "../../lib/kdjvPlay";
 import { isProjectTrack } from "../../lib/format";
 import { KdjvLivePicture } from "../player/KdjvLivePicture";
 import { KdjvMpvPicture } from "../player/KdjvMpvPicture";
+import { KdjvCodecPicture } from "../player/KdjvCodecPicture";
+import { projectPictureNative, useProjectPicture } from "../../lib/projectPicture";
 import { PanelErrorBoundary } from "../RootErrorBoundary";
 import { playTrack } from "./TrackTable";
 import {
@@ -127,8 +129,10 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   // macOS: always mpv, no WebView fallback (webVideoOff); a refused file shows its error.
   const useMpv = (webVideoOff() || (mpvReady && videoPlayer === "mpv" && mpvRefused !== track.id))
     && !hidden && !live && !project && usesLocalVideoDeviceClock();
-  // A project's live picture drawn by mpv (KdjvMpvPicture) needs the same outside controls.
-  const liveNative = Boolean(live) && !hidden && webVideoOff();
+  // A project's live picture drawn by mpv (KdjvMpvPicture) needs the same outside controls;
+  // drawn with WebCodecs (KdjvCodecPicture) it is part of the page.
+  const pictureChoice = useProjectPicture();
+  const liveNative = Boolean(live) && !hidden && projectPictureNative(pictureChoice);
   const nativeChrome = useMpv || liveNative;
   const mpvSlotRef = useRef<HTMLDivElement | null>(null);
   const mpvRef = useRef<MpvVideoController | null>(null);
@@ -532,12 +536,17 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
         ))}
         {live && !hidden && (
           <PanelErrorBoundary name="工程画面" turn={track.id}>
-            {webVideoOff()
+            {projectPictureNative(pictureChoice)
               ? <KdjvMpvPicture trackId={track.id} project={live} onTransport={transport => {
                   if (scrubPosition.current === null) setPosition(transport.position);
                   setPlaying(transport.playing);
                 }} />
-              : <KdjvLivePicture trackId={track.id} project={live} onTransport={transport => {
+              : webVideoOff()
+                ? <KdjvCodecPicture trackId={track.id} project={live} onTransport={transport => {
+                  if (scrubPosition.current === null) setPosition(transport.position);
+                  setPlaying(transport.playing);
+                }} />
+                : <KdjvLivePicture trackId={track.id} project={live} onTransport={transport => {
                   if (scrubPosition.current === null) setPosition(transport.position);
                   setPlaying(transport.playing);
                 }} />}

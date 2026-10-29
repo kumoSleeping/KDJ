@@ -48,6 +48,8 @@ import { ensureProjectLive, useKdjvLive } from "../../lib/kdjvPlay";
 import { isProjectTrack } from "../../lib/format";
 import { KdjvLivePicture } from "./KdjvLivePicture";
 import { KdjvMpvPicture } from "./KdjvMpvPicture";
+import { KdjvCodecPicture } from "./KdjvCodecPicture";
+import { projectPictureNative, useProjectPicture } from "../../lib/projectPicture";
 import { PanelErrorBoundary } from "../RootErrorBoundary";
 import {
   MpvVideoController,
@@ -378,6 +380,9 @@ export function VideoPipHost() {
   const isLocal = session?.source === "local";
   // A project playing from its sound: its picture is drawn live, in the canvas's shape.
   const live = useKdjvLive(state => session?.source === "local" ? state.live[session.trackId] : undefined);
+  // A project drawn by mpv's native views (not WebCodecs in the page) needs the native window's ways.
+  const pictureChoice = useProjectPicture();
+  const liveNative = Boolean(live) && projectPictureNative(pictureChoice);
   useEffect(() => {
     if (!live) return;
     setSourceRatio(live.width / live.height);
@@ -435,7 +440,7 @@ export function VideoPipHost() {
     // A transform cannot carry the native view of mpv's picture.
     // mpv's pictures (a video's, a project's clips) and the page's holes over them do not follow
     // a transform: the window moves without one while they are in it.
-    motion: !isNativePlayer && !(live && webVideoOff()) && !videoFullscreen,
+    motion: !isNativePlayer && !liveNative && !videoFullscreen,
     contentKey: session ? sessionKey(session) : "",
     title: session?.title ?? "",
     picture: activeVideo,
@@ -1894,7 +1899,7 @@ export function VideoPipHost() {
         className={showSurface ? "kd-pip-float" : "kd-pip-shell"}
         data-docked={docked ? "true" : undefined}
         data-fullscreen={showSurface && videoFullscreen ? "true" : undefined}
-        data-native-player={showSurface && (isNativePlayer || (live && webVideoOff())) ? "true" : undefined}
+        data-native-player={showSurface && (isNativePlayer || liveNative) ? "true" : undefined}
         style={
           showSurface && docked && panelBounds
             ? { left: panelBounds.x, top: panelBounds.y, width: panelBounds.width, height: panelBounds.height }
@@ -1919,7 +1924,7 @@ export function VideoPipHost() {
               aria-hidden="true"
             />
           )}
-          {showSurface && (isNativePlayer || (live && webVideoOff())) && (
+          {showSurface && (isNativePlayer || liveNative) && (
             // Black over mpv's picture until its first frame can show; then it fades away.
             <div className="kd-native-veil" aria-hidden="true"
               data-shown={isNativePlayer ? (nativeReady ? "true" : undefined) : "true"} />
@@ -1946,13 +1951,19 @@ export function VideoPipHost() {
           />
           {live && showSurface && session?.source === "local" && (
             <PanelErrorBoundary name="工程画面" turn={session.trackId}>
-              {webVideoOff()
+              {liveNative
                 ? <KdjvMpvPicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
                     const pip = useVideoPip.getState();
                     if (pendingScrubRef.current === null) pip.setPosition(position);
                     if (pip.playing !== playing) pip.setPlaying(playing);
                   }} />
-                : <KdjvLivePicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
+                : webVideoOff()
+                  ? <KdjvCodecPicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
+                    const pip = useVideoPip.getState();
+                    if (pendingScrubRef.current === null) pip.setPosition(position);
+                    if (pip.playing !== playing) pip.setPlaying(playing);
+                  }} />
+                  : <KdjvLivePicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
                     const pip = useVideoPip.getState();
                     if (pendingScrubRef.current === null) pip.setPosition(position);
                     if (pip.playing !== playing) pip.setPlaying(playing);

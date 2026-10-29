@@ -7907,3 +7907,11 @@ html:root:not([data-theme-pack]) .kd-list-row:is([aria-selected="true"]:not([dat
 }
 html:root[data-theme-pack="sakulaptop98"] .kd-list-row[aria-selected="true"] { background: #edb4ce !important; }
 
+/* A project drawn with WebCodecs (KdjvCodecPicture): one canvas filling its box. */
+.kd-kdjv-codec-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
