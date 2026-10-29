@@ -21,6 +21,13 @@ import { projectTime, type Heard, type LiveTransport } from "./KdjvLivePicture";
 import type { KdjvLive } from "../../types";
 import type { VideoSample } from "mediabunny";
 
+/** How long the picture already drawn stays while a clip jumped into has no frame yet. */
+const KEEP_PICTURE_MS = 500;
+
+function decodersFailed(decoder: ClipDecoder | undefined): boolean {
+  return Boolean(decoder?.clip.failed);
+}
+
 interface ClipDecoder {
   n: number;
   clip: CodecClip;
@@ -42,6 +49,8 @@ function drawClip(ctx: CanvasRenderingContext2D, project: KdjvLive, c: LiveClip,
   );
 }
 
+let instances = 0;
+
 export function KdjvCodecPicture({ trackId, project, onTransport }: {
   trackId: number;
   project: KdjvLive;
@@ -57,6 +66,8 @@ export function KdjvCodecPicture({ trackId, project, onTransport }: {
   // Kept across edits of the project: a clip still drawn keeps its decoder.
   const decoders = useRef(new Map<string, ClipDecoder>());
   const images = useRef(new Map<number, HTMLImageElement>());
+  // Tells two pictures of one project apart in the playback log (the window and the library panel).
+  const [instance] = useState(() => `${++instances}`);
 
   useLayoutEffect(() => {
     const node = box.current;
@@ -84,7 +95,7 @@ export function KdjvCodecPicture({ trackId, project, onTransport }: {
     // Drawn bottom first: the last track, and within a track the earlier clip under the later.
     const order = (a: number, b: number) =>
       (project.clips[b].track - project.clips[a].track) || (a - b);
-    let frame = 0, lastReport = -Infinity, drawn = "";
+    let frame = 0, lastReport = -Infinity, drawn = "", waitingSince = 0;
     const tick = (now: number) => {
       frame = requestAnimationFrame(tick);
       const t = projectTime(trackId, heard, known);
@@ -102,7 +113,7 @@ export function KdjvCodecPicture({ trackId, project, onTransport }: {
         wanted.add(id);
         let decoder = decoders.current.get(id);
         if (!decoder) {
-          decoder = { n, clip: new CodecClip(url, `${n}`, reason => console.warn(`工程素材 ${n} 无法播放：${reason.message}`)) };
+          decoder = { n, clip: new CodecClip(url, `${instance}:${n}`, reason => console.warn(`工程素材 ${n} 无法播放：${reason.message}`)) };
           decoders.current.set(id, decoder);
         }
         byClip.set(n, decoder);
@@ -133,7 +144,22 @@ export function KdjvCodecPicture({ trackId, project, onTransport }: {
         decoders.current.delete(id);
       }
 
-      if (node && ctx) {
+      // A clip of now whose first frame is not there yet, with nothing held in its place (a jump into
+      // it): the picture already drawn stays a moment instead of the canvas going black.
+      const lacking = [...byClip.keys()].some(n => {
+        const c = project.clips[n];
+        const local = t.position - c.at;
+        return local >= 0 && local < c.length && !frames.has(n) && clipAlpha(c, local) > 0
+          && !held.some(h => project.clips[h].track === c.track) && !decodersFailed(byClip.get(n));
+      });
+      if (lacking && drawn) {
+        waitingSince ||= now;
+      } else {
+        waitingSince = 0;
+      }
+      const keepPicture = waitingSince > 0 && now - waitingSince < KEEP_PICTURE_MS;
+
+      if (node && ctx && !keepPicture) {
         const width = Math.max(1, Math.round(sized.current.width * devicePixelRatio));
         const height = Math.max(1, Math.round(sized.current.height * devicePixelRatio));
         const shown: [number, VideoSample, number][] = [];
@@ -171,7 +197,7 @@ export function KdjvCodecPicture({ trackId, project, onTransport }: {
       cancelAnimationFrame(frame);
       window.removeEventListener(MEDIA_SYNC_EVENT, onSync);
     };
-  }, [trackId, project]);
+  }, [trackId, project, instance]);
 
   useEffect(() => () => {
     for (const decoder of decoders.current.values()) decoder.clip.dispose();
