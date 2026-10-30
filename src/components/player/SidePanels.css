@@ -47,6 +47,9 @@
   max-height: none;
   resize: none;
 }
+/* The narrow layout's sheet holds the column inside this wrapper (it gives way to the visualizer
+   configuration): without a height the task list in it was laid out 2px tall. */
+.kd-aside-restorable { height: 100%; }
 .kd-activity-panel-host { height: 100%; min-height: 0; }
 .kd-activity-panel-host[hidden],
 .kd-split-aside[hidden],
