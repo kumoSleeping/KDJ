@@ -782,6 +782,20 @@ impl NeteaseProvider {
 }
 
 impl NeteaseProvider {
+    /// 这次没核验出结果的账号：凭证还在，身份取上次存下的。
+    fn unchecked_account(&self, detail: &str) -> Account {
+        let mut account = Account::new(Platform::Wyy, LABEL, AccountState::Unknown, "");
+        account.detail = truncate(detail, 160);
+        let cached_profile = self.client.profile();
+        if let Some(account_key) = cached_account_key(&cached_profile) {
+            account.account_key = account_key;
+        }
+        if let Some(nickname) = cached_nickname(&cached_profile) {
+            account.nickname = nickname;
+        }
+        account
+    }
+
     /// 网页登录的 Cookie 换掉现有登录；验证不过就把原来的放回去。`source` 是它们的来处
     /// （某个浏览器的配置，或用户导出的内容），只用在给用户看的话里。
     async fn accept_web_login(
@@ -846,25 +860,23 @@ impl MusicProvider for NeteaseProvider {
             Ok(false) => {}
             Err(error) => tracing::warn!("网易云续登录失败：{error:#}"),
         }
-        let status = match self
+        let mut status = self
             .client
             .weapi("/weapi/w/nuser/account/get", Map::new())
-            .await
-        {
+            .await;
+        // 一次「没登录」不足以把人踢下线：刚续过的登录，网易云那边可能一时没对上，过一会再问
+        // 就是登录着的。启动时侧栏先挂出「重新登录」、一会儿又自己好了，就是这一次。
+        if status.as_ref().is_ok_and(|status| login_answer(status) == LoginAnswer::SignedOut) {
+            tokio::time::sleep(SIGNED_OUT_RECHECK).await;
+            status = self
+                .client
+                .weapi("/weapi/w/nuser/account/get", Map::new())
+                .await;
+        }
+        let status = match status {
             Ok(status) => status,
-            Err(err) => {
-                // 网络抖动不能把"已登录"误报成掉线，降级成 unknown 让前端保持原样
-                let mut account = Account::new(Platform::Wyy, LABEL, AccountState::Unknown, "");
-                account.detail = truncate(&format!("登录态检查失败：{err}"), 160);
-                let cached_profile = self.client.profile();
-                if let Some(account_key) = cached_account_key(&cached_profile) {
-                    account.account_key = account_key;
-                }
-                if let Some(nickname) = cached_nickname(&cached_profile) {
-                    account.nickname = nickname;
-                }
-                return account;
-            }
+            // 网络抖动不能把"已登录"误报成掉线，降级成 unknown 让前端保持原样
+            Err(err) => return self.unchecked_account(&format!("登录态检查失败：{err}")),
         };
 
         let data = status.get("data").unwrap_or(&status);
@@ -901,12 +913,16 @@ impl MusicProvider for NeteaseProvider {
                 return account;
             }
         }
-        Account::new(
-            Platform::Wyy,
-            LABEL,
-            AccountState::Expired,
-            "登录态已失效，请重新扫码",
-        )
+        match login_answer(&status) {
+            LoginAnswer::SignedOut => Account::new(
+                Platform::Wyy,
+                LABEL,
+                AccountState::Expired,
+                "登录态已失效，请重新扫码",
+            ),
+            // 限流、风控之类的回答没说登录怎样，和网络失败一样不算失效。
+            _ => self.unchecked_account(&format!("登录态检查没有结果：{}", snippet_of(&status))),
+        }
     }
 
     async fn cached_account(&self) -> Account {
@@ -2050,6 +2066,40 @@ fn or_default(message: String, fallback: &str) -> String {
     }
 }
 
+/// 第一次问到「没登录」之后，隔多久再问一次才认它失效。
+const SIGNED_OUT_RECHECK: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// `/weapi/w/nuser/account/get` 对登录的回答。
+#[derive(Debug, PartialEq, Eq)]
+enum LoginAnswer {
+    SignedIn,
+    /// 网易云明说没有登录：code 301，或者 code 200 而没有 profile（未登录时它给游客账号或空）。
+    SignedOut,
+    /// 别的回答（限流、风控、服务端错误）：说明不了登录怎样。
+    Other,
+}
+
+fn login_answer(status: &Value) -> LoginAnswer {
+    let data = status.get("data").unwrap_or(status);
+    let profile = data.get("profile").filter(|profile| !profile.is_null());
+    if profile.is_some() && data.pointer("/account/id").is_some() {
+        return LoginAnswer::SignedIn;
+    }
+    let code = status
+        .get("code")
+        .or_else(|| data.get("code"))
+        .and_then(Value::as_i64);
+    match code {
+        Some(301) => LoginAnswer::SignedOut,
+        Some(200) if profile.is_none() => LoginAnswer::SignedOut,
+        _ => LoginAnswer::Other,
+    }
+}
+
+fn snippet_of(status: &Value) -> String {
+    truncate(&status.to_string(), 120)
+}
+
 fn truncate(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
@@ -2089,6 +2139,27 @@ fn new_session_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_explicit_answer_signs_the_account_out() {
+        let signed_in = json!({"code": 200, "account": {"id": 7}, "profile": {"nickname": "DJ"}});
+        assert_eq!(login_answer(&signed_in), LoginAnswer::SignedIn);
+        assert_eq!(login_answer(&json!({"data": signed_in})), LoginAnswer::SignedIn);
+        assert_eq!(login_answer(&json!({"code": 301})), LoginAnswer::SignedOut);
+        assert_eq!(
+            login_answer(&json!({"code": 200, "account": null, "profile": null})),
+            LoginAnswer::SignedOut
+        );
+        assert_eq!(
+            login_answer(&json!({"code": 200, "account": {"id": 9, "anonimousUser": true}, "profile": null})),
+            LoginAnswer::SignedOut,
+            "游客账号不是登录"
+        );
+        // 限流、风控、服务端错误说明不了登录怎样。
+        assert_eq!(login_answer(&json!({"code": -460, "message": "Cheating"})), LoginAnswer::Other);
+        assert_eq!(login_answer(&json!({"code": 405, "msg": "操作频繁"})), LoginAnswer::Other);
+        assert_eq!(login_answer(&json!({})), LoginAnswer::Other);
+    }
 
     #[test]
     fn new_lyric_response_prefers_word_synchronized_extra_layers() {
