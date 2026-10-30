@@ -212,3 +212,21 @@ fn measured_priming_matches_audiotoolbox() {
         assert!((opened.priming as i64 - reported as i64).abs() <= 1, "{rate}/{channels}: measured {} reported {reported}", opened.priming);
     }
 }
+
+/// `decode_played` starts where FFmpeg (and players) start an M4A: after its priming.
+#[test]
+fn played_decode_skips_the_priming_like_ffmpeg() {
+    let Some(d) = dir("played") else { return };
+    let song = d.0.join("click.m4a");
+    ffmpeg(&["-f", "lavfi", "-i", "aevalsrc='if(between(t,1,1.01),0.9*sin(2*PI*2000*t),0)':s=44100:c=stereo", "-t", "3", "-c:a", "aac", "-b:a", "192k", song.to_str().unwrap()]);
+    let onset = |played: bool| {
+        let mut mono = Vec::new();
+        let mut take = |pcm: &[f32]| { mono.extend(pcm.chunks(2).map(|f| f[0])); Ok(()) };
+        if played { kdj_media::pcm::decode_played(&song, Some(8000), None, &never, &mut take).unwrap(); } else { kdj_media::pcm::decode(&song, Some(8000), None, &never, &mut take).unwrap(); }
+        mono.iter().position(|s| s.abs() > 0.3).unwrap() as i64
+    };
+    let (played, raw) = (onset(true), onset(false));
+    assert!((played - 8000).abs() <= 3, "played onset {played}");
+    // The raw decode keeps FFmpeg's 1024-sample priming: 186 samples at 8 kHz.
+    assert!((raw - played - 186).abs() <= 3, "raw {raw} played {played}");
+}

@@ -52,6 +52,26 @@ fn open(path: &Path) -> Result<Opened> {
 /// when `None`) with the source's channel count capped at two. `frames` limits the
 /// output length; returns the frames delivered. `cancelled` is polled between packets.
 pub fn decode(path: &Path, rate: Option<u32>, frames: Option<u64>, cancelled: &dyn Fn() -> bool, consume: &mut dyn FnMut(&[f32]) -> Result<()>) -> Result<u64> {
+    decode_from(path, rate, frames, 0, cancelled, consume)
+}
+
+/// As [`decode`], but from where players start the track: an MP4's edit list (the encoder
+/// priming) is skipped, as FFmpeg skips it. For comparing a song with what is heard.
+pub fn decode_played(path: &Path, rate: Option<u32>, frames: Option<u64>, cancelled: &dyn Fn() -> bool, consume: &mut dyn FnMut(&[f32]) -> Result<()>) -> Result<u64> {
+    let skip = crate::mp4::read::looks_like_mp4(path)
+        .then(|| crate::mp4::read::Movie::open(path).ok())
+        .flatten()
+        .and_then(|movie| {
+            let track = movie.audio()?;
+            let start = track.edit_media_time?.max(0) as u128;
+            let source = inspect(path).ok()?.sample_rate;
+            Some((start * rate.unwrap_or(source) as u128 / track.timescale.max(1) as u128) as u64)
+        })
+        .unwrap_or(0);
+    decode_from(path, rate, frames, skip, cancelled, consume)
+}
+
+fn decode_from(path: &Path, rate: Option<u32>, frames: Option<u64>, skip: u64, cancelled: &dyn Fn() -> bool, consume: &mut dyn FnMut(&[f32]) -> Result<()>) -> Result<u64> {
     let (mut format, (track, source)) = open(path)?;
     let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
     let channels = source.channels as usize;
@@ -61,7 +81,7 @@ pub fn decode(path: &Path, rate: Option<u32>, frames: Option<u64>, cancelled: &d
     } else {
         None
     };
-    let mut sink = Sink { consume, left: frames.unwrap_or(u64::MAX), delivered: 0, channels, skip: resampler.as_ref().map_or(0, |r| r.output_delay()) };
+    let mut sink = Sink { consume, left: frames.unwrap_or(u64::MAX), delivered: 0, channels, skip: resampler.as_ref().map_or(0, |r| r.output_delay()) + skip as usize, played: skip };
     let mut pending: Vec<f32> = Vec::new();
     let mut input_frames = 0u64;
     let mut buffer: Option<SampleBuffer<f32>> = None;
@@ -121,7 +141,7 @@ pub fn decode(path: &Path, rate: Option<u32>, frames: Option<u64>, cancelled: &d
     if let Some(r) = resampler.as_mut() {
         // The tail, then silence until the resampler's delay has come out.
         let expected = (input_frames as u128 * target as u128 / source.sample_rate as u128) as u64;
-        sink.left = sink.left.min(expected.saturating_sub(sink.delivered));
+        sink.left = sink.left.min(expected.saturating_sub(sink.delivered + sink.played));
         let mut tail = std::mem::take(&mut pending);
         while sink.left > 0 {
             let partial = tail.len() / channels;
@@ -141,8 +161,10 @@ struct Sink<'a> {
     left: u64,
     delivered: u64,
     channels: usize,
-    /// Leading resampler delay still to drop.
+    /// Leading resampler delay and requested skip still to drop.
     skip: usize,
+    /// Frames of the requested skip, which count against the source's length.
+    played: u64,
 }
 
 impl Sink<'_> {
