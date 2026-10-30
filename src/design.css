@@ -5977,6 +5977,57 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
       "wave" !important;
   }
 }
+/* 竖长窗口里键各有各的位置（PlayerBar.tsx）：换面键在音量右边、收起键在时间右边，都在
+   走带那一层；工具键（歌词、小窗……）或 EQ 的 KEY / BPM 读数接在曲名那一行的右边。于是
+   工具那一面在下面什么也不剩，那一层整个去掉；EQ 那一面只剩旋钮和 Tempo。 */
+.kd-app[data-tall="true"] .kd-player[data-face="tools"] {
+  grid-template-rows: auto auto auto !important;
+  grid-template-areas:
+    "controls controls"
+    "now now"
+    "wave wave" !important;
+}
+@media (max-width: 560px) {
+  .kd-app[data-tall="true"] .kd-player[data-face="tools"] {
+    grid-template-areas:
+      "controls"
+      "now"
+      "wave" !important;
+  }
+}
+.kd-app[data-tall="true"] .kd-player[data-face="tools"] .kd-player-trailing { display: none; }
+.kd-app[data-tall="true"] .kd-player-leading {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.kd-app[data-tall="true"] .kd-player-leading > .kd-player-deck {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.kd-player-now-keys {
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+.kd-player-now-keys .kd-player-step,
+.kd-app[data-tall="true"] .kd-player-transport-side .kd-player-step {
+  flex: none;
+  width: 1.7rem;
+  height: 1.7rem;
+  margin: 0;
+}
+.kd-player-now-keys .kd-player-step > svg,
+.kd-app[data-tall="true"] .kd-player-transport-side .kd-player-step > svg {
+  width: 14px;
+  height: 14px;
+}
+.kd-player-now-keys .kd-player-float-tools {
+  gap: 0;
+  margin: 0;
+}
+.kd-player-now-keys .kd-player-auto-advance,
+.kd-player-now-keys .kd-player-lyricsbtn { width: 1.45rem; }
 
 /* 「正在播」那一块的三层都必须是块级。
    它们在 JSX 里是 <span>，而**行内元素不吃 overflow/width/text-overflow**——

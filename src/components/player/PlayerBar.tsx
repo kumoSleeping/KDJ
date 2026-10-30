@@ -194,7 +194,8 @@ import { SONG_SWAP_IN_MS, SONG_SWAP_OUT_MS } from "../../lib/songSwapMotion";
 import "./DeckSongSwap.css";
 import { PlayerVolume } from "./PlayerVolume";
 import { SlidePages } from "../drawer/SlidePages";
-import { PLAYER_BAR_FACES, usePlayerBarFace, type PlayerBarFace } from "../../lib/playerBarFace";
+import { PLAYER_BAR_FACES, usePlayerBarFace, usePlayerBarReadouts, type PlayerBarFace } from "../../lib/playerBarFace";
+import { useLayoutSignals } from "../../lib/useLayoutMode";
 import { tracePlayback, watchMainThread } from "../../lib/playbackTrace";
 import { streamWaveformTrace } from "../../lib/streamWaveformTrace";
 import { nowPlayingInfoVisible, useNowPlayingInfo } from "../../lib/nowPlayingInfo";
@@ -660,6 +661,9 @@ export function PlayerBar() {
   const desktopLyricsOn = useLyricsPrefs((state) => state.desktopEnabled);
   const [lyricsMenu, setLyricsMenu] = useState<{ x: number; y: number; top: number; trackId: number | null } | null>(null);
   const barFace = usePlayerBarFace((state) => state.face);
+  // A tall window lays the bar out in rows: the keys move to the transport and title rows.
+  const { tall } = useLayoutSignals();
+  const setReadoutsSlot = usePlayerBarReadouts((state) => state.setSlot);
   const setDesktopLyricsOn = useLyricsPrefs((state) => state.setDesktopEnabled);
   const canDesktopLyrics = Boolean(window.kdj?.desktopLyrics);
   const pipMode = useVideoPip((state) => state.mode);
@@ -4808,9 +4812,114 @@ export function PlayerBar() {
   };
   loadPerformanceTrackRef.current = installPerformanceTrack;
 
+  // The keys of the song and of what plays next: the tools face of a wide window, the end of the
+  // title row of a tall one (with the EQ face, the readouts are there instead).
+  const toolKeys = (
+    <>
+      <div className="kd-player-float-tools">
+        <BarLyricsEntry />
+        {/* 歌词和弹窗各管各的：歌词键只开关悬浮歌词，弹窗键只开关画面小窗。 */}
+        {canDesktopLyrics && !video ? (
+          <button
+            type="button"
+            className="kd-player-step kd-player-lyricsbtn"
+            aria-label={desktopLyricsOn ? "关闭悬浮歌词" : "打开悬浮歌词"}
+            aria-pressed={desktopLyricsOn}
+            aria-haspopup="menu"
+            aria-expanded={lyricsMenu !== null && lyricsMenu.trackId === (displayTrack?.id ?? null)}
+            data-on={desktopLyricsOn ? "true" : undefined}
+            title={desktopLyricsOn ? "悬浮歌词：开。点一下关闭；右键设置歌词" : "打开悬浮歌词；右键设置歌词"}
+            onContextMenu={(event) => {
+              if (networkPreview) return;
+              event.preventDefault();
+              setLyricsMenu({ x: event.clientX, y: event.clientY, top: event.currentTarget.getBoundingClientRect().top, trackId: displayTrack?.id ?? null });
+            }}
+            onKeyDown={(event) => {
+              if (networkPreview || (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10"))) return;
+              event.preventDefault();
+              const rect = event.currentTarget.getBoundingClientRect();
+              setLyricsMenu({ x: rect.left, y: rect.bottom + 4, top: rect.top, trackId: displayTrack?.id ?? null });
+            }}
+            onClick={() => void toggleLyricsOverlay()}
+          >
+            <TextQuote size={13} />
+          </button>
+        ) : null}
+        {video || popupTrack ? (
+          <button
+            type="button"
+            className="kd-player-step kd-player-popupbtn"
+            aria-label={
+              video
+                ? popupOn ? "关闭视频小窗" : "打开视频小窗"
+                : popupOn ? "关闭可视化小窗" : "打开可视化小窗"
+            }
+            aria-pressed={popupOn}
+            data-on={popupOn ? "true" : undefined}
+            title={
+              video
+                ? popupOn ? "视频小窗：开。点一下关闭" : "在小窗里播放视频"
+                : popupOn ? "可视化小窗：开。点一下关闭" : "在小窗里显示可视化"
+            }
+            onClick={togglePopup}
+          >
+            <PictureInPicture2 size={13} />
+          </button>
+        ) : null}
+      </div>
+      <button
+        type="button"
+        className="kd-player-step kd-player-auto-advance"
+        aria-label={autoAdvance ? "关闭自动切歌" : "开启自动切歌"}
+        aria-pressed={autoAdvance}
+        data-on={autoAdvance ? "true" : undefined}
+        title={
+          mobileNative
+            ? autoAdvance
+              ? "自动切歌：开。曲目结束后继续播放；移动端使用普通切换"
+              : "自动切歌：关。曲目结束后停止"
+            : autoAdvance
+              ? `自动切歌：开。双击、下一首和曲目结束都会使用 ${djBars} 小节过渡`
+              : "自动切歌：关。显式换歌直接切换，曲目结束后停止"
+        }
+        onClick={toggleAutoAdvance}
+      >
+        <Blend size={14} />
+      </button>
+      <BarModeButton />
+      {/* A library song is edited where an online one is downloaded: the two never meet. */}
+      {!pipDriving && displayTrack && usesLocalLibraryRecord(displayTrack) ? <BarMetaEntry trackId={displayTrack.id} /> : null}
+      {downloadSource ? (
+        <button
+          type="button"
+          className="kd-player-step kd-player-stream-download"
+          disabled={enqueueBusy}
+          aria-label={enqueueBusy ? "正在创建下载任务" : downloadLabel}
+          title={enqueueBusy ? "正在创建下载任务…" : downloadLabel}
+          onClick={downloadCurrentMedia}
+        >
+          <Download size={14} aria-hidden="true" />
+        </button>
+      ) : null}
+      {canRefreshPrediction && (
+        <button
+          type="button"
+          className="kd-player-step kd-player-reroll"
+          aria-label="随机换一首候选"
+          title="换一首随机候选"
+          disabled={refreshingPrediction}
+          onClick={() => void refreshPrediction()}
+        >
+          <RefreshCw size={13} aria-hidden="true" />
+        </button>
+      )}
+    </>
+  );
+
   return (
     <div
       className="kd-player"
+      data-face={tall ? barFace : undefined}
       data-pip={pipDriving ? "true" : undefined}
       {...playerBarPhaseProps(barPhase)}
     >
@@ -4843,6 +4952,11 @@ export function PlayerBar() {
           }}
           onDrop={(event) => void dropOnDeck(event, "left")}
         />
+        {tall ? (
+          <div className="kd-player-now-keys" data-face={barFace}>
+            {barFace === "eq" ? <div className="kd-player-now-readouts" ref={setReadoutsSlot} /> : toolKeys}
+          </div>
+        ) : null}
       </div>
       <BarInfoHost
         trackId={track?.id ?? null}
@@ -4858,6 +4972,7 @@ export function PlayerBar() {
       <div className="kd-player-transport">
         <div className="kd-player-transport-side" data-side="left">
           <PlayerVolume meterRef={playerVolumeMeterRef} />
+          {tall ? <BarFaceKey of={barFace} /> : null}
         </div>
 
         <div className="kd-player-transport-core">
@@ -4954,6 +5069,7 @@ export function PlayerBar() {
               : `−${formatDuration(remaining)} / ${formatDuration(playbackDuration)}`
             : timeDisplayMode === "elapsed" ? "--:-- / --:--" : "−−:−− / −−:−−"}
         </span>
+        {tall && track ? <BarCollapseKey /> : null}
         </div>
       </div>
 
@@ -4972,104 +5088,7 @@ export function PlayerBar() {
       >
         <SlidePages className="kd-player-faces" axis="y" page={barFace} order={PLAYER_BAR_FACES}>
           <div className="kd-player-face" data-face="tools" hidden={barFace !== "tools"}>
-            <div className="kd-player-float-tools">
-              <BarLyricsEntry />
-              {/* 歌词和弹窗各管各的：歌词键只开关悬浮歌词，弹窗键只开关画面小窗。 */}
-              {canDesktopLyrics && !video ? (
-                <button
-                  type="button"
-                  className="kd-player-step kd-player-lyricsbtn"
-                  aria-label={desktopLyricsOn ? "关闭悬浮歌词" : "打开悬浮歌词"}
-                  aria-pressed={desktopLyricsOn}
-                  aria-haspopup="menu"
-                  aria-expanded={lyricsMenu !== null && lyricsMenu.trackId === (displayTrack?.id ?? null)}
-                  data-on={desktopLyricsOn ? "true" : undefined}
-                  title={desktopLyricsOn ? "悬浮歌词：开。点一下关闭；右键设置歌词" : "打开悬浮歌词；右键设置歌词"}
-                  onContextMenu={(event) => {
-                    if (networkPreview) return;
-                    event.preventDefault();
-                    setLyricsMenu({ x: event.clientX, y: event.clientY, top: event.currentTarget.getBoundingClientRect().top, trackId: displayTrack?.id ?? null });
-                  }}
-                  onKeyDown={(event) => {
-                    if (networkPreview || (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10"))) return;
-                    event.preventDefault();
-                    const rect = event.currentTarget.getBoundingClientRect();
-                    setLyricsMenu({ x: rect.left, y: rect.bottom + 4, top: rect.top, trackId: displayTrack?.id ?? null });
-                  }}
-                  onClick={() => void toggleLyricsOverlay()}
-                >
-                  <TextQuote size={13} />
-                </button>
-              ) : null}
-              {video || popupTrack ? (
-                <button
-                  type="button"
-                  className="kd-player-step kd-player-popupbtn"
-                  aria-label={
-                    video
-                      ? popupOn ? "关闭视频小窗" : "打开视频小窗"
-                      : popupOn ? "关闭可视化小窗" : "打开可视化小窗"
-                  }
-                  aria-pressed={popupOn}
-                  data-on={popupOn ? "true" : undefined}
-                  title={
-                    video
-                      ? popupOn ? "视频小窗：开。点一下关闭" : "在小窗里播放视频"
-                      : popupOn ? "可视化小窗：开。点一下关闭" : "在小窗里显示可视化"
-                  }
-                  onClick={togglePopup}
-                >
-                  <PictureInPicture2 size={13} />
-                </button>
-              ) : null}
-            </div>
-            <button
-              type="button"
-              className="kd-player-step kd-player-auto-advance"
-              aria-label={autoAdvance ? "关闭自动切歌" : "开启自动切歌"}
-              aria-pressed={autoAdvance}
-              data-on={autoAdvance ? "true" : undefined}
-              title={
-                mobileNative
-                  ? autoAdvance
-                    ? "自动切歌：开。曲目结束后继续播放；移动端使用普通切换"
-                    : "自动切歌：关。曲目结束后停止"
-                  : autoAdvance
-                    ? `自动切歌：开。双击、下一首和曲目结束都会使用 ${djBars} 小节过渡`
-                    : "自动切歌：关。显式换歌直接切换，曲目结束后停止"
-              }
-              onClick={toggleAutoAdvance}
-            >
-              <Blend size={14} />
-            </button>
-            <BarModeButton />
-            {/* A library song is edited where an online one is downloaded: the two never meet. */}
-            {!pipDriving && displayTrack && usesLocalLibraryRecord(displayTrack) ? <BarMetaEntry trackId={displayTrack.id} /> : null}
-            {downloadSource ? (
-              <button
-                type="button"
-                className="kd-player-step kd-player-stream-download"
-                disabled={enqueueBusy}
-                aria-label={enqueueBusy ? "正在创建下载任务" : downloadLabel}
-                title={enqueueBusy ? "正在创建下载任务…" : downloadLabel}
-                onClick={downloadCurrentMedia}
-              >
-                <Download size={14} aria-hidden="true" />
-              </button>
-            ) : null}
-            {canRefreshPrediction && (
-              <button
-                type="button"
-                className="kd-player-step kd-player-reroll"
-                aria-label="随机换一首候选"
-                title="换一首随机候选"
-                disabled={refreshingPrediction}
-                onClick={() => void refreshPrediction()}
-              >
-                <RefreshCw size={13} aria-hidden="true" />
-              </button>
-            )}
-            <BarFaceKey of="tools" />
+            {tall ? null : <>{toolKeys}<BarFaceKey of="tools" /></>}
           </div>
           <div className="kd-player-face" data-face="eq" hidden={barFace !== "eq"}>
             {/* 旋钮失败只是一条提示，不能改写媒体会话的错误文案。窗口窄到放不下时只有旋钮
@@ -5077,14 +5096,14 @@ export function PlayerBar() {
             <div className="kd-player-face-scroll">
               <BarEq onError={showEqNotice} />
             </div>
-            <BarFaceKey of="eq" />
+            {tall ? null : <BarFaceKey of="eq" />}
           </div>
         </SlidePages>
         {lyricsMenu && !video && lyricsMenu.trackId === (displayTrack?.id ?? null) ? (
           <LyricsButtonMenu {...lyricsMenu} track={displayTrack ?? null} onClose={() => setLyricsMenu(null)} />
         ) : null}
         {/* Offered where the playing song's bubble can take over: with a song. */}
-        {track ? <BarCollapseKey /> : null}
+        {!tall && track ? <BarCollapseKey /> : null}
       </div>
 
       <div className="kd-player-scrub">

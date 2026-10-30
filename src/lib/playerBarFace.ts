@@ -22,3 +22,13 @@ export const usePlayerBarFace = create<{ face: PlayerBarFace; toggle(): void }>(
     return { face };
   }),
 }));
+
+/**
+ * Where the EQ face's readouts (KEY with its steps, BPM) are drawn instead of ending the knobs'
+ * row: a place in the title row of a tall window, which has room to its right. Null keeps them
+ * on the knobs' row (a wide window).
+ */
+export const usePlayerBarReadouts = create<{ slot: HTMLElement | null; setSlot(slot: HTMLElement | null): void }>(set => ({
+  slot: null,
+  setSlot: slot => set({ slot }),
+}));

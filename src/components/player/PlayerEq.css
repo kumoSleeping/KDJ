@@ -1,8 +1,8 @@
 /* EQ / 播放控制 docked in the player bar, as one of the two faces to the right of the transport
    (src/lib/playerBarFace.ts). One row, knobs and the tempo slider, then the KEY and BPM readouts;
-   the waveform has the whole row below. A tall window (a phone held upright) squeezes the knobs
-   rather than putting the readouts on a row of their own: there the key's steps sat on the
-   waveform, and a tap meant for them sought the song. */
+   the waveform has the whole row below. A tall window (a phone held upright) draws the readouts
+   at the end of the title row instead (PlayerBar's kd-player-now-keys): on a row of their own
+   the key's steps sat on the waveform, and a tap meant for them sought the song. */
 .kd-app .kd-player { --kd-player-eq-w: clamp(236px, 19vw, 268px); }
 .kd-player-eq {
   position: relative;
@@ -26,15 +26,6 @@
 }
 /* The readouts are never squeezed: a cut-off BPM reads as another number. */
 .kd-app:not([data-tall="true"]) .kd-player-eq .kd-eq-readouts { min-width: max-content; }
-.kd-app[data-tall="true"] .kd-player-eq .kd-manager-control {
-  grid-template-columns: minmax(0, 1fr) max-content;
-  align-items: center;
-  column-gap: 6px;
-}
-.kd-app[data-tall="true"] .kd-player-eq .kd-eq-readouts { column-gap: 6px; }
-/* A phone's width holds FILTER under its knob only without the spacing. */
-.kd-app[data-tall="true"] .kd-player-eq .kd-manager-knob-stack { gap: 0; }
-.kd-app[data-tall="true"] .kd-player-eq .kd-manager-knob-stack .kd-dj-arcknob > b { letter-spacing: 0; }
 .kd-player-eq .kd-manager-knob-stack {
   display: grid;
   /* Five knobs and, ending the row, the tempo slider with a little more room than a knob. */
