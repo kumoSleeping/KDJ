@@ -369,36 +369,27 @@ export function isCoverSettled(track: TrackSummary): boolean {
   const key = coverKeyOf(track);
   return coversShown.has(key) || coversMissing.has(key);
 }
-/** A video's first frame is extracted on demand; a service that is restarting is asked again. */
-const COVER_RETRIES = 12;
-const COVER_RETRY_MS = 3000;
-
 /**
  * 曲库表的封面格：一个普通的 <img>，由浏览器自己的图片管线请求、解码和缓存。行在视口外两三屏
  * 就挂好（rowList.ts），所以图片进入视口时已经在了，不用 lazy。浏览器显示过的封面（coversShown）
- * 重新挂载时同步解码，不闪。没有封面的音频记在 coversMissing 里，再次挂载时第一帧就是唱盘；视频
- * 首帧由后端抽取，服务短暂重启或抽帧排队时换个地址稍后再试，不能一次失败就永久空白。
+ * 重新挂载时同步解码，不闪。没有封面的音频记在 coversMissing 里，再次挂载时第一帧就是唱盘；没有
+ * 内嵌封面的视频由窗口解一帧交给后端（videoCover.ts），成了就再读一次，解不了就显示视频标记。
  */
 function TrackCoverThumb({ track }: { track: TrackSummary }) {
   const isVideo = isVideoTrack(track.format);
   const key = coverKeyOf(track);
   const [attempt, setAttempt] = useState(0);
   const [missing, setMissing] = useState(() => coversMissing.has(key));
-  const retryTimer = useRef<number | null>(null);
   useEffect(() => {
     setAttempt(0);
     setMissing(coversMissing.has(key));
-    return () => {
-      if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
-      retryTimer.current = null;
-    };
   }, [key]);
   const revision = isVideo && attempt > 0 ? `${track.modified_at}-${attempt}` : track.modified_at;
   return (
     <span className="kd-thumb" draggable={false}>
-      {missing && !isVideo ? (
-        <VinylPlaceholder />
-      ) : missing ? null : (
+      {missing ? (
+        isVideo ? <span className="kd-thumb-video" role="img" aria-label="视频"><Video size={14} aria-hidden="true" /></span> : <VinylPlaceholder />
+      ) : (
         <img
           src={api.coverUrl(track.id, revision, 64)}
           alt=""
@@ -406,15 +397,16 @@ function TrackCoverThumb({ track }: { track: TrackSummary }) {
           draggable={false}
           onLoad={() => coverSettled(key, true)}
           onError={() => {
-            if (!isVideo || attempt >= COVER_RETRIES) {
+            if (!isVideo || attempt > 0) {
               coverSettled(key, false);
               setMissing(true);
               return;
             }
-            retryTimer.current = window.setTimeout(() => {
-              retryTimer.current = null;
-              setAttempt((value) => value + 1);
-            }, COVER_RETRY_MS);
+            // videoCover.ts brings mediabunny, which the list itself does not need until here.
+            void import("../../lib/videoCover").then(module => module.requestVideoCover(track.id)).catch(() => false).then(made => {
+              if (made) setAttempt(1);
+              else { coverSettled(key, false); setMissing(true); }
+            });
           }}
         />
       )}

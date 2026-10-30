@@ -147,6 +147,10 @@ fn media_path_allowed(path: &str) -> bool {
     ) || matches!(
         segments.as_slice(),
         ["api", "video", "youtube", "hls", ticket] if !ticket.is_empty()
+    ) || matches!(
+        // The local file a `kdj peek` reads, while that peek is open (cli_media.rs).
+        segments.as_slice(),
+        ["api", "cli", "peek", id, "source"] if !id.is_empty()
     )
 }
 

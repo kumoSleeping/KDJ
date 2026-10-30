@@ -990,7 +990,8 @@ export type WsEvent =
   | { type: "library.updated"; payload: { track_ids: number[] } }
   | { type: "library.folders.updated"; payload: Record<string, never> }
   | { type: "account.changed"; payload: Account }
-  | { type: "visualizer.render.requested"; payload: import("./lib/visualizerCliRender").VisualizerCliRender };
+  | { type: "visualizer.render.requested"; payload: import("./lib/visualizerCliRender").VisualizerCliRender }
+  | { type: "peek.requested"; payload: import("./lib/cliPeek").CliPeek };
 
 /* ---------------------------------------------------------------- preload */
 

@@ -679,6 +679,10 @@ export function connectEvents(): () => void {
     useAppStore.getState().handleEvent(event);
     useDownloadStore.getState().handleEvent(event);
     useLibraryStore.getState().handleEvent(event);
+    if (event.type === "peek.requested") {
+      const payload = event.payload;
+      void import("../lib/cliPeek").then(module => module.peekForCli(payload));
+    }
     if (event.type === "visualizer.render.requested") {
       const payload = event.payload;
       void import("../lib/visualizerCliRender").then(module => module.renderForCli(payload));

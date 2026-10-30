@@ -1904,6 +1904,14 @@ textarea {
   display: block;
   border-radius: 3px;
 }
+/* A video no frame could be decoded from: the video mark on the cover's own tone. */
+.kd-thumb-video {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: var(--kd-muted);
+}
 /* 无封面歌曲共用的小黑胶唱盘。唱片自己就是轮廓，不再套一层方形封面框。 */
 .kd-thumb:has(> .kd-vinyl-placeholder),
 .kd-cover:has(> .kd-vinyl-placeholder) {
@@ -3428,6 +3436,47 @@ body[data-kd-search-pointer-dragging="true"] * {
   font-size: var(--kd-size-xs);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
+/* What KDJ cannot do with a library video (SystemPlayerNotice): over a picture it cannot show,
+   centred on the picture's own black; while the picture plays without sound, a line at its
+   top. Ink on the picture, with the key that hands the file to the system's player. */
+.kd-video-fallback {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.6rem;
+  color: rgb(255 255 255 / 86%);
+  font-size: var(--kd-size-xs);
+  text-shadow: 0 1px 2px rgb(0 0 0 / 60%);
+  pointer-events: none;
+}
+.kd-video-fallback[data-kind="picture"] {
+  inset: 0;
+  flex-direction: column;
+  background: #000;
+}
+.kd-video-fallback[data-kind="sound"] {
+  top: 0.45rem;
+  left: 0.45rem;
+  right: 0.45rem;
+}
+.kd-video-fallback-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid rgb(255 255 255 / 40%);
+  border-radius: 999px;
+  background: rgb(0 0 0 / 45%);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.kd-video-fallback-key:hover { background: rgb(0 0 0 / 65%); border-color: rgb(255 255 255 / 70%); }
+.kd-video-fallback-key:focus-visible { outline: 2px solid var(--kd-focus, #fff); outline-offset: 1px; }
 /* 四边 + 四角拖边缩放：热区常在，视觉只在悬停小窗时略显 */
 .kd-pip-resize {
   position: absolute;

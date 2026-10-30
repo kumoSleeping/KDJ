@@ -70,13 +70,16 @@ impl DecodedTrack {
 /// Sample rate of the silence that stands in for a video file's missing sound.
 pub(crate) const SILENT_SAMPLE_RATE: u32 = 48_000;
 
-/// A file with no sound (a video without an audio track): how long it lasts, from the tracks it
-/// does have. Playing it as that much silence gives the player a clock for its picture; failing
-/// it left the video window with nothing to follow.
+/// A file with no sound KDJ can play (a video without an audio track, or with one symphonia has
+/// no decoder for, such as Opus — KDJ has no FFmpeg): how long it lasts, from the tracks it does
+/// have. Playing it as that much silence gives the player a clock for its picture; failing it left
+/// the video window with nothing to follow. The window says there is no sound.
 pub(crate) fn silent_duration(tracks: &[Track]) -> Option<f64> {
     let audible = tracks.iter().any(|track| {
         let params = &track.codec_params;
-        params.codec != CODEC_TYPE_NULL && (params.channels.is_some() || params.sample_rate.is_some())
+        params.codec != CODEC_TYPE_NULL
+            && (params.channels.is_some() || params.sample_rate.is_some())
+            && symphonia::default::get_codecs().make(params, &DecoderOptions::default()).is_ok()
     });
     if audible {
         return None;
@@ -253,22 +256,22 @@ fn finite(sample: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// A video without sound plays as silence as long as the video (needs ffmpeg to make one).
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+    }
+
+    /// A video without sound plays as silence as long as the video.
     #[test]
     fn a_video_without_sound_decodes_as_silence() {
-        let path = std::env::temp_dir().join(format!("kdj-player-silent-{}.mp4", std::process::id()));
-        let made = std::process::Command::new("ffmpeg")
-            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=black:size=64x36:rate=25", "-t", "3"])
-            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
-            .arg(&path)
-            .status()
-            .is_ok_and(|status| status.success());
-        if !made {
-            eprintln!("ffmpeg unavailable: skipped");
-            return;
-        }
-        let decoded = decode_file(&path).expect("a silent video decodes");
-        let _ = std::fs::remove_file(&path);
+        let decoded = decode_file(&fixture("no-sound.mp4")).expect("a silent video decodes");
+        assert!((decoded.duration_seconds() - 3.0).abs() < 0.1, "{}", decoded.duration_seconds());
+        assert!(decoded.interleaved().iter().all(|sample| *sample == 0.0));
+    }
+
+    /// One whose sound symphonia cannot decode (Opus) does too: the picture keeps its clock.
+    #[test]
+    fn a_video_with_opus_sound_decodes_as_silence() {
+        let decoded = decode_file(&fixture("opus-sound.webm")).expect("an Opus video decodes as silence");
         assert!((decoded.duration_seconds() - 3.0).abs() < 0.1, "{}", decoded.duration_seconds());
         assert!(decoded.interleaved().iter().all(|sample| *sample == 0.0));
     }

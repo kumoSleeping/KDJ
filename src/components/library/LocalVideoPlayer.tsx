@@ -24,6 +24,7 @@ import {
 import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
 import { KdjvCodecPicture } from "../player/KdjvCodecPicture";
 import { codecDecodeAvailable, useVideoProject } from "../../lib/codecVideo";
+import { SystemPlayerNotice, useVideoSound } from "../player/SystemPlayerNotice";
 import { PanelErrorBoundary } from "../RootErrorBoundary";
 import { playTrack } from "./TrackTable";
 import type { Track } from "../../types";
@@ -48,6 +49,9 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     videoTransportEchoGuardRef.current = new VideoTransportEchoGuard();
   }
   const [error, setError] = useState("");
+  // The picture this WebView cannot decode, and whether the sound plays (SystemPlayerNotice).
+  const [pictureFailed, setPictureFailed] = useState(false);
+  const sound = useVideoSound(hidden ? null : track.id);
   const [playing, setPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(track.duration ?? 0);
@@ -88,6 +92,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     };
   }, []);
   useEffect(() => {
+    setPictureFailed(false);
     setPlaying(false);
     setPosition(0);
     setDuration(track.duration ?? 0);
@@ -417,9 +422,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
               }, 80);
             }}
             onError={(event) => {
-              if (localSwap.isActiveVideo(event.currentTarget)) {
-                setError("这个视频容器或编码暂不受系统 WebView 支持");
-              }
+              if (localSwap.isActiveVideo(event.currentTarget)) setPictureFailed(true);
             }}
           />
         ))}
@@ -432,6 +435,8 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
               }} />
           </PanelErrorBoundary>
         )}
+        {!hidden && pictureFailed && !live && <SystemPlayerNotice trackId={track.id} path={track.path} kind="picture" />}
+        {!hidden && !pictureFailed && sound === false && <SystemPlayerNotice trackId={track.id} path={track.path} kind="sound" />}
         {!hidden && controls}
       </div>
       {error && !hidden && <p className="kd-djp-note">{error}</p>}

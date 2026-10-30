@@ -1222,12 +1222,9 @@ export const api = {
     const { baseUrl } = bridge();
     return authenticatedGetUrl(`${baseUrl}/api/library/audio/${id}`);
   },
-  videoUrl: (id: number, compatible = false) => {
-    const { baseUrl } = bridge();
-    return authenticatedGetUrl(
-      `${baseUrl}/api/library/video/${id}${compatible ? "?compat=true" : ""}`,
-    );
-  },
+  videoUrl: (id: number) => authenticatedGetUrl(`${bridge().baseUrl}/api/library/video/${id}`),
+  /** Whether a library video's sound plays; one that does not plays as silence. */
+  videoSound: (id: number) => request<{ sound: boolean }>(`/library/video-sound/${id}`),
   /**
    * `version` 是 cache-buster，不是后端认识的参数。
    *
@@ -1272,6 +1269,23 @@ export const visualizerApi = {
   claimCliRender: (id: string) => request<{ claimed: boolean }>(`/visualizer/render/${encodeURIComponent(id)}/claim`, { method: "POST" }),
   finishCliRender: (id: string, result: { report: Record<string, unknown> } | { error: string }) =>
     request<{ delivered: boolean }>(`/visualizer/render/${encodeURIComponent(id)}/done`, { method: "POST", body: JSON.stringify(result) }),
+};
+
+/**
+ * `kdj peek` (cliPeek.ts): the first window to claim a peek decodes its frames and sends them
+ * back one JPEG at a time. And a library video's cover frame, made the same way (videoCover.ts).
+ */
+export const framesApi = {
+  claimPeek: (id: string) => request<{ claimed: boolean }>(`/cli/peek/${encodeURIComponent(id)}/claim`, { method: "POST" }),
+  peekSourceUrl: (path: string) => authenticatedGetUrl(`${bridge().baseUrl}${path}`),
+  /** `n` is the frame's 1-based number; without it, the contact sheet. */
+  peekPicture: (id: string, jpeg: Blob, n?: number) =>
+    request<{ ok: boolean }>(`/cli/peek/${encodeURIComponent(id)}/picture${n === undefined ? "" : `?n=${n}`}`, { method: "POST", headers: { "Content-Type": "image/jpeg" }, body: jpeg }),
+  finishPeek: (id: string, result: { report: Record<string, unknown> } | { error: string }) =>
+    request<{ delivered: boolean }>(`/cli/peek/${encodeURIComponent(id)}/done`, { method: "POST", body: JSON.stringify(result) }),
+  /** A library video's cover, a frame the window decoded. */
+  saveVideoCover: (trackId: number, jpeg: Blob) =>
+    request<{ ok: boolean }>(`/library/video-cover/${trackId}`, { method: "POST", headers: { "Content-Type": "image/jpeg" }, body: jpeg }),
 };
 
 /* ---------------------------------------------------------------- WebSocket */

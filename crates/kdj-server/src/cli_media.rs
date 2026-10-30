@@ -1,19 +1,25 @@
 //! `kdj peek`：截取视频画面。媒体可以是曲库曲目、本地文件或尚未下载的 B 站视频；
 //! 在线视频只按需读取画面帧，不下载成品。
-//! 请求被中断（CLI 退出）时，handler 被丢弃，取消令牌随之触发，ffmpeg 一并停下。
+//!
+//! KDJ 没有 FFmpeg：截帧交给打开着的 KDJ 窗口（`--no-gui` 时隐藏的主窗口也算），由它用系统
+//! 解码器（WebCodecs，src/lib/cliPeek.ts）解出各时间点的画面，一张张传回来写成 JPEG。
+//! 请求被中断（CLI 退出）时，handler 被丢弃，登记随之撤销，窗口那边的上传被拒。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use axum::{extract::State, Json};
+use axum::body::Bytes;
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::Response;
+use axum::Json;
 use kdj_core::models::Platform;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio_util::sync::CancellationToken;
 
 use crate::cli_api::{bilibili_video_input, recall, video_ref_source, Cached};
-use crate::compositions::media::{capture, probe};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
@@ -61,7 +67,7 @@ fn url_page(text: &str) -> usize {
 }
 
 /// 曲库 id、本地路径、B 站引用或链接。YouTube 在线视频需要界面准备来源，先 download。
-async fn resolve_media(state: &Arc<AppState>, source: &str, cancel: &CancellationToken) -> ApiResult<Media> {
+async fn resolve_media(state: &Arc<AppState>, source: &str) -> ApiResult<Media> {
     let source = source.trim();
     if let Ok(id) = source.parse::<i64>() {
         let track = state.library.get(id)?.ok_or_else(|| ApiError::not_found(format!("曲库里没有 id {id}")))?;
@@ -77,14 +83,10 @@ async fn resolve_media(state: &Arc<AppState>, source: &str, cancel: &Cancellatio
         if !path.is_file() {
             return Err(ApiError::not_found(format!("文件不存在：{source}")));
         }
-        let duration = probe(path, cancel)
-            .await
-            .ok()
-            .and_then(|p| p.format.duration.parse::<f64>().ok());
         return Ok(Media::File {
             path: path.to_path_buf(),
             title: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-            duration,
+            duration: None,
             track_id: None,
         });
     }
@@ -117,26 +119,6 @@ async fn resolve_media(state: &Arc<AppState>, source: &str, cancel: &Cancellatio
         .or(Some(info.duration as f64))
         .filter(|d| *d > 0.);
     Ok(Media::Bilibili { bvid: info.bvid, page, title: info.title, duration })
-}
-
-fn bilibili_headers(cookies: &str) -> String {
-    let mut headers = "Referer: https://www.bilibili.com/\r\nUser-Agent: Mozilla/5.0\r\n".to_string();
-    if !cookies.is_empty() {
-        headers.push_str(&format!("Cookie: {cookies}\r\n"));
-    }
-    headers
-}
-
-/// ffmpeg 的输入参数：本地文件直接读；B 站带防盗链头读 CDN。
-async fn input_args(state: &Arc<AppState>, media: &Media) -> ApiResult<Vec<String>> {
-    Ok(match media {
-        Media::File { path, .. } => vec!["-i".into(), path.to_string_lossy().into_owned()],
-        Media::Bilibili { bvid, page, .. } => {
-            let (url, cookies) = state.bilibili_preview.preview_source(bvid, *page).await
-            .map_err(|error| ApiError::bad_request(format!("读取哔哩哔哩视频失败：{error:#}")))?;
-            vec!["-headers".into(), bilibili_headers(&cookies), "-i".into(), url]
-        }
-    })
 }
 
 // ---------------------------------------------------------------- peek
@@ -172,92 +154,157 @@ fn sweep_old_peeks() {
     }
 }
 
-fn peek_times(body: &PeekBody, duration: Option<f64>) -> ApiResult<Vec<f64>> {
-    let mut times: Vec<f64> = body.at.iter().copied().filter(|t| t.is_finite() && *t >= 0.).collect();
+/// What the window is asked for: the times, or every how many seconds (it knows the length).
+fn check_times(body: &PeekBody) -> ApiResult<Vec<f64>> {
+    let times: Vec<f64> = body.at.iter().copied().filter(|t| t.is_finite() && *t >= 0.).take(MAX_FRAMES).collect();
     if let Some(every) = body.every {
         if !(every.is_finite() && every > 0.) {
             return Err(ApiError::bad_request("--every 必须大于 0"));
         }
-        let duration = duration.ok_or_else(|| ApiError::bad_request("读不到时长，请改用 --at"))?;
-        let mut t = 0.;
-        while t < duration && times.len() < MAX_FRAMES {
-            times.push(t);
-            t += every;
-        }
-    }
-    if times.is_empty() {
+    } else if times.is_empty() {
         return Err(ApiError::bad_request("需要 --at 或 --every"));
     }
-    if let Some(duration) = duration {
-        // 末尾那一帧往前收一点，避免 seek 到结尾取不到画面。
-        for t in &mut times {
-            *t = t.min((duration - 0.1).max(0.));
-        }
-    }
-    times.truncate(MAX_FRAMES);
     Ok(times)
 }
 
+/// A peek handed to a window: claimed once, its frames written as they come, answered once.
+struct WindowPeek {
+    claim: Option<tokio::sync::oneshot::Sender<()>>,
+    done: Option<tokio::sync::oneshot::Sender<Result<Value, String>>>,
+    dir: PathBuf,
+    /// A local file that is not in the library, served to the window by this peek's own address.
+    file: Option<PathBuf>,
+}
+
+fn window_peeks() -> &'static Mutex<HashMap<String, WindowPeek>> {
+    static PEEKS: std::sync::OnceLock<Mutex<HashMap<String, WindowPeek>>> = std::sync::OnceLock::new();
+    PEEKS.get_or_init(Default::default)
+}
+
+/// How long the windows have to take a peek. A hidden main window (`--no-gui`) is there from the
+/// start; a window still loading takes a few seconds.
+const WINDOW_CLAIM: Duration = Duration::from_secs(20);
+/// How long the frames may take once a window has the peek.
+const WINDOW_WORK: Duration = Duration::from_secs(10 * 60);
+
 pub async fn peek(State(state): State<Arc<AppState>>, Json(body): Json<PeekBody>) -> ApiResult<Json<Value>> {
-    let cancel = CancellationToken::new();
-    let _cancel_on_drop = cancel.clone().drop_guard();
-    let media = resolve_media(&state, &body.source, &cancel).await?;
-    let times = peek_times(&body, media.duration())?;
+    let media = resolve_media(&state, &body.source).await?;
+    let at = check_times(&body)?;
     let width = body.width.unwrap_or(480).clamp(160, 1280);
     sweep_old_peeks();
     let dir = peek_root().join(format!("{:016x}", rand::random::<u64>()));
     std::fs::create_dir_all(&dir).map_err(|e| ApiError::bad_request(format!("创建截图目录失败：{e}")))?;
-    let ffmpeg = kdj_providers::ffmpeg::binary()?;
-    let input = input_args(&state, &media).await?;
+    let id = format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>());
+    let (claim, claimed) = tokio::sync::oneshot::channel();
+    let (done, finished) = tokio::sync::oneshot::channel();
+    let (file, from) = match &media {
+        Media::File { track_id: Some(track_id), .. } => (None, json!({ "track_id": track_id })),
+        Media::File { path, .. } => (Some(path.clone()), json!({ "path": format!("/api/cli/peek/{id}/source") })),
+        Media::Bilibili { bvid, page, .. } => (None, json!({ "bilibili": { "bvid": bvid, "page": page } })),
+    };
+    window_peeks().lock().unwrap().insert(id.clone(), WindowPeek { claim: Some(claim), done: Some(done), dir: dir.clone(), file });
+    struct Forget(String);
+    impl Drop for Forget {
+        fn drop(&mut self) {
+            window_peeks().lock().unwrap().remove(&self.0);
+        }
+    }
+    let _forget = Forget(id.clone());
+    state.hub.publish("peek.requested", &json!({
+        "id": id, "from": from, "at": at, "every": body.every, "width": width,
+        "max_frames": MAX_FRAMES, "sheet_columns": SHEET_COLUMNS, "duration": media.duration(),
+    }));
+    if !matches!(tokio::time::timeout(WINDOW_CLAIM, claimed).await, Ok(Ok(()))) {
+        return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "没有 KDJ 窗口接手截帧：截帧由 KDJ 的窗口用系统解码器完成，请确认 KDJ 正在运行"));
+    }
+    let report = match tokio::time::timeout(WINDOW_WORK, finished).await {
+        Ok(Ok(Ok(report))) => report,
+        Ok(Ok(Err(error))) => return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("截帧失败：{error}"))),
+        Ok(Err(_)) => return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "截帧的窗口已关闭")),
+        Err(_) => return Err(ApiError::new(StatusCode::GATEWAY_TIMEOUT, "截帧超时")),
+    };
     let mut frames = Vec::new();
-    let mut failed = Vec::new();
-    for t in &times {
-        let file = dir.join(format!("frame-{:02}.jpg", frames.len() + 1));
-        let mut args: Vec<String> = vec!["-v".into(), "error".into(), "-nostdin".into(), "-ss".into(), format!("{t:.3}")];
-        args.extend(input.iter().cloned());
-        args.extend(
-            ["-an", "-frames:v", "1", "-vf"]
-                .map(str::to_owned)
-                .into_iter()
-                .chain([format!("scale={width}:-2"), "-q:v".into(), "4".into(), "-y".into()])
-                .chain([file.to_string_lossy().into_owned()]),
-        );
-        match capture(&ffmpeg, &args, 1024, Duration::from_secs(60), &cancel).await {
-            Ok(_) if file.is_file() => frames.push(json!({ "at": round(*t), "path": file })),
-            Ok(_) => failed.push(json!({ "at": round(*t), "error": "没有取到画面" })),
-            Err(error) => {
-                if cancel.is_cancelled() {
-                    return Err(ApiError::bad_request("已取消"));
-                }
-                failed.push(json!({ "at": round(*t), "error": format!("{error:#}") }));
-            }
+    for frame in report["frames"].as_array().into_iter().flatten() {
+        let n = frame["n"].as_u64().unwrap_or(0);
+        let path = dir.join(format!("frame-{n:02}.jpg"));
+        if path.is_file() {
+            frames.push(json!({ "at": round(frame["at"].as_f64().unwrap_or(0.)), "path": path }));
         }
     }
     let mut result = json!({ "source": media.describe(), "frames": frames, "dir": dir });
+    let failed: Vec<Value> = report["failed"].as_array().cloned().unwrap_or_default()
+        .into_iter()
+        .map(|f| json!({ "at": round(f["at"].as_f64().unwrap_or(0.)), "error": f["error"] }))
+        .collect();
     if !failed.is_empty() {
         result["failed"] = json!(failed);
     }
-    if frames.len() > 1 {
-        let columns = SHEET_COLUMNS.min(frames.len());
-        let rows = frames.len().div_ceil(columns);
-        let sheet = dir.join("sheet.jpg");
-        let args: Vec<String> = [
-            "-v", "error", "-nostdin", "-framerate", "1", "-start_number", "1", "-i",
-        ]
-        .map(str::to_owned)
-        .into_iter()
-        .chain([dir.join("frame-%02d.jpg").to_string_lossy().into_owned()])
-        .chain(["-vf".into(), format!("tile={columns}x{rows}:padding=4:margin=4"), "-frames:v".into(), "1".into()])
-        .chain(["-q:v".into(), "4".into(), "-y".into(), sheet.to_string_lossy().into_owned()])
-        .collect();
-        if capture(&ffmpeg, &args, 1024, Duration::from_secs(60), &cancel).await.is_ok() && sheet.is_file() {
-            result["sheet"] = json!({
-                "path": sheet,
-                "columns": columns,
-                "rows": rows,
-                "order": "从左到右、从上到下，与 frames 顺序一致",
-            });
-        }
+    let sheet = dir.join("sheet.jpg");
+    if frames.len() > 1 && sheet.is_file() {
+        result["sheet"] = json!({
+            "path": sheet,
+            "columns": report["sheet"]["columns"],
+            "rows": report["sheet"]["rows"],
+            "order": "从左到右、从上到下，与 frames 顺序一致",
+        });
+    }
+    if frames.is_empty() {
+        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, failed.first()
+            .and_then(|f| f["error"].as_str()).map(|e| format!("一张也没有截到：{e}")).unwrap_or_else(|| "一张也没有截到".into())));
     }
     Ok(Json(result))
+}
+
+pub async fn claim_peek(AxumPath(id): AxumPath<String>) -> ApiResult<Json<Value>> {
+    let claim = window_peeks().lock().unwrap().get_mut(&id).and_then(|peek| peek.claim.take());
+    Ok(Json(json!({ "claimed": claim.is_some_and(|claim| claim.send(()).is_ok()) })))
+}
+
+/// The local file a peek reads, with Range, for the window that took it.
+pub async fn peek_source(AxumPath(id): AxumPath<String>, headers: HeaderMap) -> ApiResult<Response> {
+    let path = window_peeks().lock().unwrap().get(&id).and_then(|peek| peek.file.clone())
+        .ok_or_else(|| ApiError::not_found("截帧请求已结束"))?;
+    let total = tokio::fs::metadata(&path).await.map_err(|e| ApiError::not_found(format!("读不到文件：{e}")))?.len();
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok()).filter(|v| !v.trim().is_empty());
+    crate::routes::audio_response(&path, total, "application/octet-stream".into(), range).await
+}
+
+#[derive(Deserialize)]
+pub struct PeekPicture {
+    /// 1-based frame number; absent for the contact sheet.
+    #[serde(default)]
+    n: Option<u32>,
+}
+
+/// One JPEG from the window: a frame, or the contact sheet.
+pub async fn peek_picture(AxumPath(id): AxumPath<String>, Query(picture): Query<PeekPicture>, body: Bytes) -> ApiResult<Json<Value>> {
+    let dir = window_peeks().lock().unwrap().get(&id).map(|peek| peek.dir.clone())
+        .ok_or_else(|| ApiError::not_found("截帧请求已结束"))?;
+    if !body.starts_with(&[0xff, 0xd8]) {
+        return Err(ApiError::bad_request("不是 JPEG"));
+    }
+    let name = match picture.n {
+        Some(n) if (1..=MAX_FRAMES as u32).contains(&n) => format!("frame-{n:02}.jpg"),
+        Some(_) => return Err(ApiError::bad_request("帧序号无效")),
+        None => "sheet.jpg".into(),
+    };
+    std::fs::write(dir.join(name), &body).map_err(|e| ApiError::bad_request(format!("写截图失败：{e}")))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct PeekDone {
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    report: Option<Value>,
+}
+
+pub async fn finish_peek(AxumPath(id): AxumPath<String>, Json(result): Json<PeekDone>) -> ApiResult<Json<Value>> {
+    let done = window_peeks().lock().unwrap().get_mut(&id).and_then(|peek| peek.done.take());
+    let answer = match (result.error, result.report) {
+        (None, Some(report)) => Ok(report),
+        (error, _) => Err(error.unwrap_or_else(|| "截帧失败".into())),
+    };
+    Ok(Json(json!({ "delivered": done.is_some_and(|done| done.send(answer).is_ok()) })))
 }
