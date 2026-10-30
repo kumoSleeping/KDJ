@@ -360,11 +360,32 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     assert.equal(buttons(panel()).find(button => button.textContent === "登录")?.disabled, true);
     assert.equal(panel().querySelector("select"), null, "no browsers is an empty choice, not a message");
 
-    // Mobile keeps supported input methods, not desktop browser extraction instructions.
+    // A phone has every way but reading another application's browser, opened in place as well.
     dom.window.kdj.platform = "android";
     const { loginMethods } = await import("../src/components/settings/AccountLogin");
-    assert.deepEqual(loginMethods(browserAccount("youtube")), ["headers"]);
-    assert.deepEqual(loginMethods({ ...browserAccount("wyy"), login_method: "qr" }), ["qr", "headers"]);
+    assert.deepEqual(loginMethods(browserAccount("youtube")), ["cookies", "headers"]);
+    assert.deepEqual(loginMethods({ ...browserAccount("wyy"), login_method: "qr" }), ["qr", "cookies", "headers"]);
+    const phone = dom.window.kdj as Record<string, unknown>;
+    phone.readClipboardText = undefined;
+    const albumSaves: string[] = [];
+    phone.saveLoginQr = async ({ label }: { label: string }) => { albumSaves.push(label); return { path: `/pictures/${label}.png`, location: "pictures" }; };
+    await render("phone-youtube", browserAccount("youtube"));
+    assert.equal(document.body.textContent!.includes("匿名可用"), false);
+    await click("登录");
+    assert.deepEqual(methods(), [named(COOKIES, "youtube"), named(HEADERS, "youtube")]);
+    await click(named(COOKIES, "youtube"));
+    assert.equal(panel().querySelector(".kd-account-login-controls"), null, "no browser to choose on a phone");
+    assert.ok(panel().textContent!.includes("回到 KDJ 粘贴"));
+    await click("粘贴", panel());
+    assert.ok(panel().querySelector("textarea"), "without a clipboard to read, the export is pasted into a field");
+    await render("phone-qr", qrAccount("wyy"));
+    await click("登录");
+    assert.deepEqual(methods(), [QR, COOKIES, HEADERS]);
+    await click(QR);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    assert.ok(panel().querySelector(".kd-account-login-qr img"), "the code is shown in place");
+    assert.deepEqual(albumSaves, ["wyy"], "and saved to the album, since a phone cannot scan its own screen");
+    assert.equal(panel().querySelector("[role=status]")?.textContent, "已存到相册，用网易云音乐 App 扫码");
   } finally {
     await act(async () => root.unmount());
     await (await import("../src/lib/diagnostics")).flushDiagnostics();
