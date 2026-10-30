@@ -15,8 +15,6 @@ export interface NativeMediaDrop {
   phase: "enter" | "over" | "drop" | "leave";
   x: number;
   y: number;
-  /** Media and image files only. */
-  paths: string[];
   folders?: string[];
   error?: string | null;
 }

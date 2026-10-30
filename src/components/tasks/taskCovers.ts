@@ -26,12 +26,6 @@ export function downloadTaskCover(task: Pick<DownloadTask, "id"> & DownloadCover
   return urls.length ? { key: task.id, urls } : null;
 }
 
-/** A project export shows the cover of its project's row, as its row in the list does. */
-export function projectTaskCover(task: { id: string; trackId: number }): TaskCover | null {
-  const urls = visualizerExportCovers({ trackId: task.trackId }, appCoverAddresses);
-  return urls.length ? { key: task.id, urls } : null;
-}
-
 /** A visualizer export shows its project's own picture once that has been read, else its song. */
 export function visualizerTaskCover(task: { id: string; trackId?: number }): TaskCover | null {
   const urls = visualizerExportCovers({ poster: knownVisualizerExportPoster(task.id)?.url, trackId: task.trackId }, appCoverAddresses);

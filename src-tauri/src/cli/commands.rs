@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use serde_json::{json, Value};
 
-use super::args::{Cli, Commands, LibraryCmd, ProjectCmd, VisualizerCmd};
+use super::args::{Cli, Commands, LibraryCmd, VisualizerCmd};
 use super::http::HttpClient;
 use super::{runtime, CliError};
 
@@ -14,14 +14,13 @@ const BROWSER_PLATFORMS: [&str; 3] = ["youtube", "ytm", "soundcloud"];
 const POLL: Duration = Duration::from_millis(500);
 
 /// `kdj status` 里唯一的说明文字。命令和参数从 clap 生成，这里只写 clap 表达不了的约定。
-const NOTES: [&str; 9] = [
+const NOTES: [&str; 8] = [
     "输出都是一行 JSON：成功 {\"ok\":true,\"data\":…}；失败 {\"ok\":false,\"error\":{\"code\",\"message\"}}，code 为 usage / not_found / ambiguous / failed。",
     "search 的结果和 status 的 playlists 都带 ref：把 ref 交给 download 下载，或交给 search 展开歌单、专辑、歌手。ref 存在 KDJ 内存里，KDJ 重启后请重新 search；bilibili:BV…[:pN] 与 youtube:<id> 这类视频 ref 随时可用。",
     "download 和 login 会一直运行到结束才输出。整张歌单或长视频可能要好几分钟，请放到后台运行或调大命令超时；中断命令就会取消。",
     "下载完成后 KDJ 自动入库并分析。移动、改名、删除、整理文件请直接用你自己的文件工具；放进 download.library_roots 下的文件会被 KDJ 自动跟上。",
     "library get 缺少分析时会当场补齐再返回（可能要几十秒）；时间单位都是秒，grid.downbeats 是小节线。",
     "peek 把截图存成 JPEG 文件并返回路径（多张时另有一张按时间顺序拼好的 sheet），用你看图片的工具打开即可；截图只用来核对画面内容，判断不了音画是否同步。",
-    "align 返回几套 plans：segments 里 ref = ref_at + (video - video_in) / speed（秒）。evidence 为 verified 的是声学核实过的，auto=true 的可以直接采用；melody / partial 只是候选，需要用户试听确认。ref_bar 是参考曲的小节号。剪辑可以写成 KDJ 的 .kdjv 视频工程（docs/kdjv.md）放进曲库，用 project check 检查、project render 预先渲染；要的效果工程表达不了，用你自己的工具（例如 ffmpeg）做出片段再放进工程。",
     "扫码登录会在用户屏幕上打开二维码图片，请让用户用对应 App 扫码；youtube / ytm / soundcloud 从本机浏览器导入登录状态，需要用户先在该浏览器里登录。",
     "除了 KDJ，也可以结合你自己的网络搜索或浏览器工具寻找素材，再把链接交给 search 或 download。",
 ];
@@ -100,19 +99,7 @@ fn run_inner(cli: Cli) -> Result<()> {
                 &json!({ "source": media_arg(&source), "at": at, "every": every, "width": width }),
             )?
         }
-        Commands::Align { reference, video } => http.post_json_long(
-            "/api/cli/align",
-            &json!({ "reference": media_arg(&reference), "video": media_arg(&video) }),
-        )?,
         Commands::Library { command } => library(&http, command)?,
-        Commands::Project { command } => match command {
-            ProjectCmd::Check { path } => http.post_json_long("/api/kdjv/check", &json!({ "path": absolute(&path) }))?,
-            ProjectCmd::Render { path } => project_render(&http, &path)?,
-            ProjectCmd::Edit { path, ops, create } => {
-                let ops: Value = serde_json::from_str(&ops).map_err(|error| CliError::new("usage", format!("--ops 不是有效的 JSON：{error}")))?;
-                http.post_json_long("/api/kdjv/edit", &json!({ "path": absolute(&path), "ops": ops, "create": create }))?
-            }
-        },
         Commands::Visualizer { command } => match command {
             VisualizerCmd::Render { id, out, width, height } => http.post_json_long(
                 "/api/visualizer/render",
@@ -243,19 +230,6 @@ fn download(
         return Err(CliError::new("failed", "KDJ 在下载结束前断开了连接").into());
     }
     Ok(json!({ "complete": result["complete"], "items": result["items"] }))
-}
-
-/// 渲染进度逐行进 stderr（`{"event":"progress","done","total":100,"detail"}`），stdout 只留结果。
-/// 不认识 `stream` 的旧 KDJ 直接回结果，同样接受。
-fn project_render(http: &HttpClient, path: &str) -> Result<Value> {
-    let result = http.post_ndjson("/api/kdjv/render", &json!({ "path": absolute(path), "stream": true }))?;
-    match result["event"].as_str() {
-        Some("error") => Err(CliError::new("failed", result["message"].as_str().unwrap_or("渲染失败")).into()),
-        Some("result") | None if result.get("path").is_some() => {
-            Ok(json!({ "path": result["path"], "track_id": result["track_id"] }))
-        }
-        _ => Err(CliError::new("failed", "KDJ 在渲染结束前断开了连接").into()),
-    }
 }
 
 /// 曲库 id 和引用原样交给 KDJ；本地存在的相对路径换成绝对路径。
@@ -547,7 +521,7 @@ fn analyzed_tracks(http: &HttpClient, ids: &[i64]) -> Result<Vec<(Value, Value)>
     let mut pending_grid = Vec::new();
     for &id in ids {
         let track = http.get_value(&format!("/api/library/tracks/{id}"))?;
-        // A project is not sound to analyse: its songs are, by their own rows.
+        // A `.kdjv` project an earlier build put in the library is not sound to analyse.
         if track["format"].as_str().is_some_and(|f| f.eq_ignore_ascii_case("kdjv")) {
             continue;
         }
@@ -724,13 +698,9 @@ mod tests {
                 "kdj download <REF>...",
                 "kdj login <PLATFORM>",
                 "kdj peek <SOURCE>",
-                "kdj align",
                 "kdj library list",
                 "kdj library get",
                 "kdj library add <PATH>",
-                "kdj project check <PATH>",
-                "kdj project render <PATH>",
-                "kdj project edit <PATH>",
                 "kdj visualizer render <ID>",
             ]
         );

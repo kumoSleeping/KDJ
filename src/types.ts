@@ -956,41 +956,23 @@ export interface MaintenanceProgress {
  * 但前端已经没有浮层通知了，这条分支故意不在联合类型里：
  * 收到就当没这回事，各 store 的 switch 落到 default 直接忽略。
  */
-/** A `.kdjv` project as its live preview draws it (docs/kdjv.md, `kdjv.rs::Live`); seconds. */
+/**
+ * What a WebCodecs picture draws (KdjvCodecPicture): a local video as a project of one clip
+ * (codecVideo.ts). Shaped after the old `.kdjv` live preview; seconds.
+ */
 export interface KdjvLive {
   duration: number;
   width: number;
   height: number;
-  /**
-   * `file` names the file (and its signature): a source number may be another file after an edit.
-   * `proxy`: its preview proxy is made, loaded from `/api/kdjv/proxy/{track}/{n}` (proxy.rs).
-   */
-  sources: Array<{ kind: "video" | "image" | "gif" | "audio"; width: number; height: number; fps: number; file?: string; proxy?: boolean }>;
-  /** Picture clips; `track` 0 is the top one, `source` numbers `/api/kdjv/source/{track}/{n}`. */
+  /** `file` names the file (and its signature). */
+  sources: Array<{ kind: "video" | "image" | "gif" | "audio"; width: number; height: number; fps: number; file?: string }>;
+  /** Picture clips; `track` 0 is the top one. */
   clips: Array<{
     source: number; track: number; at: number; in: number; out: number; length: number;
     x: number; y: number; scale: number; opacity: number; fill: boolean; fade_in: number; fade_out: number;
     /** Fractions taken off: left, top, right, bottom (absent from older servers). */
     crop?: [number, number, number, number];
   }>;
-}
-
-/** What playing a project starts from: its sound, its render when there is one, its live picture. */
-export interface KdjvPreview {
-  sound: string;
-  render: string | null;
-  project: KdjvLive;
-}
-
-/** A `.kdjv` project being rendered for playing (docs/kdjv.md). */
-export interface KdjvProgress {
-  path: string;
-  track_id: number | null;
-  /** The export queue's task this render is for, if any. */
-  export?: string | null;
-  progress: number;
-  detail: string;
-  error: string | null;
 }
 
 export type WsEvent =
@@ -1008,9 +990,6 @@ export type WsEvent =
   | { type: "library.updated"; payload: { track_ids: number[] } }
   | { type: "library.folders.updated"; payload: Record<string, never> }
   | { type: "account.changed"; payload: Account }
-  | { type: "kdjv.progress"; payload: KdjvProgress }
-  /** A source's preview proxy is made (proxy.rs). */
-  | { type: "kdjv.proxy"; payload: { source: string } }
   | { type: "visualizer.render.requested"; payload: import("./lib/visualizerCliRender").VisualizerCliRender };
 
 /* ---------------------------------------------------------------- preload */

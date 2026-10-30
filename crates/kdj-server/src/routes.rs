@@ -51,7 +51,6 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/cli/search", post(crate::cli_api::search))
         .route("/api/cli/download", post(crate::cli_api::download))
         .route("/api/cli/peek", post(crate::cli_media::peek))
-        .route("/api/cli/align", post(crate::cli_media::align))
         .route("/api/video/calibrate", post(video_calibrate));
     let router = router
         .route("/api/control/show", post(control_show))
@@ -7850,28 +7849,13 @@ fn is_video_container(path: &Path) -> bool {
     kdj_providers::tags::VIDEO_EXTENSIONS.contains(&ext.as_str())
 }
 
-/// A `.kdjv` project plays from its render (compositions/workshop/kdjv.rs), which the window asks
-/// for before it plays the project; here the render is only looked up.
-fn kdjv_render_for(path: &Path) -> ApiResult<Option<PathBuf>> {
-    use crate::compositions::workshop::kdjv;
-    if !kdjv::is_project_path(path) {
-        return Ok(None);
+/// KDJ's own video projects (`.kdjv`) are no longer played: the editor and its renderer were
+/// taken out after 1.1.0-rc19. A project already in the library keeps its row and its file.
+fn refuse_project(path: &Path) -> ApiResult<()> {
+    if kdj_providers::tags::is_project_path(path) {
+        return Err(ApiError::bad_request("不再支持视频工程"));
     }
-    kdjv::rendered(path)
-        .map(Some)
-        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "工程还没有渲染好"))
-}
-
-/// A `.kdjv` project's sound: its render's, else the mix its live preview plays (kdjv.rs), there
-/// once the project has been played.
-fn kdjv_sound_for(path: &Path) -> ApiResult<Option<PathBuf>> {
-    use crate::compositions::workshop::kdjv;
-    if !kdjv::is_project_path(path) {
-        return Ok(None);
-    }
-    kdjv::sounded(path)
-        .map(Some)
-        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "工程还没有播放过"))
+    Ok(())
 }
 
 /// 缓存键里的文件 mtime。文件被换掉（重新打了标签、换了个更好的版本）之后
@@ -7944,9 +7928,7 @@ async fn library_audio(
     if !path.is_file() {
         return Err(ApiError::not_found("音频文件已丢失"));
     }
-    if let Some(sound) = kdjv_sound_for(&path)? {
-        path = sound;
-    }
+    refuse_project(&path)?;
     if is_video_container(&path) {
         path = extracted_audio(&path, track.id, &state.config.data_dir.join("audio-cache")).await?;
     }
@@ -8058,9 +8040,7 @@ async fn library_video(
     if !path.is_file() {
         return Err(ApiError::not_found("视频文件已丢失"));
     }
-    if let Some(render) = kdjv_render_for(&path)? {
-        path = render;
-    }
+    refuse_project(&path)?;
     if !is_video_container(&path) {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "这不是视频曲目"));
     }
@@ -8222,12 +8202,6 @@ async fn library_cover(
         // A row still showing a song that has just left the library asks once more.
         .ok_or_else(|| ApiError::not_found("曲目不存在").expected())?;
     let path = PathBuf::from(&source.path);
-    if kdj_providers::workshop_images::is_image_path(&path) {
-        let width = params.size.unwrap_or(960).clamp(32, 1920);
-        let animated = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("gif"));
-        let data = run_library_cover_read(move || kdj_providers::workshop_images::frame_png(&path, animated, 0, width)).await?;
-        return Ok((StatusCode::OK, cover_headers("image/png".into()), data).into_response());
-    }
     if let Some(size) = params.size {
         if let Some(data) =
             cover_thumbnail(&source, &state.config.data_dir.join("covers"), size).await
@@ -8245,11 +8219,7 @@ async fn library_cover(
     }
     // VJ 素材和 MV 是没有内嵌封面的，一律 404 的话曲库里那一批视频
     // 全是空白占位。抽一帧当封面——播放器就是这么做的。
-    if kdj_providers::tags::is_project_path(&path) {
-        if let Some(data) = project_cover(&path, source.id, &state.config.data_dir.join("covers")).await {
-            return Ok((StatusCode::OK, cover_headers(JPEG_MIME.into()), data).into_response());
-        }
-    } else if is_video_container(&path) {
+    if is_video_container(&path) {
         if let Some(data) = video_cover(
             &path,
             source.id,
@@ -8294,15 +8264,12 @@ async fn cover_thumbnail(
     let thumb_dir = cache_dir.join("thumbs");
     let target = thumb_dir.join(format!("{}-{mtime}-{size}.jpg", source.id));
     let negative = thumb_dir.join(format!("{}-{mtime}-{size}.none2", source.id));
-    // A project's frame comes from its sources, which can appear after the project did; and
-    // builds before projects had covers left a negative mark for every one of them.
-    let project = kdj_providers::tags::is_project_path(Path::new(&source.path));
     if let Ok(data) = tokio::fs::read(&target).await {
         if !data.is_empty() {
             return Some(data);
         }
     }
-    if !project && tokio::fs::metadata(&negative).await.is_ok() {
+    if tokio::fs::metadata(&negative).await.is_ok() {
         return None;
     }
 
@@ -8314,7 +8281,7 @@ async fn cover_thumbnail(
             return Some(data);
         }
     }
-    if !project && tokio::fs::metadata(&negative).await.is_ok() {
+    if tokio::fs::metadata(&negative).await.is_ok() {
         return None;
     }
     tokio::fs::create_dir_all(&thumb_dir).await.ok()?;
@@ -8334,9 +8301,7 @@ async fn cover_thumbnail(
         return embedded;
     }
 
-    let frame = if project {
-        project_cover(Path::new(&source.path), source.id, cache_dir).await
-    } else if is_video_container(Path::new(&source.path)) {
+    let frame = if is_video_container(Path::new(&source.path)) {
         video_cover(Path::new(&source.path), source.id, source.duration, cache_dir).await
     } else {
         None
@@ -8366,38 +8331,6 @@ fn store_thumbnail_atomically(target: &Path, data: &[u8]) {
         return;
     }
     let _ = std::fs::remove_file(partial);
-}
-
-/// A `.kdjv` project's cover: one frame of the video it plays a third of the way in
-/// (`kdjv::cover_frame`), cached by the project's id and mtime like a video's. None when the
-/// project plays no video or its source cannot be read.
-async fn project_cover(path: &Path, track_id: i64, cache_dir: &Path) -> Option<Vec<u8>> {
-    let target = cover_cache_file(cache_dir, track_id, file_mtime(path));
-    if let Ok(data) = std::fs::read(&target) {
-        if !data.is_empty() {
-            return Some(data);
-        }
-    }
-    let (source, at) = crate::compositions::workshop::kdjv::cover_frame(path)?;
-    if !source.is_file() || !kdj_providers::ffmpeg::available() {
-        return None;
-    }
-    std::fs::create_dir_all(cache_dir).ok()?;
-    let _slot = FRAME_SLOTS.acquire().await.ok()?;
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|delta| delta.subsec_nanos())
-        .unwrap_or(0);
-    let tmp = cache_dir.join(format!("{track_id}-{nonce}.partial.jpg"));
-    let log = cache_dir.join(format!("{track_id}-{nonce}.log"));
-    let extracted = kdj_providers::ffmpeg::extract_frame(&source, &tmp, at, &log, &cancel).await.is_ok();
-    let _ = std::fs::remove_file(&log);
-    let data = extracted.then(|| std::fs::read(&tmp).ok()).flatten().filter(|data| !data.is_empty());
-    if data.is_none() || std::fs::rename(&tmp, &target).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    data
 }
 
 /// 同时最多几个抽帧进程。曲库列表一屏几十行，滚一下就是几十个封面请求同时进来，
@@ -8563,9 +8496,7 @@ async fn library_waveform(
         .get(id)?
         .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
     if kdj_providers::workshop_images::is_image_path(Path::new(&track.path)) { return Err(ApiError::bad_request("图片没有音频波形")); }
-    // A project's sound is its render's or its live preview's mix (kdjv.rs), there once it has
-    // been played.
-    let project_render = kdjv_sound_for(Path::new(&track.path))?;
+    refuse_project(Path::new(&track.path))?;
     let release_intent = crate::waveform::ReleaseOverviewIntent::from(params.intent);
     if params.profile == WaveformRequestProfile::ReleaseOverview && params.intent_only {
         state
@@ -8573,7 +8504,7 @@ async fn library_waveform(
             .note_release_overview_intent(id, release_intent, params.request_id);
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
-    let path = project_render.unwrap_or_else(|| PathBuf::from(&track.path));
+    let path = PathBuf::from(&track.path);
     if !path.is_file() {
         return Err(ApiError::not_found("音频文件已丢失"));
     }

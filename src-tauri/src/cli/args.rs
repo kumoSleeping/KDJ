@@ -76,24 +76,10 @@ pub enum Commands {
         #[arg(long)]
         width: Option<u32>,
     },
-    /// 把视频对齐到参考曲，返回几套定位方案；在线 B 站视频只读音轨
-    Align {
-        /// 参考曲：曲库 id 或音频文件路径
-        #[arg(long = "ref", value_name = "REF")]
-        reference: String,
-        /// 视频：曲库 id、文件路径、bilibili 引用或链接
-        #[arg(long)]
-        video: String,
-    },
     /// 查询本地曲库
     Library {
         #[command(subcommand)]
         command: LibraryCmd,
-    },
-    /// .kdjv 视频工程（docs/kdjv.md）
-    Project {
-        #[command(subcommand)]
-        command: ProjectCmd,
     },
     /// 可视化：不经编辑器，用歌曲封面和默认样式出画面
     Visualizer {
@@ -115,31 +101,6 @@ pub enum VisualizerCmd {
         width: Option<u32>,
         #[arg(long)]
         height: Option<u32>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ProjectCmd {
-    /// 打开一个 .kdjv 工程：标题、时长、画布、素材，是否已渲染好；不能播放时说明原因
-    Check {
-        /// .kdjv 文件路径
-        path: String,
-    },
-    /// 渲染好一个 .kdjv 工程，之后在 KDJ 里立即播放；全部结束才返回，中断命令不取消渲染
-    Render {
-        /// .kdjv 文件路径
-        path: String,
-    },
-    /// 用剪辑操作改 .kdjv 工程（自由轨道，docs/kdjv.md「格式 3」；格式 1、2 的工程第一次改时转成格式 3）：按顺序做完，能播放才写回；返回工程和每条轨道上片段的位置
-    Edit {
-        /// .kdjv 文件路径
-        path: String,
-        /// 操作列表（JSON 数组），如 [{"op":"add","clip":{"src":"/a.mp4","in":0,"out":10},"kind":"picture","at":12}]
-        #[arg(long)]
-        ops: String,
-        /// 文件还没有时新建
-        #[arg(long)]
-        create: bool,
     },
 }
 
@@ -232,6 +193,8 @@ mod tests {
             &["kdj", "library", "analyze"],
             &["kdj", "account", "list"],
             &["kdj", "quit"],
+            &["kdj", "align", "--ref", "1", "--video", "2"],
+            &["kdj", "project", "check", "a.kdjv"],
         ] {
             assert!(Cli::try_parse_from(retired).is_err(), "{retired:?}");
         }

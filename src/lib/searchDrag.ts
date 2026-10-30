@@ -255,7 +255,7 @@ export function beginAudioPointerDrag(
     : Promise.resolve("");
   let dragging = false;
   let ghost: PointerDragGhost | null = null;
-  // A place of the app's own that takes search results (the editor), told when the pointer leaves it.
+  // A place of the app's own that takes search results (a drawer's title row), told when the pointer leaves it.
   let place: PointerSearchDrop | null = null;
   const clearTargets = () => {
     document

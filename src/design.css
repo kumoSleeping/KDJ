@@ -3242,7 +3242,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   z-index: 1;
   opacity: 1;
 }
-/* A .kdjv project drawn live (KdjvLivePicture): its canvas contain-fitted over the video's place,
+/* A WebCodecs video picture (KdjvCodecPicture): its canvas contain-fitted over the video's place,
    each clip a layer of its own, placed in percent of the canvas. */
 .kd-kdjv-live {
   position: absolute;
@@ -5531,7 +5531,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   margin-right: 0.3rem;
   color: var(--kd-muted);
 }
-/* A KDJ video project (docs/kdjv.md): the word 工程 on a tone of the panel, as small as the
+/* A KDJ video project an older version left in the library (.kdjv, no longer played): the word 工程 on a tone of the panel, as small as the
    icons beside other rows. Ink only. */
 .kd-project-mark {
   flex: none;

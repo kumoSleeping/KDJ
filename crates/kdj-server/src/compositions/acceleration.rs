@@ -582,7 +582,8 @@ async fn source_bitrate(
 /// Progress is monotonic across fallback; the existing renderer reserves 1.0 for
 /// the caller's validation/commit phase. `status` names the encoder in use. A hardware
 /// encoder is held to `bitrate`: the canvas's, since a composition's first input says nothing
-/// of the picture it makes.
+/// of the picture it makes. Only the tests run a render without a frame source now.
+#[cfg(test)]
 pub async fn render_at(
     args: &[String], duration: i64, cancel: &CancellationToken,
     preference: EncodingAcceleration, bitrate: u64, progress: impl FnMut(f64), status: impl Fn(&str),
@@ -810,38 +811,6 @@ mod tests {
     }
 
     #[test]
-    fn workshop_script_layout_selects_hardware_without_weakening_output_checks() {
-        let mut args = args(Path::new("/tmp/render.mp4"), Path::new("/tmp/source.mp4"));
-        let graph = args.iter().position(|s| s == "-filter_complex").unwrap();
-        args[graph] = "-filter_complex_script".into();
-        args[graph + 1] = "/tmp/render.ffgraph".into();
-        args.insert(0, "-nostats".into());
-        let layout = layout(&args).expect("workshop arguments must reach hardware selection");
-        let accelerated = accelerated_args(&args, &layout, Encoder::VideoToolbox, 3_000_000);
-        assert!(accelerated.iter().any(|s| s == "h264_videotoolbox"));
-        assert!(accelerated.iter().any(|s| s == "-filter_complex_script"));
-        assert!(!accelerated.iter().any(|s| s == "libx264"));
-    }
-
-    #[test]
-    fn workshop_images_gifs_and_video_seeks_reach_hardware_selection() {
-        let mut args = args(Path::new("/tmp/render.mp4"), Path::new("/tmp/source.mp4"));
-        args.splice(2..2, strings(&["-threads", "1", "-ss", "2.5"]));
-        let graph = args.iter().position(|s| s == "-filter_complex").unwrap();
-        args.splice(graph..graph, strings(&[
-            "-threads", "1", "-framerate", "24", "-i", "/tmp/still.png",
-            "-safe", "0", "-f", "concat", "-i", "/tmp/animation.ffconcat",
-        ]));
-        let layout = layout(&args).expect("image inputs must not silently force software encoding");
-        assert_eq!(layout.inputs.len(), 3);
-        let updated = accelerated_args(&args, &layout, Encoder::VideoToolbox, DEFAULT_BITRATE);
-        for pair in [["-framerate", "24"], ["-safe", "0"], ["-ss", "2.5"], ["-c:v:0", "h264_videotoolbox"]] {
-            assert!(updated.windows(2).any(|w| w == pair));
-        }
-        assert_eq!(updated.last(), args.last());
-    }
-
-    #[test]
     fn visualizer_pipe_requires_replayable_opt_in_and_preserves_input_options() {
         let scratch = Scratch::new();
         let (mut args, output, _) = scratch.setup();
@@ -891,8 +860,7 @@ mod tests {
             let args = args(&directory.join("render.mp4"), &source);
             Staging::prepare(&args, &layout(&args).unwrap()).unwrap().is_some()
         };
-        assert!(staged(&stage_name("kdjv-x-0123-abcd")), "a project's render");
-        assert!(!staged(".kdjv-x-0123-abcd"), "the name kdjv renders staged under from 10-19 to 10-25");
+        assert!(staged(&stage_name("visualizer-x-0123-abcd")), "a visualizer's render");
         assert!(!staged(STAGE_PREFIX), "a prefix alone is no one's own directory");
     }
 

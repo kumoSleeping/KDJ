@@ -941,41 +941,6 @@ export const api = {
   resolve: (url: string, limit = 0) => post<ResolveResponse>("/resolve", { url, limit }),
   intake: (body: IntakeRequest) => post<IntakeResponse>("/intake", body),
 
-  /** What playing a `.kdjv` project starts from (docs/kdjv.md): its sound (mixed now if need be, seconds), its render if any, its live picture. */
-  previewKdjv: (trackId: number) => post<import("../types").KdjvPreview>("/kdjv/preview", { track_id: trackId }),
-  /** The n-th source file of a project's live preview, with Range. */
-  kdjvSourceUrl: (trackId: number, n: number) => authenticatedGetUrl(`${bridge().baseUrl}/api/kdjv/source/${trackId}/${n}`),
-  /** The source's preview proxy, once the project says it is made (`proxy`). */
-  kdjvProxyUrl: (trackId: number, n: number) => authenticatedGetUrl(`${bridge().baseUrl}/api/kdjv/proxy/${trackId}/${n}`),
-  /** A small JPEG of a project's source (`src` as its document names it) at `t` seconds, `h` pixels high. */
-  kdjvFrameUrl: (trackId: number, src: string, t: number, h: number) =>
-    authenticatedGetUrl(`${bridge().baseUrl}/api/kdjv/frame?track_id=${trackId}&src=${encodeURIComponent(src)}&t=${t.toFixed(1)}&h=${h}`),
-  /** A `.kdjv` project's render (docs/kdjv.md): found in the cache, or made now (can take minutes). */
-  renderKdjv: (trackId: number) => post<{ path: string; track_id: number | null }>("/kdjv/render", { track_id: trackId }),
-  /** A track's beat grid (kdj-analysis rhythm): bar lines, beats and tempo stretches in seconds, or null before it is analysed. */
-  rhythm: (trackId: number) => request<{
-    analysis: { downbeats: number[]; beats: number[]; segments: Array<{ start_seconds: number; end_seconds: number; bpm: number }> } | null;
-    /** The analysis under way or last run this session ("queued", "analyzing", "failed", "canceled", …). */
-    status?: { phase: string } | null;
-  }>(`/library/rhythm/${trackId}`),
-  /** Analyse a track's beat grid now (`precise`: the whole song, every tempo change); null job when it already has one. */
-  startRhythm: (trackId: number, precise = true) => post<{ job_id: string | null; queued: number }>(`/library/rhythm/${trackId}`, { precise }),
-  /** Operations on a `.kdjv` 2 project (src/lib/lanes.ts), applied in order and saved only when the result plays. */
-  /** Where a video's sound is found in a reference song (cli_media.rs `align`): placement plans, best first. */
-  align: (reference: string, video: string) =>
-    post<{ matched: boolean; plans: import("./lanes").AlignPlan[]; reason?: string }>("/cli/align", { reference, video }),
-  editKdjv: (body: { path?: string; track_id?: number; ops: import("./lanes").LaneOp[]; create?: boolean }) =>
-    post<import("./lanes").LaneEdited>("/kdjv/edit", body),
-  /** A project's file and title renamed in its folder, its library row moved with it; answers as an edit does. */
-  renameKdjv: (path: string, name: string) => post<import("./lanes").LaneEdited>("/kdjv/rename", { path, name }),
-  /** A `.kdjv` project written out as one MP4 beside it, never over an existing file. `id` names
-   *  the export for `cancelKdjvExport`; a project written meanwhile stops it (`kdjv_project_changed`). */
-  exportKdjv: (trackId: number, options: import("./lanes").ExportOptions | undefined, id: string) =>
-    post<{ path: string; track_id: number | null }>("/kdjv/export", options ? { track_id: trackId, options, id } : { track_id: trackId, id }),
-  /** Stops the export of that id; its own request then answers `kdjv_export_stopped`. */
-  cancelKdjvExport: (id: string) => post<{ stopped: boolean }>("/kdjv/export/cancel", { id }),
-  /** A title's text drawn as a PNG (base64), kept by the server; answers where. */
-  saveTitleImage: (png: string) => post<{ src: string }>("/kdjv/title-image", { png }),
   downloads: () => request<DownloadTask[]>("/downloads"),
   enqueue: async (body: DownloadRequest) => {
     // 目录选择先乐观更新 UI、再异步落盘。入队若抢在落盘前，后端会冻结上一个目录。

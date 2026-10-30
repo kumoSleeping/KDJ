@@ -84,7 +84,7 @@ KDJ packs cross-platform search, download, local library management, and music a
 
 - Android 8+ on arm64 devices; YouTube playback needs Android 9+ and a current Android System WebView.
 - Music search/download, library, analysis, waveforms, lyrics, themes and system media controls; overlay lyrics and video picture-in-picture.
-- No visualizer production, editing, video projects or FFmpeg. Video formats depend on system support.
+- No visualizer production or FFmpeg. Video formats depend on system support.
 - See [Android](docs/android.md) for adaptation details and device acceptance checks.
 
 ## Build for development

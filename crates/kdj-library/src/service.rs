@@ -905,7 +905,7 @@ impl LibraryService {
         }
         if matches!(query.media.as_str(), "audio" | "video") {
             // 与导入时的视频后缀表同源；音频是已入库媒体中非视频的补集。
-            // KDJ 视频工程（.kdjv）播放的是画面，算视频。
+            // 旧版入库的 KDJ 视频工程（.kdjv）行仍归在视频里。
             let video_exts: Vec<&str> = kdj_providers::tags::VIDEO_EXTENSIONS
                 .iter()
                 .copied()

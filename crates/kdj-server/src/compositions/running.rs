@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// How long a render may go without moving on before it counts as stuck. Not a limit on its
-/// length: a long project on a slow machine runs as long as it keeps going.
+/// length: a long export on a slow machine runs as long as it keeps going.
 pub(super) const STALL: Duration = Duration::from_secs(5 * 60);
 
 /// When a render last moved on (`moved`); `stalled` resolves once it has not for `STALL`.
@@ -152,69 +152,12 @@ pub fn stop_all() {
     }
 }
 
-/// Removes the staging directories of renders that ended with an earlier run (`<prefix>*` in
-/// `dir`): those with an `.owner` whose process is gone, and those without one that nothing has
-/// written to for an hour. One whose owner still runs is left as it is.
-pub fn clean_stages(dir: &Path, prefixes: &[&str]) {
-    let system = processes();
-    let me = std::process::id();
-    let old = |metadata: std::io::Result<std::fs::Metadata>| {
-        metadata.and_then(|m| m.modified()).ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age > Duration::from_secs(3600))
-    };
-    // The directory itself too: one just made has nothing in it yet.
-    let idle = |path: &Path| {
-        old(std::fs::metadata(path))
-            && std::fs::read_dir(path).into_iter().flatten().flatten().all(|entry| old(entry.metadata()))
-    };
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        let named = entry.file_name().to_str().is_some_and(|name| prefixes.iter().any(|p| name.starts_with(p)));
-        let real_dir = entry.file_type().is_ok_and(|t| t.is_dir() && !t.is_symlink());
-        if !named || !real_dir {
-            continue;
-        }
-        let owner = std::fs::read_to_string(path.join(".owner")).ok().and_then(|s| s.trim().parse::<u32>().ok());
-        let stale = match owner {
-            Some(owner) => owner != me && !kdj_running(&system, owner),
-            None => idle(&path),
-        };
-        if stale {
-            let _ = std::fs::remove_dir_all(&path);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// A pid no process has: far above any the system hands out.
     const GONE: u32 = 3_999_999_999;
-
-    #[test]
-    fn stages_of_runs_that_are_gone_are_removed_and_the_rest_kept() {
-        let dir = tempfile::tempdir().unwrap();
-        let stage = |name: &str, owner: Option<u32>| {
-            let path = dir.path().join(name);
-            std::fs::create_dir(&path).unwrap();
-            std::fs::write(path.join("render.mp4"), b"partial").unwrap();
-            if let Some(owner) = owner {
-                std::fs::write(path.join(".owner"), owner.to_string()).unwrap();
-            }
-            path
-        };
-        let gone = stage(".kdj-composition-kdjv-a-1", Some(GONE));
-        let mine = stage(".kdj-composition-kdjv-b-2", Some(std::process::id()));
-        let fresh = stage(".kdjv-c-3", None);
-        let other = stage("kdjv-d", Some(GONE));
-        clean_stages(dir.path(), &[".kdj-composition-", ".kdjv-"]);
-        assert!(!gone.exists(), "its owner no longer runs");
-        assert!(mine.exists(), "a render of this run");
-        assert!(fresh.exists(), "no owner, but written to within the hour");
-        assert!(other.exists(), "not a staging directory");
-    }
 
     #[test]
     fn notes_of_ffmpeg_that_is_gone_are_dropped_and_a_live_note_is_kept_until_it_ends() {

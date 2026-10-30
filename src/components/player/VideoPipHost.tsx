@@ -44,9 +44,6 @@ import {
   VideoTransportEchoGuard,
 } from "../../lib/videoPlaybackEngine";
 import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
-import { ensureProjectLive, useKdjvLive } from "../../lib/kdjvPlay";
-import { isProjectTrack } from "../../lib/format";
-import { KdjvLivePicture } from "./KdjvLivePicture";
 import { KdjvCodecPicture } from "./KdjvCodecPicture";
 import { codecDecodeAvailable, codecVideoRefused, useVideoProject } from "../../lib/codecVideo";
 import { PanelErrorBoundary } from "../RootErrorBoundary";
@@ -201,27 +198,18 @@ interface Bounds {
   height: number;
 }
 
-/**
- * A local session of a project, drawn live while it plays from its sound (kdjvPlay.ts): also
- * before its live picture is there (the window was loaded again while it played), when nothing
- * is loaded as a video either — that was its render, keyed every few seconds, or a 409.
- */
-function projectSession(session: VideoPipSession | null): boolean {
-  return session?.source === "local" && (session.project === true || Boolean(useKdjvLive.getState().live[session.trackId]));
-}
-
 /** A local video on the song's clock whose picture is decoded with WebCodecs (codecVideo.ts). */
 function codecVideoSession(session: VideoPipSession | null): boolean {
-  return session?.source === "local" && !projectSession(session) && usesLocalVideoDeviceClock()
+  return session?.source === "local" && usesLocalVideoDeviceClock()
     && codecDecodeAvailable() && !codecVideoRefused(session.trackId);
 }
 
 /**
- * A local session drawn as a picture that follows the player by itself (a project, or a video
- * decoded with WebCodecs): no `<video>` here is loaded, started or sought for it.
+ * A local session drawn as a picture that follows the player by itself (a video decoded with
+ * WebCodecs): no `<video>` here is loaded, started or sought for it.
  */
 function pictureSession(session: VideoPipSession | null): boolean {
-  return projectSession(session) || codecVideoSession(session);
+  return codecVideoSession(session);
 }
 
 function mediaUrl(session: VideoPipSession): string {
@@ -344,14 +332,11 @@ export function VideoPipHost() {
   const showSurface = Boolean(hostActive && !systemPip && panelReady);
   const showFloating = showSurface && !docked;
   const isLocal = session?.source === "local";
-  // A project playing from its sound: its picture is drawn live, in the canvas's shape.
-  const projectLive = useKdjvLive(state => session?.source === "local" ? state.live[session.trackId] : undefined);
-  // A local video is drawn the same way, as a project of one clip, once its file is known to
+  // A local video is drawn with WebCodecs, as a project of one clip, once its file is known to
   // decode here; a refused one keeps the `<video>` elements below.
-  const codecWanted = session?.source === "local" && !session.project && !projectLive
-    && usesLocalVideoDeviceClock() && codecDecodeAvailable();
+  const codecWanted = session?.source === "local" && usesLocalVideoDeviceClock() && codecDecodeAvailable();
   const videoPicture = useVideoProject(codecWanted && session?.source === "local" ? session.trackId : null);
-  const live = projectLive ?? videoPicture.project ?? undefined;
+  const live = videoPicture.project ?? undefined;
   useEffect(() => {
     if (!live) return;
     setSourceRatio(live.width / live.height);
@@ -362,8 +347,8 @@ export function VideoPipHost() {
   const localSwap = useLocalVideoSwap({
     // WebKit PiP is bound to the concrete source <video>. While it is open, keep that element
     // stable and use the single-video seek fallback instead of swapping it out from underneath PiP.
-    // A live project has no video of its own here: its seeks are not prepared on these elements.
-    enabled: Boolean(isLocal && hostActive && !systemPip && !live && !(session?.source === "local" && session.project) && !(codecWanted && !videoPicture.refused)),
+    // A picture drawn with WebCodecs has no video of its own here: its seeks are not prepared on these elements.
+    enabled: Boolean(isLocal && hostActive && !systemPip && !live && !(codecWanted && !videoPicture.refused)),
     trackId: session?.source === "local" ? session.trackId : null,
     desiredPlayingRef,
     getRate: () => {
@@ -700,14 +685,12 @@ export function VideoPipHost() {
         : desiredPlayingRef.current || next.source === "network" || next.autoPlay;
     desiredPlayingRef.current = shouldPlay;
     useVideoPip.getState().setError("");
-    // A live project, and a video decoded with WebCodecs, follow the player's clock by
-    // themselves; there is no video here to start, and the one played before is let go
-    // (useLocalVideoSwap `unload`).
+    // A video decoded with WebCodecs follows the player's clock by itself; there is no video
+    // here to start, and the one played before is let go (useLocalVideoSwap `unload`).
     if (pictureSession(next)) {
       pauseHostVideos();
       localSwap.unload();
       loadedKeyRef.current = null;
-      if (next.source === "local" && projectSession(next)) ensureProjectLive(next.trackId);
       return;
     }
     let video = activeVideo();
@@ -907,7 +890,6 @@ export function VideoPipHost() {
         title: track.title || track.filename,
         author: track.artist || "",
         autoPlay: detail.autoPlay !== false,
-        project: isProjectTrack(track.format),
       };
       pip.setSession(next);
       applyPanelChrome(next, pip.mode);
@@ -1225,7 +1207,7 @@ export function VideoPipHost() {
   useEffect(() => {
     const video = activeVideo();
     if (!video) return;
-    // A picture that follows the player (a project, a video decoded with WebCodecs) is
+    // A picture that follows the player (a video decoded with WebCodecs) is
     // KdjvCodecPicture's: these elements say nothing about it.
     const stillActive = () => localSwap.isActiveVideo(video) && !pictureSession(useVideoPip.getState().session);
     const onSize = () => {
@@ -1609,20 +1591,14 @@ export function VideoPipHost() {
             muted
           />
           {live && showSurface && session?.source === "local" && (
-            <PanelErrorBoundary name="工程画面" turn={session.trackId}>
-              {codecDecodeAvailable()
-                ? <KdjvCodecPicture trackId={session.trackId} project={live}
-                    sourceUrl={projectLive ? undefined : () => api.videoUrl(session.trackId)}
-                    onTransport={({ position, playing }) => {
-                      const pip = useVideoPip.getState();
-                      if (pendingScrubRef.current === null) pip.setPosition(position);
-                      if (pip.playing !== playing) pip.setPlaying(playing);
-                    }} />
-                : <KdjvLivePicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
-                    const pip = useVideoPip.getState();
-                    if (pendingScrubRef.current === null) pip.setPosition(position);
-                    if (pip.playing !== playing) pip.setPlaying(playing);
-                  }} />}
+            <PanelErrorBoundary name="视频画面" turn={session.trackId}>
+              <KdjvCodecPicture trackId={session.trackId} project={live}
+                sourceUrl={() => api.videoUrl(session.trackId)}
+                onTransport={({ position, playing }) => {
+                  const pip = useVideoPip.getState();
+                  if (pendingScrubRef.current === null) pip.setPosition(position);
+                  if (pip.playing !== playing) pip.setPlaying(playing);
+                }} />
             </PanelErrorBoundary>
           )}
           <canvas ref={pipCanvasRef} className="kd-pip-compositor" aria-hidden="true" />

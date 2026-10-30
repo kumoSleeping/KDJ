@@ -14,19 +14,12 @@ import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import { useVisualizerStudioStore, VISUALIZER_DOCK_APP } from "../../stores/visualizerStudioStore";
 import { VisualizerDock } from "../composition/VisualizerDock";
 import { SlidePages } from "../drawer/SlidePages";
-import type { DrawerEntry, DrawerSpec, TitleDrop } from "../drawer/drawerSchema";
-import { downloadIntoEditor } from "../../lib/editorDownloads";
-import { isProjectTrack } from "../../lib/format";
-import { useLibraryStore } from "../../stores/libraryStore";
-import { LaneEditor } from "../editor/LaneEditor";
-import { LANE_EDITOR_APP, useLaneEditor } from "../../stores/laneEditorStore";
-import { api } from "../../lib/api";
-import type { Track } from "../../types";
+import type { DrawerEntry, DrawerSpec } from "../drawer/drawerSchema";
 import { TrackMetaEditorDrawer } from "../library/TrackMetaEditor";
 import { DrawerLyrics } from "../player/SidePanels";
 import { SongColorBackdrop } from "../player/SongColorBackdrop";
 import { requestPlayingLyrics } from "../player/lyricsEntry";
-import { mediaProductionAvailable, visualizerExportAvailable } from "../../lib/platformFeatures";
+import { visualizerExportAvailable } from "../../lib/platformFeatures";
 import { DownloadTaskPages, shownTaskViews } from "../player/TaskPanels";
 import { SettingsPanel } from "../settings/SettingsPanel";
 
@@ -45,27 +38,6 @@ function DrawerSettings() {
 const useTaskView = () => useTaskPanelStore(state => state.view);
 const useSettingsPageInView = () => useSettingsPage(state => state.page);
 const useStudioTabInView = () => useStudioTab(state => state.tab);
-const useProjectInView = () => useLaneEditor(state => state.active ?? "");
-
-/**
- * On the editor's title: songs or videos (from the library, or online ones, downloaded first)
- * start another project, another page; a project opens as its page, or is shown when it is open.
- */
-const NEW_PROJECT_DROP: TitleDrop = {
-  label: "新建一个工程",
-  labelFor(ids) {
-    const byId = useLibraryStore.getState().summaryById;
-    return ids.length > 0 && ids.every(id => isProjectTrack(byId.get(id)?.format ?? "")) ? "打开工程" : "新建一个工程";
-  },
-  drop(ids) {
-    void Promise.all(ids.map(id => api.track(id).catch(() => null)))
-      .then(tracks => useLaneEditor.getState().placeTracks(null, tracks.filter((t): t is Track => Boolean(t)), { at: 0 }));
-  },
-  dropSearch: payload => {
-    useLaneEditor.getState().show();
-    void downloadIntoEditor(payload, null, 0);
-  },
-};
 
 /** Full-screen lyrics give the window back by becoming the longer drawer again. */
 const LYRICS_WINDOW = { label: "退出全屏", leave: () => useLyricsExtent.getState().setExtent("longer") };
@@ -81,9 +53,6 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
   const settings = useAppStore(state => state.showSettings);
   const visualizerTrack = useVisualizerStudioStore(state => state.track);
   const metaId = useTrackMetaEditor(state => state.trackId);
-  const laneEditor = useLaneEditor(state => state.open);
-  const laneProjects = useLaneEditor(state => state.projects);
-  const projectPages = useMemo(() => laneProjects.map(p => ({ id: p.path, label: p.doc.title || "未命名", title: `${p.doc.title || "未命名"} · ${p.path}` })), [laneProjects]);
   // How tall the lyrics are is the listener's choice (the menu on the panel, lyricsExtent.ts).
   // Full screen needs a song: the playing song's bubble is the other half of that window.
   const lyricsExtent = shownLyricsExtent(useLyricsExtent(state => state.extent), useLyricsExtentShape());
@@ -129,22 +98,6 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
     onPage: id => useStudioTab.getState().setTab(id as StudioTab),
     body: <VisualizerDock />,
     close: () => useVisualizerStudioStore.getState().requestClose(),
-  });
-  if (mediaProductionAvailable() && laneEditor) apps.push({
-    id: LANE_EDITOR_APP,
-    title: "剪辑",
-    extent: "at-least-half",
-    // One page per open project; nothing open yet, the plain title.
-    pages: projectPages.length ? projectPages : undefined,
-    usePage: projectPages.length ? useProjectInView : undefined,
-    onPage: id => useLaneEditor.getState().activate(id),
-    // Each project closes by its own ×; what it is is already saved, edit by edit, in its file.
-    closePage: path => useLaneEditor.getState().closeProject(path),
-    // A double-click on a project's word renames it: its file, its title and its library row.
-    renamePage: (path, name) => { void useLaneEditor.getState().renameProject(path, name); },
-    titleDrop: NEW_PROJECT_DROP,
-    body: <LaneEditor />,
-    close: () => useLaneEditor.getState().close(),
   });
   if (metaId !== null) apps.push({
     id: "meta",

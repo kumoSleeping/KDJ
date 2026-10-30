@@ -1,6 +1,6 @@
 // `kdj visualizer render`: the server asks the open windows to render a song's
 // visualizer, and the first one to claim it exports the studio's default project with the
-// song's cover through the editor's own exporter (WebCodecs, no FFmpeg).
+// song's cover through the visualizer studio's own exporter (WebCodecs, no FFmpeg).
 import { api, visualizerApi } from "./api";
 import { mediaProductionAvailable } from "./platformFeatures";
 import { createVisualizerProject, studioDuration, syncVisualizerImages } from "./visualizerStudio";

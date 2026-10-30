@@ -37,9 +37,9 @@ pub fn is_audio_extension(ext: &str) -> bool {
     AUDIO_EXTENSIONS.contains(&lower.as_str())
 }
 
-/// KDJ's own video projects (docs/kdjv.md): a JSON edit list of local files that plays like a
-/// video once KDJ has rendered it. In the library like any video; never analysed, tagged or
-/// given a cover — there is no sound in the file itself.
+/// KDJ's own video projects (`.kdjv`), made by the editor that was taken out after 1.1.0-rc19.
+/// No longer scanned; a row an earlier build added stays, and is never analysed, tagged, given
+/// a cover or played.
 pub const PROJECT_EXTENSION: &str = "kdjv";
 
 pub fn is_project_path(path: &Path) -> bool {
@@ -48,61 +48,13 @@ pub fn is_project_path(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case(PROJECT_EXTENSION))
 }
 
-/// 曲库扫描认的后缀 = 音频 ∪ 视频 ∪ KDJ 视频工程。
+/// 曲库扫描认的后缀 = 音频 ∪ 视频。
 ///
 /// 扫描和文件夹树的"磁盘上有几个"必须用同一份，否则树上显示 3 个待入库、
 /// 扫完还是 3 个，用户会一直点「扫描」。
 pub fn is_media_extension(ext: &str) -> bool {
     let lower = ext.trim_start_matches('.').to_ascii_lowercase();
-    AUDIO_EXTENSIONS.contains(&lower.as_str())
-        || VIDEO_EXTENSIONS.contains(&lower.as_str())
-        || (!cfg!(any(target_os = "android", target_os = "ios")) && lower == PROJECT_EXTENSION)
-}
-
-/// A project's title and length, read from its own JSON (no source is opened): the length is
-/// where its last clip ends; in the editor's lanes (format 2), the song's length, else the main
-/// lane's clips and gaps end to end.
-fn project_tags(path: &Path, out: &mut TrackTags) {
-    let Ok(text) = std::fs::read_to_string(path) else { return };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { return };
-    out.title = doc["title"].as_str().unwrap_or_default().trim().to_string();
-    let length = |clip: &serde_json::Value| {
-        let speed = clip["speed"].as_f64().unwrap_or(1.);
-        let from = clip["in"].as_f64().unwrap_or(0.);
-        (speed > 0.).then(|| clip["out"].as_f64().map(|out| (out - from) / speed)).flatten()
-    };
-    if doc["kdjv"].as_u64() == Some(2) {
-        // Several songs (`songs`) play one after another.
-        let song: f64 = match doc["songs"].as_array() {
-            Some(songs) => songs.iter().filter_map(length).sum(),
-            None => length(&doc["song"]).unwrap_or(0.),
-        };
-        let main: f64 = doc["main"].as_array().into_iter().flatten()
-            .map(|item| item["gap"].as_f64().or_else(|| length(item)).unwrap_or(0.))
-            .sum();
-        let end = if song > 0. { song } else { main };
-        if end > 0. {
-            out.duration = Some(end);
-        }
-        return;
-    }
-    let end = doc["tracks"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|track| track["clips"].as_array().into_iter().flatten())
-        .filter_map(|clip| {
-            let speed = clip["speed"].as_f64().unwrap_or(1.);
-            let from = clip["in"].as_f64().unwrap_or(0.);
-            if speed <= 0. {
-                return None;
-            }
-            Some(clip["at"].as_f64()? + (clip["out"].as_f64()? - from) / speed)
-        })
-        .fold(0., f64::max);
-    if end > 0. {
-        out.duration = Some(end);
-    }
+    AUDIO_EXTENSIONS.contains(&lower.as_str()) || VIDEO_EXTENSIONS.contains(&lower.as_str())
 }
 
 /// 按魔数认封面格式。认不出来返回 None——**不要**默认成 JPEG：
@@ -392,10 +344,7 @@ pub fn read_tags(path: &Path) -> TrackTags {
         ..Default::default()
     };
     if crate::workshop_images::is_image_path(path) { return out; }
-    if is_project_path(path) {
-        project_tags(path, &mut out);
-        return out;
-    }
+    if is_project_path(path) { return out; }
     // 扫描只要文字标签和技术参数，封面走 read_cover；不跳过的话每个文件都整块读一遍原图
     let options = lenient().read_cover_art(false);
     let Ok(tagged) = Probe::open(path).and_then(|probe| probe.options(options).read()) else {
@@ -620,28 +569,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_project_is_in_the_library_with_its_title_and_length() {
-        assert_eq!(is_media_extension("kdjv"), !cfg!(any(target_os = "android", target_os = "ios")));
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("set.kdjv");
-        std::fs::write(
-            &path,
-            r#"{"kdjv":1,"title":" 开场 ","tracks":[{"clips":[
-                {"src":"a.mp4","at":0,"in":10,"out":20,"speed":2},
-                {"src":"b.mp4","at":4,"out":8}]}]}"#,
-        )
-        .unwrap();
-        let tags = read_tags(&path);
-        assert_eq!(tags.format, "kdjv");
-        assert_eq!(tags.title, "开场");
-        assert_eq!(tags.duration, Some(12.), "the last clip ends at 4 + 8 s");
+    fn a_project_is_no_longer_library_media() {
+        assert!(!is_media_extension("kdjv"));
         assert!(is_project_path(Path::new("/x/SET.KDJV")));
-        std::fs::write(&path, r#"{"kdjv":2,"main":[{"src":"a.mp4","in":10,"out":20,"speed":2},{"gap":3},{"src":"b.mp4","out":4}]}"#).unwrap();
-        assert_eq!(read_tags(&path).duration, Some(12.), "lanes: 5 + 3 + 4 s end to end");
-        std::fs::write(&path, r#"{"kdjv":2,"song":{"src":"s.flac","in":1,"out":61},"main":[{"gap":3}]}"#).unwrap();
-        assert_eq!(read_tags(&path).duration, Some(60.), "a VJ is as long as its song");
-        std::fs::write(&path, r#"{"kdjv":2,"songs":[{"src":"s.flac","in":1,"out":61},{"src":"t.flac","out":30}],"main":[{"gap":3}]}"#).unwrap();
-        assert_eq!(read_tags(&path).duration, Some(90.), "songs play one after another");
+        assert_eq!(read_tags(Path::new("/x/set.kdjv")).format, "kdjv");
     }
 
     /// 造一个 8000Hz / 8bit / 单声道的静音 WAV，用来测时长读取。

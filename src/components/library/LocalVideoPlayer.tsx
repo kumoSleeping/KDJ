@@ -22,9 +22,6 @@ import {
   VideoTransportEchoGuard,
 } from "../../lib/videoPlaybackEngine";
 import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
-import { ensureProjectLive, useKdjvLive } from "../../lib/kdjvPlay";
-import { isProjectTrack } from "../../lib/format";
-import { KdjvLivePicture } from "../player/KdjvLivePicture";
 import { KdjvCodecPicture } from "../player/KdjvCodecPicture";
 import { codecDecodeAvailable, useVideoProject } from "../../lib/codecVideo";
 import { PanelErrorBoundary } from "../RootErrorBoundary";
@@ -96,20 +93,15 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     setDuration(track.duration ?? 0);
     scrubPosition.current = null;
   }, [track.id]);
-  // A project playing from its sound is drawn live (KdjvCodecPicture): there is no file to load,
-  // and these elements neither prepare its seeks nor follow its clock.
-  const projectLive = useKdjvLive(state => state.live[track.id]);
-  // A project is never loaded as a video, also before its live picture is there (ensureProjectLive).
-  const project = isProjectTrack(track.format);
-  // A video on the song's clock is drawn the same way, as a project of one clip (codecVideo.ts);
-  // a file the WebView cannot decode keeps the `<video>` elements below.
-  const codecWanted = !hidden && !project && !projectLive && usesLocalVideoDeviceClock() && codecDecodeAvailable();
+  // A video on the song's clock is drawn with WebCodecs (KdjvCodecPicture), as a project of one
+  // clip (codecVideo.ts); a file the WebView cannot decode keeps the `<video>` elements below.
+  const codecWanted = !hidden && usesLocalVideoDeviceClock() && codecDecodeAvailable();
   const videoPicture = useVideoProject(codecWanted ? track.id : null);
   const codecVideo = codecWanted && !videoPicture.refused;
-  const live = projectLive ?? videoPicture.project ?? undefined;
+  const live = videoPicture.project ?? undefined;
   const localSwap = useLocalVideoSwap({
-    enabled: !hidden && !live && !project && !codecVideo,
-    trackId: hidden || live || project || codecVideo ? null : track.id,
+    enabled: !hidden && !live && !codecVideo,
+    trackId: hidden || live || codecVideo ? null : track.id,
     desiredPlayingRef,
     getRate: () => getLocalVideoClock(track.id)?.rate ?? getLatestPlayerSync(track.id)?.rate ?? 1,
     onActivate: (video) => {
@@ -177,10 +169,9 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
 
   useEffect(() => {
     if (live) { localSwap.unload(); setDuration(live.duration); return; }
-    if (project) { localSwap.unload(); ensureProjectLive(track.id); return; }
     if (codecVideo) { localSwap.unload(); return; }
     localSwap.load(`local:${track.id}`, api.videoUrl(track.id));
-  }, [localSwap.load, localSwap.unload, track.id, live, project, codecVideo]);
+  }, [localSwap.load, localSwap.unload, track.id, live, codecVideo]);
 
   useEffect(() => {
     const onFocus = (event: Event) => {
@@ -192,7 +183,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   }, []);
 
   useEffect(() => {
-    if (hidden || live || project || codecVideo || !usesLocalVideoDeviceClock()) return;
+    if (hidden || live || codecVideo || !usesLocalVideoDeviceClock()) return;
     const apply = () => {
       const video = activeVideo();
       if (!video || localSwap.isHoldingPosition()) return;
@@ -207,7 +198,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     video?.addEventListener("seeked", apply);
     apply();
     return () => { unsubscribe(); video?.removeEventListener("loadeddata", apply); video?.removeEventListener("seeked", apply); };
-  }, [track.id, hidden, Boolean(live), project, localSwap.activeSlot, codecVideo]);
+  }, [track.id, hidden, Boolean(live), localSwap.activeSlot, codecVideo]);
 
   useEffect(() => {
     const onMediaSync = (event: Event) => {
@@ -433,17 +424,12 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
           />
         ))}
         {live && !hidden && (
-          <PanelErrorBoundary name="工程画面" turn={track.id}>
-            {codecDecodeAvailable()
-              ? <KdjvCodecPicture trackId={track.id} project={live}
-                  sourceUrl={projectLive ? undefined : () => api.videoUrl(track.id)} onTransport={transport => {
-                  if (scrubPosition.current === null) setPosition(transport.position);
-                  setPlaying(transport.playing);
-                }} />
-              : <KdjvLivePicture trackId={track.id} project={live} onTransport={transport => {
-                  if (scrubPosition.current === null) setPosition(transport.position);
-                  setPlaying(transport.playing);
-                }} />}
+          <PanelErrorBoundary name="视频画面" turn={track.id}>
+            <KdjvCodecPicture trackId={track.id} project={live}
+              sourceUrl={() => api.videoUrl(track.id)} onTransport={transport => {
+                if (scrubPosition.current === null) setPosition(transport.position);
+                setPlaying(transport.playing);
+              }} />
           </PanelErrorBoundary>
         )}
         {!hidden && controls}

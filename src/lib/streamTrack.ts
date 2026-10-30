@@ -480,11 +480,6 @@ export function streamCoverUrls(track: Track): string[] {
 export function mediaUrlForTrack(track: Track): string {
   // 未解析完的在线占位曲目同样没有曲库音频；不能退回 /library/audio/:负id。
   if (isStreamTrack(track)) return streamMediaUrl(track) ?? "";
-  // A project is heard from the sound or render it was last given (kdjvPlay.ts): its file is named
-  // in the address, so that a new one is loaded anew and not taken for the one already there.
-  if (track.format?.toLowerCase() === "kdjv" && !/\.kdjv$/i.test(track.path)) {
-    return `${api.audioUrl(track.id)}&sound=${encodeURIComponent(track.path.split(/[\\/]/).pop() ?? "")}`;
-  }
   return api.audioUrl(track.id);
 }
 
