@@ -511,6 +511,16 @@ div.kd-stream-status:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A tall window (a phone held upright) gives a name two lines before it is cut. */
+.kd-app[data-tall="true"] .kd-narrow-folder-rail .kd-rail-label {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
 .kd-narrow-folder-rail button:hover:not(:disabled) {
   color: var(--kd-text);
   background: var(--kd-hover);

@@ -34,7 +34,7 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   missing lyric sets `suspended`: the shell stays put away, while its entry and remembered
   enabled state remain. Lyrics arriving later bring the panel back; no timeout opens an empty
   shell. A queued song that is skipped is discarded, never briefly drawn. Manual close still
-  switches lyrics off. A phone has the same drawer (it is locked to landscape).
+  switches lyrics off. A phone has the same drawer, in either orientation.
 - **An app never draws its own shell.** No head, no close button, no frame, no background, no
   entrance or exit motion. It supplies a `DrawerSpec` and a body; `DrawerHost` draws the rest.
 - **Opened from the chrome or from elsewhere.** Downloads and settings use the window chrome;

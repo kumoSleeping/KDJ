@@ -192,8 +192,8 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
     away, a tall one keeps it away unless it was brought back. Crossing from one shape to the
     other is the same handover as the key. A slide always runs to its end; if what is wanted
     changes on the way, the bar arrives and sets off again.
-  - A phone has the same key; it is never a tall window (it is locked to landscape), so its
-    bar starts up until the listener puts it away.
+  - A phone has the same key and the same two choices: held sideways it is a wide window,
+    held upright a tall one.
   - An app that has the window (full-screen lyrics, `takesWindow` in `docs/drawer-schema.md`)
     sends the bar away the same way for as long as it has it, without reading or writing
     either shape's choice. The bubble is then the window's lower block. Its 展开播放条 key

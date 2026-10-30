@@ -355,23 +355,23 @@ test("whatever the listener does, in any order, the bar or the bubble is on scre
 });
 
 // Last: it gives the modules a window for a moment, which the tests above run without.
-test("a phone is never a tall window: its bar starts up and can be put away", () => {
+test("an upright phone is a tall window: its bar starts away and can be brought back", () => {
   const stored = storage();
   const previous = (globalThis as { window?: unknown }).window;
-  // Even a tall viewport (a rotation on its way, split screen) keeps a phone's wide shape.
+  // A phone follows the system's rotation: held upright it has the tall window's shape and choice.
   Object.assign(globalThis, { window: {
     kdj: { platform: "android" },
     localStorage: stored,
     matchMedia: () => ({ matches: true, addEventListener() {}, removeEventListener() {} }),
   } });
   try {
-    assert.equal(windowIsTall(), false);
-    assert.equal(readPlayerBarCollapsed(), false, "the bar is up until the listener puts it away");
-    usePlayerBarAway.setState({ tall: false, collapsed: false });
-    bar().setCollapsed(true);
-    assert.equal(stored.getItem("kd-player-bar-collapsed"), "true");
-    assert.equal(readPlayerBarCollapsed(), true, "and stays away at the next launch");
-    assert.equal(playerBarAwayWanted(bar().collapsed, true), true);
+    assert.equal(windowIsTall(), true);
+    assert.equal(readPlayerBarCollapsed(), true, "the bar is away until the listener brings it back");
+    usePlayerBarAway.setState({ tall: true, collapsed: true });
+    bar().setCollapsed(false);
+    assert.equal(stored.getItem("kd-player-bar-collapsed-tall"), "false");
+    assert.equal(readPlayerBarCollapsed(), false, "and stays up at the next launch");
+    assert.equal(readPlayerBarCollapsed("wide"), false, "held sideways it keeps the wide choice");
   } finally {
     Object.assign(globalThis, { window: previous });
   }

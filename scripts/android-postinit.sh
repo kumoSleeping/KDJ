@@ -195,13 +195,9 @@ if 'android:supportsPictureInPicture="true"' not in manifest:
         r'\1 android:supportsPictureInPicture="true"', manifest, count=1)
     if count != 1:
         raise SystemExit("MainActivity manifest template changed")
-# The phone uses the one landscape layout (src/lib/useLayoutMode.ts); there is no portrait one.
-if 'android:screenOrientation=' not in manifest:
-    manifest, count = re.subn(
-        r'(<activity\b[^>]*android:name="\.MainActivity")',
-        r'\1 android:screenOrientation="sensorLandscape"', manifest, count=1)
-    if count != 1:
-        raise SystemExit("MainActivity manifest template changed")
+# The phone follows the system's rotation: wide is the desktop layout, tall is the tall window's
+# (src/lib/useLayoutMode.ts). Drop the landscape lock an older postinit wrote into a kept gen tree.
+manifest = re.sub(r'\s+android:screenOrientation="sensorLandscape"', '', manifest)
 open(manifest_path, "w").write(manifest)
 PY
 
