@@ -211,6 +211,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/visualizer/analyze", post(analyze))
         .route("/api/visualizer/export", post(start))
         .route("/api/visualizer/render", post(cover_render))
+        .route("/api/visualizer/render/{id}/claim", post(claim_cover_render))
+        .route("/api/visualizer/render/{id}/done", post(finish_cover_render))
         .route("/api/visualizer/jobs/{id}", get(poll))
         .route("/api/visualizer/jobs/{id}/cancel", post(cancel))
         .route("/api/visualizer/jobs/{id}/frames", post(frame).layer(DefaultBodyLimit::max(MAX_FRAME.max(MAX_CHUNK))))
@@ -225,11 +227,53 @@ fn track_audio(state: &AppState, id: i64) -> Result<PathBuf> {
     let track = state.library.get(id)?.context("曲目不存在")?;
     source(&track.path).context("请先把完整歌曲下载到本地曲库，不能使用流媒体占位或在线试听地址")
 }
-/// A visualizer rendered without the editor (the AI's `kdj visualizer render`): the song's own
-/// cover in the default scene, through the server's exporter. It is the base layout, not the
-/// studio's styled look — the studio's scenes live in the window, not here.
+/// A visualizer for the AI's `kdj visualizer render`: the song's own cover in the studio's
+/// default project, rendered and encoded by an open KDJ window exactly as the editor exports
+/// (WebCodecs, no FFmpeg). Only when no window takes it does the server draw the base layout
+/// with FFmpeg's filter graph (`graph.rs`), where FFmpeg is installed.
 #[derive(Deserialize)]
 struct CoverRender { track_id: i64, output_path: String, #[serde(default)] width: Option<u32>, #[serde(default)] height: Option<u32> }
+
+/// A render handed to a window: claimed once, answered once. Dropping the CLI request forgets it.
+struct WindowRender { claim: Option<tokio::sync::oneshot::Sender<()>>, done: Option<tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>> }
+fn window_renders() -> &'static Mutex<HashMap<String, WindowRender>> {
+    static RENDERS: std::sync::OnceLock<Mutex<HashMap<String, WindowRender>>> = std::sync::OnceLock::new();
+    RENDERS.get_or_init(Default::default)
+}
+/// How long an open window has to take the render before the server's own path runs.
+const WINDOW_CLAIM: Duration = Duration::from_secs(8);
+
+async fn render_in_window(state: &AppState, p: &CoverRender) -> ApiResult<Option<serde_json::Value>> {
+    let id = format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>());
+    let (claim, claimed) = tokio::sync::oneshot::channel();
+    let (done, finished) = tokio::sync::oneshot::channel();
+    window_renders().lock().unwrap().insert(id.clone(), WindowRender { claim: Some(claim), done: Some(done) });
+    struct Forget(String);
+    impl Drop for Forget { fn drop(&mut self) { window_renders().lock().unwrap().remove(&self.0); } }
+    let _forget = Forget(id.clone());
+    state.hub.publish("visualizer.render.requested", &serde_json::json!({ "id": id, "track_id": p.track_id, "output_path": p.output_path, "width": p.width, "height": p.height }));
+    if !matches!(tokio::time::timeout(WINDOW_CLAIM, claimed).await, Ok(Ok(()))) { return Ok(None); }
+    match finished.await {
+        Ok(Ok(report)) => Ok(Some(report)),
+        Ok(Err(error)) => Err(ApiError::new(axum::http::StatusCode::UNPROCESSABLE_ENTITY, error)),
+        Err(_) => Err(ApiError::new(axum::http::StatusCode::UNPROCESSABLE_ENTITY, "渲染可视化的窗口已关闭")),
+    }
+}
+async fn claim_cover_render(Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+    let claim = window_renders().lock().unwrap().get_mut(&id).and_then(|render| render.claim.take());
+    let taken = claim.is_some_and(|claim| claim.send(()).is_ok());
+    Ok(Json(serde_json::json!({ "claimed": taken })))
+}
+#[derive(Deserialize)]
+struct WindowRenderResult { #[serde(default)] error: Option<String>, #[serde(default)] report: Option<serde_json::Value> }
+async fn finish_cover_render(Path(id): Path<String>, Json(result): Json<WindowRenderResult>) -> ApiResult<Json<serde_json::Value>> {
+    let done = window_renders().lock().unwrap().get_mut(&id).and_then(|render| render.done.take());
+    let answer = match (result.error, result.report) {
+        (None, Some(report)) => Ok(report),
+        (error, _) => Err(error.unwrap_or_else(|| "可视化渲染失败".into())),
+    };
+    Ok(Json(serde_json::json!({ "delivered": done.is_some_and(|done| done.send(answer).is_ok()) })))
+}
 
 async fn cover_render(State(state): State<Arc<AppState>>, Json(p): Json<CoverRender>) -> ApiResult<Json<serde_json::Value>> {
     let audio = track_audio(&state, p.track_id)?;
@@ -237,6 +281,10 @@ async fn cover_render(State(state): State<Arc<AppState>>, Json(p): Json<CoverRen
     api_check(output.is_absolute(), "输出路径要是绝对路径")?;
     let folder = output.parent().context("输出路径没有文件夹")?.to_path_buf();
     let (bytes, mime) = kdj_providers::tags::read_cover(&audio).context("这首歌没有内嵌封面，可视化需要一张图片")?;
+    if let Some(report) = render_in_window(&state, &p).await? {
+        return Ok(Json(report));
+    }
+    api_check(kdj_providers::ffmpeg::available(), "没有打开的 KDJ 窗口来渲染可视化，这台设备上也没有 FFmpeg")?;
     let extension = if mime.contains("png") { "png" } else { "jpg" };
     let cover = folder.join(format!(".kdj-visualizer-cover-{:016x}.{extension}", rand::random::<u64>()));
     std::fs::write(&cover, &bytes).context("封面写不出来")?;

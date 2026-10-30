@@ -1011,6 +1011,7 @@ export type WsEvent =
   | { type: "kdjv.progress"; payload: KdjvProgress }
   /** A source's preview proxy is made (proxy.rs). */
   | { type: "kdjv.proxy"; payload: { source: string } }
+  | { type: "visualizer.render.requested"; payload: import("./lib/visualizerCliRender").VisualizerCliRender }
   | { type: "ai.event"; payload: import("./types/ai").PiEvent }
   | { type: "ai.status"; payload: import("./types/ai").AiStatus };
 
