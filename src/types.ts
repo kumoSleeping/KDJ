@@ -26,32 +26,9 @@ export type TaskPhase =
 export type AccountState = "missing" | "valid" | "expired" | "unknown";
 export type QrStateValue = "waiting" | "scanned" | "done" | "expired" | "refused" | "error";
 
-export interface FfmpegToolStatus {
-  state: "missing" | "ready" | "broken";
-  path: string | null;
-  version: string | null;
-  error: string | null;
-}
-
-export interface FfmpegInstallationStatus {
-  platform: string;
-  arch: string;
-  ffmpeg: FfmpegToolStatus;
-  ffprobe: FfmpegToolStatus;
-}
-
-export interface FfmpegInstallProgress {
-  component: string | null;
-  phase: "idle" | "preparing" | "downloading" | "extracting" | "validating" | "done" | "failed";
-  downloaded: number;
-  total: number | null;
-  error: string | null;
-}
-
 export interface Health {
   ok: boolean;
   version: string;
-  ffmpeg: boolean;
   data_dir: string;
   download_dir: string;
   /**
@@ -1107,8 +1084,6 @@ export interface KdjBridge {
     image: string;
   }) => Promise<SavedLoginQr>;
   pickFolder: (options?: { defaultPath?: string; title?: string }) => Promise<string | null>;
-  installMediaTools?: (action: "download" | "archive" | "folder") => Promise<boolean>;
-  mediaToolsProgress?: () => Promise<FfmpegInstallProgress>;
   pickFolders: () => Promise<string[]>;
   /** 桌面：选音频/视频文件直接入库；取消返回 `[]`。手机和浏览器没有这个入口。 */
   pickMediaFiles?: () => Promise<string[]>;

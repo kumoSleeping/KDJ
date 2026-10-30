@@ -35,8 +35,6 @@ mod midi;
 mod mini_player;
 #[cfg(desktop)]
 mod kvj_window;
-#[cfg(desktop)]
-mod media_tools;
 #[cfg(target_os = "macos")]
 mod macos_window_drag;
 #[cfg(desktop)]
@@ -2021,8 +2019,6 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
 
     // 端口传 0 让内核直接选择并占用，避免探测后释放再绑定的竞态窗口。
     let config = Arc::new(AppConfig::create(data_dir, download_dir, 0));
-    #[cfg(desktop)]
-    kdj_providers::ffmpeg::managed::initialize(&config.data_dir);
     // 单文件素材可驻留曲库，但不能在启动时将其父目录登记为扫描根。
     // show() 前要用这份主题垫原生底色，否则浅色用户会先看到配置默认底闪一下。
     let theme = config.to_settings().theme;
@@ -2367,8 +2363,6 @@ pub fn run() {
         check_desktop_update,
         get_update_progress,
         apply_update,
-        media_tools::install_media_tools,
-        media_tools::media_tools_progress,
         pick_folder,
         pick_folders,
         pick_media_files,

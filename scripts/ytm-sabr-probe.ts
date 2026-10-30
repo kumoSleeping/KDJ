@@ -3,12 +3,12 @@
  *
  * This deliberately does not use KDJ's Rust server, spool, player, or Tauri IPC. It proves the
  * smallest useful chain first: authenticated WEB_REMIX identity, warm WebPO minter/player script,
- * concurrent Player plus video-bound proof, SABR/UMP audio, complete MP4, then ffprobe.
+ * concurrent Player plus video-bound proof, SABR/UMP audio, complete MP4, then a size check.
  *
  * Usage: npm run probe:ytm-sabr -- wO3lCCoWuSc /tmp/kdj-ytm-sabr-probe.m4a
  */
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
 import { open, readFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 
@@ -353,18 +353,12 @@ try {
 }
 mark("download-complete", "bytes=" + bytes + " chunks=" + chunks);
 
-const probe = spawnSync("ffprobe", [
-  "-v", "error",
-  "-show_entries", "format=duration,size,format_name",
-  "-of", "json",
-  outputPath,
-], { encoding: "utf8" });
-if (probe.status !== 0) throw new Error("ffprobe failed: " + probe.stderr.trim());
-const media = JSON.parse(probe.stdout) as { format?: { duration?: string; size?: string } };
-if (Number(media.format?.size || 0) !== bytes || Number(media.format?.duration || 0) <= 0) {
-  throw new Error("ffprobe did not validate the complete audio file");
+// The file is whole when it starts like an MP4 and holds every byte that was streamed.
+const head = readFileSync(outputPath).subarray(4, 8).toString("latin1");
+if (!["ftyp", "styp", "moov"].includes(head) || statSync(outputPath).size !== bytes) {
+  throw new Error("the complete audio file did not validate");
 }
-mark("ffprobe-valid", "duration=" + media.format?.duration + "s");
+mark("file-valid", "bytes=" + bytes);
 console.log(JSON.stringify({
   videoId,
   prewarmMs: clickStartedAt - startedAt,

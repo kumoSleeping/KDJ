@@ -30,7 +30,7 @@ export interface InlineNoticeProps {
  * no leaving gesture: the space it held closes at once.
  *
  * 出错的提示都带一个「上报」键，直达设置里给开发者的上报处（`reportError`）；没有设置抽屉的
- * 窗口里不出现。提示默认占一行、放不下就截断；允许换行的地方（账号、混音操作、FFmpeg），它是
+ * 窗口里不出现。提示默认占一行、放不下就截断；允许换行的地方（账号、混音操作），它是
  * 一段正常的文字：「出错」打头，字按整宽换行，键跟在最后一个字后面，谁也不单占一栏。
  */
 export function InlineNotice({

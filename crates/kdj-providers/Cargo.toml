@@ -58,9 +58,6 @@ rust-ini = "0.21"
 reqwest = { version = "=0.13.4", default-features = false, features = ["system-proxy"] }
 hyper-util = { version = "=0.1.20", default-features = false, features = ["client-proxy", "client-proxy-system"] }
 tempfile = "3.27"
-zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
-# Decode only; includes the malformed-archive fixes in 0.21.3/0.21.4 and 0.22.1.
-sevenz-rust2 = { version = "=0.22.2", default-features = false, features = ["bzip2", "deflate", "ppmd"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

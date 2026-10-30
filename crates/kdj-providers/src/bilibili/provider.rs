@@ -454,19 +454,8 @@ impl BilibiliProvider {
         Ok((key, candidates))
     }
 
-    /// 自动音频对齐给 ffmpeg 使用的预览源。URL 仍由同一套缓存/过期刷新逻辑
-    /// 产生；Cookie 单独返回，调用方必须连同 Referer/UA 一起传给 ffmpeg。
-    pub async fn preview_source(&self, bvid: &str, page_index: usize) -> Result<(String, String)> {
-        let bvid = normalize_bvid(bvid);
-        anyhow::ensure!(!bvid.is_empty(), "BV 号格式不正确");
-        Ok((
-            self.preview_url(&bvid, page_index).await?,
-            self.client.cookie_header(),
-        ))
-    }
-
-    /// 自动校准只需要声音，必须优先拿 DASH 的纯音频 m4s。若复用预览 MP4，
-    /// ffmpeg 为了解出 210 秒声音仍要下载同长度的视频数据，一次校准会慢到二十秒。
+    /// 自动校准和声学定位（kdj align）只需要声音，优先拿 DASH 的纯音频 m4s：几 MB 就是
+    /// 整段声音；若复用预览流，要连同样长的画面一起下载。
     pub async fn calibration_audio_source(
         &self,
         bvid: &str,

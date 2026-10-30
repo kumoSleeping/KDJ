@@ -124,7 +124,7 @@ impl Default for Quality {
 pub enum TaskState {
     Queued,
     Running,
-    /// 媒体字节已拉完，正在由 FFmpeg 合并/转码，或移动、入库。
+    /// 媒体字节已拉完，正在合并音画、抽音轨，或移动、入库。
     Processing,
     /// 用户暂停了这一批任务；保留原始请求，下一次「开始」会重新执行。
     Paused,
@@ -226,7 +226,6 @@ impl Default for KeyNotation {
 pub struct Health {
     pub ok: bool,
     pub version: String,
-    pub ffmpeg: bool,
     pub data_dir: String,
     pub download_dir: String,
     /// 新增：安卓上前端要据此隐藏"多根曲库目录/文件夹拖拽"这些桌面专属入口。
@@ -780,7 +779,7 @@ pub struct VideoDownloadRequest {
     pub transcode: bool,
     /// 成品相对原片的起点偏移（毫秒）。正数掐掉开头这么长，负数在开头
     /// 补同样长的黑场/静音——预览面板里对着唱盘校出来的那个值。
-    /// 0（默认）= 原样，走 copy 快路径；非零会强制重编码（见 ffmpeg.rs）。
+    /// 0（默认）= 原样复制；非零时音轨用系统 AAC 编码器重编（kdj-media remux）。
     #[serde(default)]
     pub offset_ms: i64,
     /// 下载完成后挪进这个曲库文件夹。空 = 留在默认视频目录。

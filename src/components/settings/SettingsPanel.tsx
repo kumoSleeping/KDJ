@@ -1,4 +1,4 @@
-import { useSettingsFocus, useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
+import { useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
 import {
@@ -26,7 +26,6 @@ import {
 import { api } from "../../lib/api";
 import { chooseAutoAnalysisMode } from "../../lib/autoAnalyze";
 import { resolveAutoAnalysisMode } from "../../lib/autoAnalysisMode";
-import { getBridge } from "../../lib/bridge";
 import { formatBytes } from "../../lib/format";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
@@ -52,7 +51,6 @@ import { Button, InlineNotice, Panel } from "../common";
 import { AccountRow, linkedAccount, linkedPlatforms } from "./AccountRow";
 import { ActivityLogPanel } from "./ActivityLogPanel";
 import { UpdateRow } from "./UpdateRow";
-import { FfmpegPanel } from "./FfmpegPanel";
 import { CliPanel } from "./CliPanel";
 import { TASK_STAY_CHOICES, useTaskStayPref, type TaskStaySeconds } from "../../lib/taskStayPref";
 
@@ -476,30 +474,6 @@ export function SettingsPanel({ preferences = false, page }: {
 
   const taskStaySeconds = useTaskStayPref((s) => s.seconds);
   const setTaskStaySeconds = useTaskStayPref((s) => s.setSeconds);
-  const ffmpegFocusEpoch = useSettingsFocus((s) => (s.section === "ffmpeg" ? s.epoch : 0));
-  const ffmpegSectionRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!ffmpegFocusEpoch) return;
-    // The media tools have a page of their own: open it at them.
-    useSettingsPage.getState().setPage("ffmpeg");
-    useSettingsFocus.getState().clear(); // one request, one scroll: a later opening starts at the top
-    let frame = 0;
-    const scrollToFfmpeg = () => {
-      const section = ffmpegSectionRef.current;
-      if (!section) {
-        if (frame++ < 30) requestAnimationFrame(scrollToFfmpeg);
-        return;
-      }
-      const scrollHost = section.closest(".kd-scroll") as HTMLElement | null;
-      if (!scrollHost) return;
-      const top =
-        section.getBoundingClientRect().top -
-        scrollHost.getBoundingClientRect().top +
-        scrollHost.scrollTop;
-      scrollHost.scrollTo({ top: Math.max(0, top), behavior: frame > 0 ? "auto" : "smooth" });
-    };
-    scrollToFfmpeg();
-  }, [ffmpegFocusEpoch]);
 
   return (
     <div className={preferences ? "kd-col kd-preferences" : "kd-col"} style={{ height: "100%", minHeight: 0 }}>
@@ -773,8 +747,6 @@ export function SettingsPanel({ preferences = false, page }: {
         {on("system") && <CliPanel />}
         {on("system") && <ActivityLogPanel />}
 
-        {on("ffmpeg") && ["darwin", "win32", "linux"].includes(getBridge().platform)
-          ? <div ref={ffmpegSectionRef} id="kd-settings-ffmpeg"><FfmpegPanel /></div> : null}
       </div>
     </div>
   );

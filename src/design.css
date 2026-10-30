@@ -2705,19 +2705,19 @@ body[data-kd-search-pointer-dragging="true"] * {
 /* A notice whose words may wrap is one run of text: the mark begins its first line, the words
    wrap across the whole width at their own breaks, and the keys follow the last word. Nothing
    holds a column beside the words. */
-.kd-notice:is(.kd-account-notice, .kd-ffmpeg-error) { display: block; }
-.kd-notice:is(.kd-account-notice, .kd-ffmpeg-error) > .kd-chip {
+.kd-notice.kd-account-notice { display: block; }
+.kd-notice.kd-account-notice > .kd-chip {
   display: inline;
   margin-right: 0.4rem;
   padding: 0;
 }
-.kd-notice:is(.kd-account-notice, .kd-ffmpeg-error) > .kd-notice-text {
+.kd-notice.kd-account-notice > .kd-notice-text {
   display: inline;
   overflow: visible;
   white-space: normal;
   overflow-wrap: break-word;
 }
-.kd-notice:is(.kd-account-notice, .kd-ffmpeg-error) > .kd-btn {
+.kd-notice.kd-account-notice > .kd-btn {
   vertical-align: middle;
   margin-left: 0.2rem;
 }
@@ -6766,26 +6766,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   display: flex;
   justify-content: flex-start;
 }
-.kd-ffmpeg-actions,
-.kd-ffmpeg-command {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-}
-.kd-ffmpeg-actions > .kd-ai-prompt-copy:first-child {
-  margin-right: auto;
-}
-.kd-ffmpeg-guide {
-  display: grid;
-  gap: 0.55rem;
-}
-.kd-ffmpeg-command code {
-  flex: 1 1 10rem;
-  min-width: 0;
-  overflow-wrap: anywhere;
-  font-size: var(--kd-size-xs);
-}
 .kd-djp-font-stepper {
   display: flex;
   align-items: center;
@@ -7700,22 +7680,6 @@ button.kd-camelot-grid-key { cursor: pointer; }
 
 [data-vj-drop-over] { outline: 1px dashed var(--kd-accent); outline-offset: -2px; }
 
-.kd-media-tools-dialog {
-  width: min(620px, calc(100vw - 32px));
-  max-height: calc(100vh - 48px);
-  overflow: auto;
-  color: var(--kd-text);
-}
-.kd-media-tools-dialog::backdrop { background: rgb(0 0 0 / 25%); }
-.kd-media-tools-dialog:not([open]) { display: none; }
-.kd-ffmpeg-actions progress { width: 120px; height: 4px; accent-color: var(--kd-theme); }
-.kd-ffmpeg-settings,
-.kd-ffmpeg-guide { grid-template-columns: minmax(0, 1fr); }
-.kd-ffmpeg-error { align-items: flex-start; }
-.kd-notice.kd-ffmpeg-error > .kd-notice-text {
-  white-space: pre-wrap;
-  user-select: text;
-}
 
 .kd-overlay-scroll-host .kd-selection-bar { z-index: 7; }
 

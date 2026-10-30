@@ -46,7 +46,6 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/health", get(health));
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let router = router
-        .route("/api/tools/ffmpeg", get(ffmpeg_installation_status))
         .route("/api/cli/status", get(crate::cli_api::status))
         .route("/api/cli/search", post(crate::cli_api::search))
         .route("/api/cli/download", post(crate::cli_api::download))
@@ -312,17 +311,12 @@ async fn guard_download_writes(
 
 // ---------------------------------------------------------------- 基础
 
-async fn ffmpeg_installation_status() -> Json<kdj_providers::ffmpeg::FfmpegInstallationStatus> {
-    Json(kdj_providers::ffmpeg::installation_status().await)
-}
-
 async fn health() -> Json<Value> {
     // 健康检查只用于版本/能力探测。设置接口已经在认证后提供用户配置，没必要在这里
     // 重复暴露 data_dir/download_dir 的绝对路径。
     Json(json!({
         "ok": true,
         "version": kdj_core::VERSION,
-        "ffmpeg": kdj_providers::ffmpeg::available(),
         "platform": std::env::consts::OS,
     }))
 }
@@ -5200,7 +5194,7 @@ pub(crate) fn apply_video_defaults(req: &mut VideoDownloadRequest, settings: &Se
         req.transcode = settings.video_transcode;
     }
     // 偏移封顶 ±10 分钟：这个值来自预览面板一下一下按出来的校准，
-    // 正常不过几秒；来一个天文数字的负偏移等于让 ffmpeg 铺几小时黑场
+    // 正常不过几秒；来一个天文数字的负偏移等于让 ffmpeg 铺几小时静音
     req.offset_ms = req.offset_ms.clamp(-600_000, 600_000);
 }
 

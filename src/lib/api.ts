@@ -45,7 +45,6 @@ import type {
   FolderUndoStatus,
   HarmonicMatch,
   Health,
-  FfmpegInstallationStatus,
   IntakeRequest,
   IntakeResponse,
   LibraryStats,
@@ -826,7 +825,6 @@ export const api = {
   health: () => request<Health>("/health"),
   /** Brings the main window to the front, from whichever window asks. */
   showMainWindow: () => post<{ ok: boolean }>("/control/show"),
-  ffmpegInstallationStatus: () => request<FfmpegInstallationStatus>("/tools/ffmpeg"),
   prewarmYtmPlayback,
 
   getSettings: () => request<Settings>("/settings"),
