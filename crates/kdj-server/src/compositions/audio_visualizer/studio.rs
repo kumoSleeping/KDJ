@@ -317,7 +317,8 @@ async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> 
     // The container's own length, read by the same decoder the analysis uses: no FFmpeg,
     // so phones analyze as well. Headers that say nothing leave the check to the decode.
     let header = { let path = audio.clone(); tokio::task::spawn_blocking(move || kdj_analysis::decode::probe_duration(&path)).await.map_err(anyhow::Error::from)?? };
-    let header_ms = header.map(|secs| secs * 1000.);
+    // A fragmented MP4 states no length in its header (symphonia reports 0): only the decode counts.
+    let header_ms = header.filter(|secs| secs.is_finite() && *secs > 0.).map(|secs| secs * 1000.);
     let length = |ms: f64| api_check(ms >= 1. && ms <= MAX_DURATION_MS as f64, "初版支持最长 30 分钟的完整音频");
     if let Some(ms) = header_ms { length(ms)?; }
     let path = audio.clone(); let token = cancel.clone();
