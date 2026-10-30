@@ -18,7 +18,7 @@ test("Android module graph omits production panels/export worker, keeps YouTube 
     const { default: config } = await import("../vite.tauri.config");
     const plugin = (config as any).plugins.find((item: any) => item.name === "kdj-mobile-media-panels");
     assert.ok(plugin);
-    for (const name of ["VisualizerStudioPanel", "VisualizerPopup", "LaneEditor", "KdjvLivePicture", "ExportQueuePanel", "AiPanel", "FfmpegPanel"]) {
+    for (const name of ["VisualizerStudioPanel", "VisualizerPopup", "LaneEditor", "KdjvLivePicture", "KdjvCodecPicture", "ExportQueuePanel", "AiPanel", "FfmpegPanel"]) {
       const id = plugin.resolveId(`../${name}`);
       assert.ok(id);
       assert.match(plugin.load(id), /return null/);

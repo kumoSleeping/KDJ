@@ -92,7 +92,7 @@ function mobileMediaPanels(): Plugin {
   const mobile = ["android", "androideabi", "ios"].includes(tauriPlatform ?? "");
   const panels: Record<string, string> = {
     VisualizerStudioPanel: "default", VisualizerPopup: "VisualizerPopup",
-    LaneEditor: "LaneEditor", KdjvLivePicture: "KdjvLivePicture",
+    LaneEditor: "LaneEditor", KdjvLivePicture: "KdjvLivePicture", KdjvCodecPicture: "KdjvCodecPicture",
     ExportQueuePanel: "ExportQueuePanel", KvjApp: "KvjApp",
     AiPanel: "AiPanel", AiDrawer: "AiDrawer,AiDrawerTools", FfmpegPanel: "FfmpegPanel",
     visualizerStudioExport: "runStudioExport,createStudioExportFrames",
