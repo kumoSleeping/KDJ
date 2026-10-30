@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/kdj-core",
     "crates/kdj-providers",
+    "crates/kdj-media",
     "crates/kdj-analysis",
     "crates/kdj-stems",
     "crates/kdj-player",
