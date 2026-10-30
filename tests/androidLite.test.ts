@@ -43,7 +43,7 @@ test("Android module graph omits production panels, keeps the visualizer and its
   }
 });
 
-test("postinit adds native PiP and locks landscape without broadening network permissions, idempotently", async () => {
+test("postinit adds native PiP and follows rotation without broadening network permissions, idempotently", async () => {
   const root = await mkdtemp(join(tmpdir(), "kdj-android-manifest-"));
   try {
     const script = await readFile("scripts/android-postinit.sh", "utf8");
@@ -51,11 +51,11 @@ test("postinit adds native PiP and locks landscape without broadening network pe
     assert.ok(program);
     const gradle = join(root, "build.gradle.kts"), manifest = join(root, "AndroidManifest.xml");
     await writeFile(gradle, 'manifestPlaceholders["usesCleartextTraffic"] = "true"');
-    await writeFile(manifest, '<manifest><application><activity android:name=".MainActivity" android:configChanges="screenSize|orientation" /></application></manifest>');
+    await writeFile(manifest, '<manifest><application><activity android:name=".MainActivity" android:configChanges="screenSize|orientation" android:screenOrientation="sensorLandscape" /></application></manifest>');
     execFileSync("python3", ["-c", program!, gradle, manifest]);
     const result = await readFile(manifest, "utf8");
     assert.match(result, /android:supportsPictureInPicture="true"/);
-    assert.match(result, /android:screenOrientation="sensorLandscape"/);
+    assert.doesNotMatch(result, /android:screenOrientation/);
     assert.match(result, /android:networkSecurityConfig="@xml\/kdj_network_security_config"/);
     assert.match(await readFile(gradle, "utf8"), /"false"/);
     execFileSync("python3", ["-c", program!, gradle, manifest]);

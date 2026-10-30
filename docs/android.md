@@ -78,11 +78,13 @@ and suspension limits above.
 
 A phone uses the desktop's one layout: the sidebar, the top bar with the aggregate search, the
 list, and the drawer over the list for settings, lyrics, downloads/exports, the visualizer
-configuration and the Meta editor. There is no portrait layout, single column or full-page
-sheet. `android-postinit.sh` locks MainActivity to `sensorLandscape` after Tauri init, and
-`useLayoutMode.ts` never reports a phone as a tall window, so the tall desktop window's
-rearrangements (the layered player bar, the two-row search) do not apply either. A click
-selects a row and a double click plays it, as on the desktop.
+configuration and the Meta editor. There is no separate phone layout, single column or full-page
+sheet. MainActivity follows the system's rotation (`android-postinit.sh` sets no
+`screenOrientation` and removes the old `sensorLandscape` lock). Held sideways the phone is a
+wide window; held upright it is a tall one, exactly as a tall desktop window
+(`useLayoutMode.ts`): the layered player bar, the two-row search, the tall sidebar width and
+rail names on up to two lines. A click selects a row and a double click plays it, as on the
+desktop.
 
 The back key closes the topmost layer (a drawer, a menu, a floating window), one per press,
 by handing the page an Escape (`src/lib/androidBack.ts`, through Tauri's `back-button` event;
