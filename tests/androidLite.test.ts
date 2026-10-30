@@ -5,27 +5,35 @@ import { readFile, mkdtemp, mkdir, writeFile, copyFile, rm } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { mediaProductionAvailable } from "../src/lib/platformFeatures";
+import { mediaProductionAvailable, visualizerPreviewBudget } from "../src/lib/platformFeatures";
 
 test("mobile production policy leaves desktop and shared colour code available", () => {
   for (const platform of ["android", "ios"]) assert.equal(mediaProductionAvailable(platform), false);
   for (const platform of ["darwin", "linux", "win32", "browser"]) assert.equal(mediaProductionAvailable(platform), true);
 });
 
-test("Android module graph omits production panels/export worker, keeps YouTube runtime and palette", async () => {
+test("a phone draws the visualizer at 30 fps on a smaller canvas, also full screen", () => {
+  const phone = visualizerPreviewBudget("android"), desktop = visualizerPreviewBudget("darwin");
+  assert.equal(phone.fps, 30);
+  assert.equal(phone.fullscreenFps, 30);
+  assert.equal(desktop.fullscreenFps, 60);
+  assert.ok(phone.maxWidth < desktop.maxWidth && phone.fullscreenWidth < desktop.fullscreenWidth && phone.pixelRatio < desktop.pixelRatio);
+});
+
+test("Android module graph omits production panels/export worker, keeps the visualizer, YouTube runtime and palette", async () => {
   const original = process.env.TAURI_ENV_PLATFORM;
   process.env.TAURI_ENV_PLATFORM = "androideabi";
   try {
     const { default: config } = await import("../vite.tauri.config");
     const plugin = (config as any).plugins.find((item: any) => item.name === "kdj-mobile-media-panels");
     assert.ok(plugin);
-    for (const name of ["VisualizerStudioPanel", "VisualizerPopup", "LaneEditor", "KdjvLivePicture", "ExportQueuePanel", "AiPanel", "FfmpegPanel"]) {
+    for (const name of ["LaneEditor", "KdjvLivePicture", "ExportQueuePanel", "AiPanel", "FfmpegPanel"]) {
       const id = plugin.resolveId(`../${name}`);
       assert.ok(id);
       assert.match(plugin.load(id), /return null/);
     }
     assert.match(plugin.load(plugin.resolveId("../visualizerStudioExport")), /throw new Error/);
-    for (const name of ["visualizerStudioPalette", "songColor", "youtubeNativePo", "youtubeSabr", "videoPlaybackEngine"]) {
+    for (const name of ["VisualizerStudioPanel", "VisualizerPopup", "VisualizerDock", "visualizerStudioRenderer", "visualizerStudioPalette", "songColor", "youtubeNativePo", "youtubeSabr", "videoPlaybackEngine"]) {
       assert.equal(plugin.resolveId(`./${name}`), null);
     }
     assert.equal((config as any).resolve, undefined, "Android must not alias proof/SABR to unsupported");

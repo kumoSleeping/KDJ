@@ -85,13 +85,13 @@ function youtubeNativePoDevBundle(): Plugin {
   };
 }
 
-/** Production panels are absent from the mobile module graph, not merely invisible. Shared
- * colour extraction/analysis modules are deliberately not redirected. Runtime actions and the
- * Rust route table enforce the same product boundary for stale state or direct calls. */
+/** Production panels are absent from the mobile module graph, not merely invisible. The song
+ * visualizer (its panel, its floating window, colour extraction and analysis) is not production
+ * and stays. Runtime actions and the Rust route table enforce the same product boundary for stale
+ * state or direct calls. */
 function mobileMediaPanels(): Plugin {
   const mobile = ["android", "androideabi", "ios"].includes(tauriPlatform ?? "");
   const panels: Record<string, string> = {
-    VisualizerStudioPanel: "default", VisualizerPopup: "VisualizerPopup",
     LaneEditor: "LaneEditor", KdjvLivePicture: "KdjvLivePicture",
     ExportQueuePanel: "ExportQueuePanel", KvjApp: "KvjApp",
     AiPanel: "AiPanel", AiDrawer: "AiDrawer,AiDrawerTools", FfmpegPanel: "FfmpegPanel",

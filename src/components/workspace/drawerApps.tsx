@@ -7,7 +7,7 @@ import { shownSettingsPages, useSettingsPage, type SettingsPage } from "../../li
 import { useSidePanels } from "../../lib/sidePanels";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { visualizerExportActive } from "../../lib/visualizerExportQueue";
-import { studioTabs, useStudioTab, type StudioTab } from "../../lib/visualizerStudioTabs";
+import { shownStudioTabs, useStudioTab, type StudioTab } from "../../lib/visualizerStudioTabs";
 import { aiOffered } from "../../stores/aiStore";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
@@ -125,11 +125,11 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
     body: <DrawerSettings />,
     close: () => useAppStore.getState().dismissOverlay(),
   });
-  if (mediaProductionAvailable() && visualizerTrack) apps.push({
+  if (visualizerTrack) apps.push({
     id: VISUALIZER_DOCK_APP,
     title: "可视化配置",
     extent: "fit",
-    pages: studioTabs,
+    pages: shownStudioTabs(),
     usePage: useStudioTabInView,
     onPage: id => useStudioTab.getState().setTab(id as StudioTab),
     body: <VisualizerDock />,

@@ -34,7 +34,8 @@ import { applyVisualizerPreferences, loadVisualizerPreferences, saveVisualizerPr
 import { EditorSeparator, EditorTabs } from "../workspace/EditorChrome";
 import { SlidePages } from "../drawer/SlidePages";
 import { useDrawer } from "../drawer/Drawer";
-import { studioTabs, useStudioTab, type StudioTab } from "../../lib/visualizerStudioTabs";
+import { shownStudioTabs, useStudioTab, type StudioTab } from "../../lib/visualizerStudioTabs";
+import { visualizerExportAvailable, visualizerPreviewBudget } from "../../lib/platformFeatures";
 import "./VisualizerStudioPanel.css";
 
 const message = (e: unknown) => e instanceof Error ? e.message : String(e);
@@ -43,7 +44,10 @@ const ratio = (v: number) => `${Math.round(v * 100)}%`;
 const signedPercent = (v: number) => `${v > 0 ? "+" : ""}${Number(v.toFixed(1))}%`;
 const times = (v: number) => `×${v.toFixed(2)}`;
 const resolutions = [["1920x1080", "1080p · 16:9"], ["1280x720", "720p · 16:9"], ["1440x1080", "1440 × 1080 · 4:3"], ["960x720", "960 × 720 · 4:3"], ["1920x840", "1920 × 840 · 超宽"], ["2560x1080", "2560 × 1080 · 超宽"]] as const;
+const studioTabs = shownStudioTabs();
 const studioTabIds = studioTabs.map(tab => tab.id);
+const exportable = visualizerExportAvailable();
+const budget = visualizerPreviewBudget();
 const frameRates = [{ value: 30, label: "30 fps" }, { value: 60, label: "60 fps" }] as const;
 const qualities = [{ value: "high", label: "高" }, { value: "standard", label: "标准" }, { value: "low", label: "低" }] as const;
 function Toggle({ label, checked, disabled = false, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange: (value: boolean) => void }) {
@@ -315,8 +319,9 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         const width = target.getBoundingClientRect().width; if (!width) return;
-        const pixels = Math.ceil(width * Math.min(window.devicePixelRatio || 1, inline && !expanded && !floating ? 1.25 : 2) / 64) * 64;
-        setPreviewWidth(Math.min(p.scene.canvas.width, Math.max(320, Math.min(inline && !expanded && !floating ? 960 : 1440, pixels))));
+        const small = inline && !expanded && !floating;
+        const pixels = Math.ceil(width * Math.min(window.devicePixelRatio || 1, small ? 1.25 : budget.pixelRatio) / 64) * 64;
+        setPreviewWidth(Math.min(p.scene.canvas.width, Math.max(320, Math.min(small ? budget.maxWidth : budget.fullscreenWidth, pixels))));
       }, 120);
     };
     const observer = new ResizeObserver(resize); observer.observe(target); window.addEventListener("resize", resize); resize();
@@ -349,8 +354,8 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     let lastDrawAt = transitionStart, lastRate = 0;
     let lastRevision: number | null = null;
     // A detached small window has the same frame budget as the inline preview.
-    // Fullscreen retains 60 fps; export uses its own explicit output frame rate.
-    const interval = 1000 / (expanded ? 60 : 30);
+    // Fullscreen retains 60 fps (a phone stays at 30); export uses its own explicit output frame rate.
+    const interval = 1000 / (expanded ? budget.fullscreenFps : budget.fps);
     const draw = (now: number, force = false) => {
       const clock = getCompositionClock();
       if (scrubTime.current === null && clock.ready && clock.fresh !== false && clock.trackId === track.id) cursorRef.current = clock.currentTime;
@@ -571,7 +576,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     <button type="button" disabled={!p || busy} onClick={refreshAutomaticConfiguration} aria-label="刷新自动配置"
       title="恢复默认布局、字号、特效和歌曲信息；保留图片、歌词与输出设置，可撤销"><RotateCcw size={14} /></button>
     <span className="kd-editor-spacer" />
-    <button type="button" className="kd-viz-export" title="导出可视化" aria-label="导出可视化" disabled={!prepared || analyzing || busy} onClick={event => void enqueueExport(event.currentTarget)}><ListPlus size={14} /><span>{busy ? "加入中…" : "导出"}</span></button>
+    {exportable && <button type="button" className="kd-viz-export" title="导出可视化" aria-label="导出可视化" disabled={!prepared || analyzing || busy} onClick={event => void enqueueExport(event.currentTarget)}><ListPlus size={14} /><span>{busy ? "加入中…" : "导出"}</span></button>}
   </div>;
   const noticeRow = notice && <div className="kd-viz-notice" role="alert">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>;
   const pickImage = (slot: number) => { imageSlot.current = slot; imageInput.current?.click(); };
@@ -719,7 +724,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
               onClick={event => { event.stopPropagation(); togglePreviewLyrics(); }}>
               {loadingLyrics ? <LoaderCircle size={13} className="kd-spin" /> : <Captions size={13} />}
             </button>}
-            {inline && !expanded && <button type="button" title={busy ? "正在加入导出队列…" : "导出可视化"} aria-label="导出可视化"
+            {exportable && inline && !expanded && <button type="button" title={busy ? "正在加入导出队列…" : "导出可视化"} aria-label="导出可视化"
               aria-busy={busy} disabled={!prepared || analyzing || busy}
               onClick={event => { event.stopPropagation(); void enqueueExport(event.currentTarget); }}>
               {busy ? <LoaderCircle size={13} className="kd-spin" /> : <ListPlus size={13} />}

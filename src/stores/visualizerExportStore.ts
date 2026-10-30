@@ -1,4 +1,4 @@
-import { mediaProductionAvailable } from "../lib/platformFeatures";
+import { visualizerExportAvailable } from "../lib/platformFeatures";
 import { create } from "zustand";
 import { captureDiagnostic } from "../lib/diagnostics";
 import { validateVisualizerProject, type VisualizerDraft } from "../lib/visualizerStudio";
@@ -100,7 +100,7 @@ async function pump(): Promise<void> {
 export const useVisualizerExportStore = create<State>((set, get) => ({
   tasks: [], error: "",
   initialize() {
-    if (!mediaProductionAvailable()) return Promise.resolve();
+    if (!visualizerExportAvailable()) return Promise.resolve();
     if (!initializing) initializing = (usesVisualizerWindow() ? fromOwner({ action: "initialize" }) : loadVisualizerExports().then(tasks => {
       // Never silently resume frame production after a WebView/app restart.
       set({ tasks: tasks.sort((a, b) => a.createdAt - b.createdAt).map(task => visualizerExportActive(task)
@@ -109,7 +109,7 @@ export const useVisualizerExportStore = create<State>((set, get) => ({
     return initializing;
   },
   async enqueue(draft) {
-    if (!mediaProductionAvailable()) throw new Error("移动版不提供视频导出");
+    if (!visualizerExportAvailable()) throw new Error("移动版不提供视频导出");
     if (usesVisualizerWindow()) {
       // The queue lives in the visualizer window. Hand it the picture exactly as it is on
       // screen here: drafts are stored per song in a database both windows share.

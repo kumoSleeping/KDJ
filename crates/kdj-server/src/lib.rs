@@ -417,12 +417,12 @@ pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) ->
         control: control.clone(),
         media: media.clone(),
     };
-    let router = routes::router(ctx);
+    // The visualizer (analysis, export) is on every platform; the editor's workshop is desktop only.
+    let router = routes::router(ctx).merge(compositions::audio_visualizer::studio::router());
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let router = {
         let workshop = compositions::workshop::Workshop::new(state.clone())?;
         router.merge(compositions::workshop::routes::router(workshop))
-            .merge(compositions::audio_visualizer::studio::router())
     };
     let router = router.merge(themes::router())
         .merge(diagnostics::router())
