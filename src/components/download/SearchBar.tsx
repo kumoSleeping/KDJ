@@ -1,6 +1,5 @@
 import {
   memo,
-  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -46,9 +45,6 @@ export interface SearchPlatformProps {
   platforms: Platform[];
   onTogglePlatform(platform: Platform): void;
   /** 顺序与启用都读写 settings.platform_priority：拖动排序就是下载来源的优先级。 */
-  /** 手机顶栏的重叠预览；第一次点只展开，不误切来源。 */
-  collapsed?: boolean;
-  onExpand?: () => void;
   /** A search in flight or just landed: the selected marks wait, then settle on what came back. */
   searchPhase?: SearchPhase | null;
   searchOutcome?: SearchOutcome | null;
@@ -68,8 +64,6 @@ export interface SearchBarProps extends SearchPlatformProps {
   onSubmit(): void;
   tipsOpen: boolean;
   onTips(): void;
-  /** 竖屏/极窄：输入与平台拆成两段。 */
-  stacked?: boolean;
   /** A search started outside the field (同名搜索 fills and submits); a new value launches the motion. */
   burstNonce?: number;
 }
@@ -278,7 +272,6 @@ export function SearchBar({
   onSubmit,
   tipsOpen,
   onTips,
-  stacked = false,
   burstNonce = 0,
   ...platformProps
 }: SearchBarProps) {
@@ -288,7 +281,6 @@ export function SearchBar({
   // flag settles. Keep our own composition state and also honor keyCode 229.
   const composingRef = useRef(false);
   const [inputFocused, setInputFocused] = useState(false);
-  const [platformsExpanded, setPlatformsExpanded] = useState(false);
   const [wavePhase, setWavePhase] = useState<SearchPhase | null>(null);
   /** Counts launches, so each search gets a fresh waveform, and how far its text reaches (em). */
   const [launch, setLaunch] = useState({ seq: 0, textEm: 0 });
@@ -316,7 +308,6 @@ export function SearchBar({
     const tones = searchTones(normalizePriority(markOrder), selectedPlatforms);
     return tones.length ? ({ "--kd-search-tones": tones.join(", ") } as CSSProperties) : undefined;
   }, [markOrder, selectedPlatforms]);
-  const expandPlatforms = useCallback(() => setPlatformsExpanded(true), []);
 
   const startWave = () => {
     wavePendingRef.current = true;
@@ -366,10 +357,6 @@ export function SearchBar({
     if (burstNonce > 0) startWave();
   }, [burstNonce]);
 
-  useEffect(() => {
-    if (!stacked) setPlatformsExpanded(false);
-  }, [stacked]);
-
   const fireSubmit = () => {
     if (!canSubmit) return;
     startWave();
@@ -379,7 +366,6 @@ export function SearchBar({
   return (
     <form
       className="kd-search-command"
-      data-stacked={stacked || undefined}
       aria-busy={wavePhase === "run" || undefined}
       onSubmit={(event) => {
         event.preventDefault();
@@ -389,8 +375,6 @@ export function SearchBar({
       <div
         className="kd-searchbar kd-grow"
         data-batch={batch || undefined}
-        data-stacked={stacked || undefined}
-        data-platforms-expanded={stacked && platformsExpanded ? "true" : undefined}
         data-searching={wavePhase ?? undefined}
         style={barStyle}
         onClick={(event) => {
@@ -413,8 +397,6 @@ export function SearchBar({
           )}
           <SearchPlatforms
             {...platformProps}
-            collapsed={stacked && !platformsExpanded}
-            onExpand={expandPlatforms}
             searchPhase={wavePhase}
             searchOutcome={searchOutcome}
           />
@@ -423,9 +405,6 @@ export function SearchBar({
           className="kd-searchbar-copy"
           data-empty={!query || undefined}
           data-input-focused={inputFocused ? "true" : undefined}
-          onPointerDown={() => {
-            if (stacked && platformsExpanded) setPlatformsExpanded(false);
-          }}
         >
           {/* The waveform of a search: the field's first layer, under the text. Keyed by the launch,
               not the phase, so an answer that comes back early lets it rise before it settles. */}
@@ -516,8 +495,6 @@ export function SearchBar({
 export const SearchPlatforms = memo(function SearchPlatforms({
   platforms,
   onTogglePlatform,
-  collapsed = false,
-  onExpand,
   searchPhase = null,
   searchOutcome = null,
 }: SearchPlatformProps) {
@@ -543,12 +520,7 @@ export const SearchPlatforms = memo(function SearchPlatforms({
     .map((id) => SEARCH_PLATFORMS.find((item) => item.id === id))
     .filter((item): item is (typeof SEARCH_PLATFORMS)[number] => Boolean(item))
     .filter((item) => isPlatformEnabled(settings, item.id));
-  // 收起态只摘要真正参与本次搜索的来源；把所有未选中的灰图标叠在一起既占位，
-  // 也无法辨认。没有勾选来源时保留首项作为展开入口。
-  const selectedOrdered = ordered.filter((item) => platforms.includes(item.id));
-  const collapsedOrdered = (selectedOrdered.length ? selectedOrdered : ordered.slice(0, 1)).slice(0, 2);
-  const collapsedOverflow = Math.max(0, selectedOrdered.length - collapsedOrdered.length);
-  const rendered = collapsed ? collapsedOrdered : ordered;
+  const rendered = ordered;
   // The marks a search asks, in the order they answer.
   const asked = searchPhase ? rendered.filter((item) => platforms.includes(item.id)) : [];
 
@@ -630,12 +602,6 @@ export const SearchPlatforms = memo(function SearchPlatforms({
 
   const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>, id: Platform) => {
     if (event.button !== 0) return;
-    if (collapsed) {
-      event.preventDefault();
-      event.stopPropagation();
-      onExpand?.();
-      return;
-    }
     // 挡住浏览器默认拖图 / 选中，否则 pointer 序列会被掐断。
     event.preventDefault();
     event.stopPropagation();
@@ -657,25 +623,16 @@ export const SearchPlatforms = memo(function SearchPlatforms({
   return (
     <div
       className="kd-plats"
-      data-collapsed={collapsed ? "true" : undefined}
       role="group"
-      aria-expanded={!collapsed}
-      onPointerDown={(event) => {
-        if (!collapsed || event.button !== 0 || event.target !== event.currentTarget) return;
-        event.preventDefault();
-        event.stopPropagation();
-        onExpand?.();
-      }}
       aria-label="搜索平台（拖动排序 = 来源优先级）"
     >
-      {rendered.map((item, index) => (
+      {rendered.map((item) => (
           <button
             key={item.id}
             type="button"
             className="kd-plat"
             aria-pressed={platforms.includes(item.id)}
-            aria-label={collapsed ? `展开搜索平台，当前首项 ${item.label}` : item.label}
-            tabIndex={collapsed && index > 0 ? -1 : 0}
+            aria-label={item.label}
             data-platform={item.id}
             data-dragging={dragging === item.id || undefined}
             data-drop={over === item.id || undefined}
@@ -700,16 +657,12 @@ export const SearchPlatforms = memo(function SearchPlatforms({
             onClick={(event) => {
               // 真正的点击在 pointerup 里处理；这里挡住 form 提交式 click。
               event.preventDefault();
-              if (collapsed) onExpand?.();
-              else if (event.detail === 0) onTogglePlatform(item.id);
+              if (event.detail === 0) onTogglePlatform(item.id);
             }}
           >
             <PlatformMark id={item.id} />
           </button>
         ))}
-      {collapsed && collapsedOverflow > 0 ? (
-        <span className="kd-plat-more" aria-hidden="true">+{collapsedOverflow}</span>
-      ) : null}
     </div>
   );
 });

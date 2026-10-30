@@ -104,7 +104,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
     const loading = useLibraryStore(state => state.loading);
     const selectedId = useLibraryStore(state => state.selectedId);
     const selectedIds = useLibraryStore(state => state.selectedIds);
-    return createElement(TrackTable, { total, loading, selectedId, selectedIds, layout: "wide", shortcutActive, visible,
+    return createElement(TrackTable, { total, loading, selectedId, selectedIds, shortcutActive, visible,
       sort: "file_created_at", order: "desc", sort2: null, order2: "asc",
       onSelect: useLibraryStore.getState().select, onSort() {} });
   }
@@ -176,15 +176,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
       assert.equal(summaryQueries.at(-1)!.bpm_min, undefined);
     }
     await arrivalOver("list");
-    // Layout determines activation; legacy preferences cannot change it or pin details.
-    const { playClickForLayout, shouldPinDetailOnClick } = await import("../src/lib/trackClickPrefs");
-    for (const layout of ["wide", "narrow"] as const) {
-      for (const legacyClick of ["single", "double"] as const) {
-        const prefs = { widePlay: legacyClick, narrowPlay: legacyClick };
-        assert.equal(playClickForLayout(prefs, layout), layout === "narrow" ? "single" : "double");
-        assert.equal(shouldPinDetailOnClick(prefs, layout), false);
-      }
-    }
+    // A click selects; only a double click plays, on every platform.
     const row = rows()[0];
     await act(async () => {
       row.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, detail: 1 }));
@@ -539,7 +531,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
     const sessionBefore = readWorkspaceSession().local;
     await act(async () => root.render(createElement(Fragment, {},
       createElement(Host, { shortcutActive: false }), createElement(ClipboardHost),
-      createElement(TemporaryFolderPane, { library: temporary, active: true, layout: "wide",
+      createElement(TemporaryFolderPane, { library: temporary, active: true,
         onSelect: temporary.store.getState().select, onClose() {} }))));
     await flush(); await flush();
     const temporaryBox = document.querySelector<HTMLDivElement>(".kd-temporary-folder-content .kd-scroll")!;

@@ -28,8 +28,6 @@ import { resultDownloadKeyColumn } from "./resultColumns";
 import { ResultDownloadKey, withDownloadKey } from "./ResultDownloadKey";
 import { foldingRowProps, foldOrder, useFold } from "./searchMotion";
 import { requestVideoPreview } from "./VideoPreview";
-import { useTrackClickPrefs, playClickForLayout } from "../../lib/trackClickPrefs";
-import type { LayoutMode } from "../../lib/useLayoutMode";
 import { CoverImage } from "../common/VinylPlaceholder";
 
 function errorText(error: unknown): string {
@@ -165,8 +163,6 @@ export interface VideoResultRowProps extends VideoSeed {
   info?: VideoInfo | null;
   /** 可见数据列（与 ResultTable / MergedGroupRow 同一套偏好）。 */
   columns: ReadonlyArray<{ key: string; align?: "num" }>;
-  /** 当前布局档位，决定单击/双击预览行为。 */
-  layout: LayoutMode;
   /** 当前结果列表中的序号。 */
   rowNumber: number;
   /** 挂在批量结果父包下时，视频行也必须占用一层树形缩进。 */
@@ -214,7 +210,6 @@ export function VideoResultRow({
   duration,
   info: given,
   columns,
-  layout,
   rowNumber,
   indent = false,
   late = false,
@@ -237,9 +232,7 @@ export function VideoResultRow({
   const settings = useAppStore((state) => state.settings);
   const openQueuePanel = useAppStore((state) => state.openQueuePanel);
   const mergeTasks = useDownloadStore((state) => state.mergeTasks);
-  const { widePlay, narrowPlay } = useTrackClickPrefs();
   const shareContentMode = useSharePrefs((state) => state.contentMode);
-  const playClick = playClickForLayout({ widePlay, narrowPlay }, layout);
 
   const cacheKey = `${platform}:${bvid}`;
   const [info, setInfo] = useState<VideoInfo | null>(given ?? resolvedCache.get(cacheKey) ?? null);
@@ -478,9 +471,7 @@ export function VideoResultRow({
           if (!bvid) return;
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
           if (selectionMode) return;
-          if (playClick === "double") {
-            previewPage(0);
-          }
+          previewPage(0);
         }}
         onPointerDown={(event) => {
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
@@ -511,18 +502,8 @@ export function VideoResultRow({
             onToggleSelect?.(event.shiftKey);
             return;
           }
-          if (selectionMode) return;
-          // 窄屏单击即播，双点的第二个 click 必须吞掉，避免视频重新装载两次。
-          if (playClick === "single" && event.detail > 1) return;
-          if (playClick === "single") {
-            previewPage(0);
-          }
         }}
-        title={
-          playClick === "single"
-            ? "单击预览视频；下载细项可在队列里调整"
-            : "双击预览视频；下载细项可在队列里调整"
-        }
+        title="双击预览视频；下载细项可在队列里调整"
         {...foldingRowProps(leave)}
       >
         <div role="gridcell" className="kd-list-cell kd-result-gutter" {...cellDrag} />
@@ -663,7 +644,7 @@ export function VideoResultRow({
               data-parent-indented={indent ? "true" : undefined}
               data-unfold={unfold && partLeave === undefined ? "true" : undefined}
               style={unfold ? ({ "--kd-unfold-i": Math.min(pageIndex, 8) } as CSSProperties) : undefined}
-              aria-label={`P${pageIndex + 1}，${page.title}，${playClick === "single" ? "单击" : "双击"}预览`}
+              aria-label={`P${pageIndex + 1}，${page.title}，双击预览`}
               tabIndex={0}
               onContextMenu={(event) => {
                 event.preventDefault();
@@ -679,17 +660,14 @@ export function VideoResultRow({
                 if (selectionMode || event.metaKey || event.ctrlKey) return;
                 bindPointerDrag(event, pageIndex);
               }}
-              onClick={(event) => {
+              onClick={() => {
                 if (suppressClickRef.current) {
                   suppressClickRef.current = false;
                   return;
                 }
-                if (selectionMode) return;
-                if (playClick === "single" && event.detail > 1) return;
-                if (playClick === "single") previewPage(pageIndex);
               }}
               onDoubleClick={() => {
-                if (!selectionMode && playClick === "double") previewPage(pageIndex);
+                if (!selectionMode) previewPage(pageIndex);
               }}
               onKeyDown={(event) => {
                 if (event.key !== "Enter" && event.key !== " ") return;

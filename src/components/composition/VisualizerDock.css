@@ -1,5 +1,4 @@
-/* The visualizer configuration in the right column (or the phone's drawer). */
-.kd-sheet-body:has(> .kd-viz-dock) { overflow: hidden; }
+/* The visualizer configuration in the drawer. */
 .kd-viz-dock {
   display: flex;
   flex-direction: column;

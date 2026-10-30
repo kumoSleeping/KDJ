@@ -38,8 +38,6 @@ test("the pointer demos play every scene, survive a change of scene mid-loop, an
       // The AI page is steps to follow, not pictures.
       if (page.id !== "ai") assert.ok(document.querySelector("svg.kd-demo"), `${page.id} has a picture`);
     }
-    await act(async () => root.render(createElement(SearchTipsPanel, { stacked: true })));
-    assert.equal(document.querySelectorAll(".kd-tips-panel section").length, tipsPages.length);
     // Under reduced motion each picture is its still beat, from the first frame: a still beat
     // past the scene's last one took the whole window down from the 曲库 tips page once.
     const still = dom.window.matchMedia;

@@ -1,6 +1,5 @@
 import { FOLDER_DND_TYPE, beginTemporaryFolderDrag, endTemporaryFolderDrag } from "../../lib/temporaryFolderDrag";
-import { createPortal, flushSync } from "react-dom";
-import { useLayoutSignals } from "../../lib/useLayoutMode";
+import { flushSync } from "react-dom";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   AlertTriangle,
@@ -93,7 +92,7 @@ import {
   type StreamPlaylistSectionId,
 } from "../../stores/streamBrowseStore";
 import type { Account, AccountState, FolderNode, FolderTree as FolderTreeData, StreamPlaylist } from "../../types";
-import { ContextMenu, InlineNotice, Sheet } from "../common";
+import { ContextMenu, InlineNotice } from "../common";
 import { PlatformMark } from "../download/PlatformMark";
 import { isMidiBrowseActivate, MIDI_BROWSE_ID_ATTR, midiBrowseItemProps } from "../../lib/midiLibraryNav";
 import { readLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
@@ -562,8 +561,8 @@ function flattenFolders(nodes: FolderNode[]): FolderNode[] {
 }
 
 /**
- * 窄屏常驻文件夹栏。收起时也能直接切换添加/全库/任意文件夹；
- * 展开时是占据布局宽度的真正侧栏，不覆盖列表，也不再退化成抽屉。
+ * 常驻文件夹栏。收成窄轨时（把侧栏拖到最窄）也能直接切换添加/全库/任意文件夹；
+ * 展开时是占据布局宽度的真正侧栏，不覆盖列表。
  */
 export function NarrowFolderRail({
   expanded,
@@ -572,13 +571,10 @@ export function NarrowFolderRail({
   activeStreamPlaylist,
 }: {
   expanded: boolean;
-  /** 点选文件夹 / 全部曲目等导航项后回调（窄屏收右侧抽屉用）。 */
+  /** 点选文件夹 / 全部曲目等导航项后回调（回到曲库板块）。 */
   onNavigate?: () => void;
 } & StreamPlaylistBrowseProps) {
-  const { portrait } = useLayoutSignals();
-  const [pickerOpen, setPickerOpen] = useState(false);
   const railRef = useRef<HTMLElement | null>(null);
-  useEffect(() => { setPickerOpen(false); }, [portrait, expanded]);
   const folders = useLibraryStore((state) => state.folders);
   const filter = useLibraryStore((state) => state.filter);
   const setFilter = useLibraryStore((state) => state.setFilter);
@@ -641,7 +637,7 @@ export function NarrowFolderRail({
       | StreamBrowsePlatform
       | undefined;
     // 前台在线会话优先于窄轨自身的旧来源偏好。否则桌面上能看到已恢复的高亮，
-    // 竖屏首帧却仍停在本地目录，要等请求完成后再“跳”到在线来源。
+    // 窄轨首帧却仍停在本地目录，要等请求完成后再“跳”到在线来源。
     if (
       foregroundPlatform &&
       STREAM_BROWSE_PLATFORMS.includes(foregroundPlatform)
@@ -667,7 +663,7 @@ export function NarrowFolderRail({
     const previousKey = previousEffectiveActiveStreamKeyRef.current;
     previousEffectiveActiveStreamKeyRef.current = effectiveActiveStreamKey;
     // 初次挂载优先恢复用户上次停留的来源；只有运行期间真正打开了另一份
-    // 在线歌单，才跟随到对应平台。否则刷新/横竖屏切换会被旧播放状态抢走。
+    // 在线歌单，才跟随到对应平台。否则刷新/窗口变形会被旧播放状态抢走。
     if (!effectiveActiveStreamPlaylist || effectiveActiveStreamKey === previousKey) return;
     const activeRoot = streamRootOf(effectiveActiveStreamPlaylist.platform);
     if (!streamRootEnabled(settings, activeRoot)) return;
@@ -755,7 +751,6 @@ export function NarrowFolderRail({
   }
 
   const choose = (folder: string) => {
-    setPickerOpen(false);
     setActiveStreamPlaylist(null);
     // 侧栏数字展示的是整棵子树的累计曲目数；点击后的列表必须使用同一口径。
     // 旧版窄轨在这里悄悄切成“仅当前层”，父目录便会出现有数字却无曲目的假空态。
@@ -780,7 +775,6 @@ export function NarrowFolderRail({
     platform: StreamBrowsePlatform,
     playlist: StreamPlaylist,
   ) => {
-    setPickerOpen(false);
     setActiveStreamPlaylist({ platform, key: playlist.key });
     setStreamError(platform, "");
     try {
@@ -811,15 +805,11 @@ export function NarrowFolderRail({
         data-active={sourceActive || folderActive || undefined}
         data-drop={narrowDrop === node.path ? "true" : undefined}
         title={node.path}
-        aria-haspopup={sourceRoot && portrait ? "dialog" : undefined}
-        aria-expanded={sourceRoot && portrait ? sourceActive && pickerOpen : undefined}
         onClick={() => {
           if (sourceRoot) {
-            // 竖屏的选单里第一项就是根目录本身；横屏没有选单，根目录行直接打开
-            // 整棵树的曲目（列表含子文件夹，不会因为根目录没有直属曲目而变空）。
+            // 根目录行直接打开整棵树的曲目（列表含子文件夹，不会因为根目录没有直属曲目而变空）。
             setNarrowSource({ kind: "local", rootPath: node.path });
-            if (portrait) setPickerOpen(true);
-            else choose(node.path);
+            choose(node.path);
             return;
           }
           choose(node.path);
@@ -1085,10 +1075,7 @@ export function NarrowFolderRail({
           renderStreamRootChildren(streamRootOf(narrowSource.platform))}
       </div>
   );
-  const pickerHost = railRef.current?.closest(".kd-stage");
-
   return (
-    <>
     <aside ref={railRef} className="kd-narrow-folder-rail" aria-label="快捷文件夹栏">
       <div className="kd-narrow-global-actions" aria-label="曲库操作">
       <button
@@ -1157,13 +1144,10 @@ export function NarrowFolderRail({
             data-stream-platform={streamRoot.id}
             {...midiBrowseItemProps("search", `search:root:${streamRoot.id}`)}
             aria-label={`显示 ${streamRoot.label} 歌单`}
-            title={`${portrait ? "选择" : "在下方显示"} ${streamRoot.label} 收藏和歌单`}
-            aria-haspopup={portrait ? "dialog" : undefined}
-            aria-expanded={portrait ? pickerOpen && narrowSource.kind === "stream" && narrowSource.platform === streamRoot.id : undefined}
+            title={`在下方显示 ${streamRoot.label} 收藏和歌单`}
             onContextMenu={(event) => openStreamRootMenu(event, streamRoot.id)}
             onClick={() => {
               setNarrowSource({ kind: "stream", platform: streamRoot.id });
-              if (portrait) setPickerOpen(true);
               for (const platform of rootMembers(streamRoot)) {
                 const account = accounts.find((candidate) => candidate.platform === platform);
                 if (accountCanBrowse(account?.state)) void loadStreamPlaylists(platform);
@@ -1216,19 +1200,6 @@ export function NarrowFolderRail({
       {renderChildren()}
       {streamRootMenu}
     </aside>
-    {portrait && pickerOpen && pickerHost && createPortal(
-      <Sheet open title={narrowSource.kind === "local" ? selectedLocalRoot?.name ?? "文件夹" : STREAM_ROOTS.find(root => root.id === narrowSource.platform)?.label ?? "歌单"}
-        placement="bottom" onClose={() => setPickerOpen(false)}>
-        <div className="kd-folder-picker">
-          {narrowSource.kind === "local" && selectedLocalRoot && (
-            <button type="button" onClick={() => choose(selectedLocalRoot.path)}>
-              <RailContent icon={<FolderOpen {...RAIL_ICON} />} label={selectedLocalRoot.name} />
-            </button>
-          )}
-          {renderChildren()}
-        </div>
-      </Sheet>, pickerHost)}
-    </>
   );
 }
 
@@ -1307,7 +1278,7 @@ export function FolderTree({
   onOpenStreamPlaylist,
   activeStreamPlaylist,
 }: {
-  /** 点选文件夹 / 全部曲目等导航项后回调（窄屏收右侧抽屉用）。 */
+  /** 点选文件夹 / 全部曲目等导航项后回调（回到曲库板块）。 */
   onNavigate?: () => void;
 } & StreamPlaylistBrowseProps = {}) {
   const folders = useLibraryStore((state) => state.folders);

@@ -1,8 +1,7 @@
 import { visualizerExportAvailable } from "../../lib/platformFeatures";
-import { startTransition, useCallback, useEffect, useId, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelStore";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
-import { Panel } from "../common";
 import { QueuePanel } from "../download/QueuePanel";
 import { ExportQueuePanel } from "../composition/ExportQueuePanel";
 import { SlidePages } from "../drawer/SlidePages";
@@ -53,36 +52,4 @@ export function DownloadTaskPages() {
   return <SlidePages page={view} order={shownTaskViews().map(item => item.id)}>
     <TaskPageBody key={view} view={view} position={positions.current[view]} onReady={onReady} />
   </SlidePages>;
-}
-
-/** The task list as a panel with its own tabs: the phone's sheet. On a wide window it is a drawer. */
-export function DownloadTaskPanel() {
-  const taskViews = shownTaskViews();
-  const view = useTaskPanelStore(state => state.view);
-  const setView = useTaskPanelStore(state => state.setView);
-  const tabs = useRef<(HTMLButtonElement | null)[]>([]);
-  const id = useId();
-  return <Panel heading={<span className="kd-task-tabs" role="tablist" aria-label="任务页面"
-    onKeyDown={event => {
-      if (event.altKey || event.ctrlKey || event.metaKey) return;
-      const index = taskViews.findIndex(item => item.id === view);
-      const next = event.key === "ArrowRight" ? (index + 1) % taskViews.length
-        : event.key === "ArrowLeft" ? (index + taskViews.length - 1) % taskViews.length
-        : event.key === "Home" ? 0 : event.key === "End" ? taskViews.length - 1 : -1;
-      if (next < 0) return;
-      event.preventDefault();
-      event.stopPropagation();
-      setView(taskViews[next].id);
-      tabs.current[next]?.focus({ preventScroll: true });
-    }}>
-    {taskViews.map((item, index) => <button key={item.id} ref={node => { tabs.current[index] = node; }}
-      type="button" role="tab" id={`${id}-${item.id}`} aria-controls={`${id}-page`} title={item.title} aria-label={item.title}
-      aria-selected={view === item.id} tabIndex={view === item.id ? 0 : -1} onClick={() => setView(item.id)}>
-      {item.label}
-    </button>)}
-  </span>} visibleHeader padded={false} dense className="kd-task-window kd-download-window">
-    <div className="kd-task-window-body" id={`${id}-page`} role="tabpanel" aria-labelledby={`${id}-${view}`}>
-      <DownloadTaskPages />
-    </div>
-  </Panel>;
 }

@@ -133,8 +133,8 @@
    a second row of its own across the whole of the list's column. It still grows downward for a
    batch, and the waveform still lies on its first line. Only spacing separates the two rows.
    The head the drawer hangs from is both rows, so its panel starts below the editor: the sheets
-   follow .kd-drawer-area, whose top is --kd-drawer-head-h. A phone has no drawer head
-   ([data-drawer-head] is the wide columns only) and keeps its one row. */
+   follow .kd-drawer-area, whose top is --kd-drawer-head-h. A phone is never tall and keeps
+   its one row. */
 .kd-app[data-tall="true"] {
   /* The first row is the one-row head, kept under a name of its own before the head grows. */
   --kd-search-head-row: var(--kd-drawer-head-h);

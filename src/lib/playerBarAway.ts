@@ -27,16 +27,10 @@ const shapeOf = (tall: boolean): PlayerBarShape => tall ? "tall" : "wide";
  */
 export type PlayerBarPhase = "up" | "leaving" | "away" | "returning";
 
-/** A phone (always tall) starts with its bar up; a tall desktop window starts with the bubble. */
-function phone(): boolean {
-  const platform = typeof window === "undefined" ? undefined : window.kdj?.platform;
-  return platform === "android" || platform === "ios";
-}
-
 /** The listener's choice for a shape, as it was left at the last run. */
 export function readPlayerBarCollapsed(shape: PlayerBarShape = shapeOf(windowIsTall())): boolean {
   const stored = readLocalStorage(COLLAPSED_KEY[shape]);
-  return shape === "tall" && !phone() ? stored !== "false" : stored === "true";
+  return shape === "tall" ? stored !== "false" : stored === "true";
 }
 
 /**

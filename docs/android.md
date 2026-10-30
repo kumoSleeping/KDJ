@@ -69,6 +69,22 @@ These are implementation guarantees, not a claim that YouTube accepts every devi
 Proof failures retain their existing error path. Background SABR is subject to the ownership
 and suspension limits above.
 
+## Layout
+
+A phone uses the desktop's one layout: the sidebar, the top bar with the aggregate search, the
+list, and the drawer over the list for settings, lyrics, downloads/exports, the visualizer
+configuration and the Meta editor. There is no portrait layout, single column or full-page
+sheet. `android-postinit.sh` locks MainActivity to `sensorLandscape` after Tauri init, and
+`useLayoutMode.ts` never reports a phone as a tall window, so the tall desktop window's
+rearrangements (the layered player bar, the two-row search) do not apply either. A click
+selects a row and a double click plays it, as on the desktop.
+
+The back key closes the topmost layer (a drawer, a menu, a floating window), one per press,
+by handing the page an Escape (`src/lib/androidBack.ts`, through Tauri's `back-button` event;
+`core:app` listener permissions in `capabilities/mobile-player.json`). When nothing takes it,
+`MainActivity.leaveToBackground()` moves the task to the background, as the system's own back
+does; the Activity is not finished.
+
 ## System video PiP
 
 The shared floating video host still owns loading, seeking, swapping and clocks. Android PiP

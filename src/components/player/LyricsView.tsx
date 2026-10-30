@@ -121,10 +121,7 @@ interface LyricsDetailProps {
   visibleHeader?: boolean;
   /** An existing non-audio transport can supply its own clock and seek route. */
   transport?: { position: number; seek(position: number): void };
-  /**
-   * A layer under the lyrics block where no drawer panel carries one (the sheet of a narrow
-   * window): drawn in the block's backdrop slot, see SurfaceBackdrop.tsx.
-   */
+  /** A layer under the lyrics block where no drawer panel carries one: drawn in the block's backdrop slot, see SurfaceBackdrop.tsx. */
   backdrop?: ReactNode;
 }
 
@@ -136,20 +133,14 @@ export function LyricsDetailPanel(props: LyricsDetailProps) {
 }
 
 /**
- * The lyrics body. A drawer supplies a fixed song and replaces the whole shell on a change;
- * a host that keeps its shell (the phone's shared sheet) turns the content here instead.
- * Both report their presence on the song-change clock through useLyricsTurn.
+ * The lyrics body. A drawer supplies a fixed song and replaces the whole shell on a change; it
+ * reports its presence on the song-change clock through useLyricsTurn.
  */
-export function PlayingLyricsPanel({ track, visibleHeader = false, backdrop }: {
-  track: Track | null;
-  visibleHeader?: boolean;
-  /** A layer under the lyrics where the panel has no backdrop slot of its own (a phone's sheet). */
-  backdrop?: ReactNode;
-}) {
+export function PlayingLyricsPanel({ track }: { track: Track | null }) {
   const turn = useLyricsTurn(track);
   // No song and nothing on its way out: there is no panel, as before.
   if (!track && !turn.track) return null;
-  return <LyricsPanel track={turn.track} turn={turn} reserveEmpty visibleHeader={visibleHeader} backdrop={backdrop} />;
+  return <LyricsPanel track={turn.track} turn={turn} reserveEmpty />;
 }
 
 function LyricsPanel({ track, transport, backdrop, reserveEmpty = false, visibleHeader = false, turn }: Omit<LyricsDetailProps, "track"> & {

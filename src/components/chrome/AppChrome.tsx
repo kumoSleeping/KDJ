@@ -9,11 +9,9 @@ function startWindowDrag(event: ReactPointerEvent<HTMLElement>): void {
 }
 
 export interface AppChromeProps {
-  /** 浏览历史：排在顶栏最左（Mac 在红绿灯右边）；竖屏改 `historyEnd` 并入右侧。 */
+  /** 浏览历史：排在顶栏最左（Mac 在红绿灯右边）。 */
   history?: ReactNode;
   actions?: ReactNode;
-  /** 历史键改到右侧与设置/下载同排；左侧空给红绿灯。 */
-  historyEnd?: boolean;
   /**
    * 非 Mac 桌面：关掉系统标题栏后，在右侧自绘最小化 / 最大化 / 关闭。
    * Mac 仍用 Overlay + 红绿灯，不传。
@@ -30,14 +28,12 @@ export interface AppChromeProps {
 export function AppChrome({
   history,
   actions,
-  historyEnd = false,
   showWindowControls = false,
   drawerLip = false,
 }: AppChromeProps) {
   return (
     <header
       className="kd-app-chrome"
-      data-history-end={historyEnd ? "true" : undefined}
       data-window-controls={showWindowControls ? "true" : undefined}
       data-drawer-lip={drawerLip ? "true" : undefined}
       onPointerDown={startWindowDrag}
@@ -49,7 +45,7 @@ export function AppChrome({
         window.kdj?.windowControl("maximize");
       }}
     >
-      {history && !historyEnd ? (
+      {history ? (
         <div className="kd-app-chrome-tree">
           {history}
         </div>
@@ -58,9 +54,8 @@ export function AppChrome({
         className="kd-app-chrome-drag"
         aria-hidden="true"
       />
-      {historyEnd || actions || showWindowControls ? (
+      {actions || showWindowControls ? (
         <div className="kd-app-chrome-actions">
-          {historyEnd ? history : null}
           {actions}
           {showWindowControls ? <WindowControls /> : null}
         </div>

@@ -112,7 +112,7 @@ export interface AppStore {
   hasResults: boolean;
   /** 右侧详情栏是否正显示「设置」面板（顶栏小齿轮呼出；接播 + 账号合在一起）。 */
   showSettings: boolean;
-  /** 每次显式打开设置面板都递增；即使面板已是打开态，也能重新拉开窄屏抽屉。 */
+  /** 每次显式打开设置面板都递增；即使面板已是打开态，也能重新把它拉到抽屉最前。 */
   settingsPanelEpoch: number;
   /** 手动固定后，被动选歌或切换中间列表不能顶掉设置面板。 */
   settingsPinned: boolean;
@@ -124,7 +124,7 @@ export interface AppStore {
   /** 右栏/抽屉显示搜索结果预览（音频试听或视频预览），与下载队列互斥。 */
   showPreview: boolean;
   previewPanelEpoch: number;
-  /** 单栏布局下用抽屉装文件夹树（宽屏左栏常驻，不必走这条）。 */
+  /** 抽屉里的文件夹树（左栏常驻，这条只给显式打开的那一份）。 */
   showFolders: boolean;
   foldersPanelEpoch: number;
   /** 右栏显示所选本地文件夹的重复曲目分析结果。 */
@@ -178,7 +178,7 @@ export interface AppStore {
   /** 打开右栏歌词面板。 */
   openLyricsPanel(): void;
   toggleLyricsPanel(): void;
-  /** 只收起旁路面板，不改 listMode（窄屏抽屉点关闭 / 下拖时用）。 */
+  /** 只收起旁路面板，不改 listMode。 */
   dismissOverlay(): void;
   /** 当前打开的旁路面板种类；没有则 null。供浏览历史 / 撤销使用。 */
   currentOverlay():

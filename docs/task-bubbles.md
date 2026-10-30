@@ -35,9 +35,9 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
     sign (`--kd-task-dir`) turns the stack and the gesture over.
   - That place is where the drawer's panels hang (`.kd-drawer-area`: under the search row, two
     rows down in a tall window, left of an editor column). The host measures its top and right
-    edge when a bubble comes up there and when it changes size. A window without a drawer (a
-    phone, an editor window) hangs the stack under its top bar (`--kd-chrome-top`, which
-    includes a phone's status-bar inset).
+    edge when a bubble comes up there and when it changes size. A window without a drawer (an
+    editor window) hangs the stack under its top bar (`--kd-chrome-top`, which includes a
+    phone's status-bar inset).
   - The place is read when the bubble arrives. `updateTask` cannot move a bubble; showing an id
     that is up at the other place sends that bubble away where it is — its owner is not told of
     a dismissal — and brings a new one up where it is now wanted.
@@ -192,7 +192,8 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
     away, a tall one keeps it away unless it was brought back. Crossing from one shape to the
     other is the same handover as the key. A slide always runs to its end; if what is wanted
     changes on the way, the bar arrives and sets off again.
-  - A phone keeps its bar: the collapse is not offered there.
+  - A phone has the same key; it is never a tall window (it is locked to landscape), so its
+    bar starts up until the listener puts it away.
   - An app that has the window (full-screen lyrics, `takesWindow` in `docs/drawer-schema.md`)
     sends the bar away the same way for as long as it has it, without reading or writing
     either shape's choice. The bubble is then the window's lower block. Its 展开播放条 key

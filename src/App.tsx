@@ -45,7 +45,7 @@ export default function App() {
   const bootError = useAppStore((state) => state.bootError);
   const connected = useAppStore(selectConnected);
   const ready = connected && !booting;
-  const { columns, chrome, portrait, tall } = useLayoutSignals();
+  const { tall } = useLayoutSignals();
   const [retrying, setRetrying] = useState(false);
   // A drawer app that has the window (full-screen lyrics): the stylesheet keys off it.
   const takenBy = useWindowTaken(state => state.by);
@@ -112,9 +112,6 @@ export default function App() {
       className="kd-app"
       data-mac={isMac ? "true" : undefined}
       data-mobile={isMobile ? "true" : undefined}
-      data-columns={columns}
-      data-chrome={chrome}
-      data-portrait={portrait ? "true" : undefined}
       data-tall={tall ? "true" : undefined}
       data-taken-by={takenBy ?? undefined}
       data-work-mode="manager"

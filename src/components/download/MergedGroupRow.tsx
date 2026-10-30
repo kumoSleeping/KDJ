@@ -19,7 +19,6 @@ import {
   type SongPreviewItem,
 } from "../../lib/songPreview";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
-import type { LayoutMode } from "../../lib/useLayoutMode";
 import type { CollectionResult, MergedGroup, Platform, SongSource } from "../../types";
 import { albumOfSource } from "../../lib/searchCollections";
 import { copyText } from "../../lib/copyText";
@@ -69,8 +68,6 @@ export interface MergedGroupRowProps {
   columns: ReadonlyArray<{ key: string; align?: "num" }>;
   /** 当前集合（或普通结果列表）中的可见序号。 */
   rowNumber: number;
-  /** 竖屏列表固定单击播放；横屏仍保留单击查看详情。 */
-  layout: LayoutMode;
   /** 普通单击选中并展示在线详情；与批量下载勾选状态相互独立。 */
   inspected: boolean;
   /** 挂在某个"包"（歌单/一次搜索）底下时缩进一档。 */
@@ -124,7 +121,6 @@ export function MergedGroupRow({
   expanded,
   columns,
   rowNumber,
-  layout,
   inspected,
   indent = false,
   late = false,
@@ -203,8 +199,7 @@ export function MergedGroupRow({
         autoPlay: true,
         queue: followingSongs,
       });
-      // 移动端轻点是直接播放，不能又自动展开一大串来源把用户刚看的列表挤走。
-      if (layout !== "narrow" && multi && !expanded) onToggleExpand();
+      if (multi && !expanded) onToggleExpand();
       return;
     }
     const local = group.sources.find((source) => source.platform === "local");
@@ -232,7 +227,7 @@ export function MergedGroupRow({
 
   const titleCell = (
     <>
-      {/* 封面只负责识别歌曲，不再叠播放三角；横屏双击、竖屏单击试听。 */}
+      {/* 封面只负责识别歌曲，不再叠播放三角；双击试听。 */}
       <span
         className="kd-thumb"
         draggable={selectable}
@@ -452,11 +447,7 @@ export function MergedGroupRow({
         data-resolving={previewPending ? "true" : undefined}
         data-enter={bornLate && leave === undefined ? "late" : undefined}
         aria-busy={previewPending ? "true" : undefined}
-        aria-label={
-          layout === "narrow"
-            ? `${group.title}，单击播放`
-            : `${group.title}，单击查看详情，双击播放`
-        }
+        aria-label={`${group.title}，单击查看详情，双击播放`}
         data-selecting={selectionMode ? "true" : undefined}
         // table-row 在 macOS WKWebView 里不是可靠的原生拖动源；选中后由每个 td 起拖。
         draggable={false}
@@ -469,8 +460,6 @@ export function MergedGroupRow({
           }
           // 控件自己消费点击（展开、选择标记），和视频行同一条 closest 规则
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
-          // touch 双点会发两次 click；竖屏首下已经直接播放，第二下不能再重启。
-          if (layout === "narrow" && event.detail > 1 && !picking) return;
           // Picking: a plain click anywhere on the row picks or drops it (⌘/Ctrl-click starts
           // the picking, Shift-click takes the run from the row touched last). Nothing opens or plays.
           if (selectable && picking) {
@@ -478,14 +467,11 @@ export function MergedGroupRow({
             return;
           }
           if (selectionMode) return;
-          // 移动端详情抽屉会盖住整个列表，轻点歌曲必须直接起播；详情只由
-          // 底部“正在播放”唱盘显式打开。横屏继续保留查看/播放两级手势。
-          if (layout === "narrow") playGroup();
-          else onInspect(sourceIndex);
+          onInspect(sourceIndex);
         }}
         onDoubleClick={(event) => {
           if (event.metaKey || event.ctrlKey || event.shiftKey) return;
-          if (!selectionMode && layout !== "narrow") playGroup();
+          if (!selectionMode) playGroup();
         }}
         tabIndex={0}
         onKeyDown={(event) => {
@@ -494,10 +480,6 @@ export function MergedGroupRow({
           event.preventDefault();
           if (selectionMode) {
             if (selectable) toggleSelection(event.shiftKey);
-            return;
-          }
-          if (layout === "narrow") {
-            playGroup();
             return;
           }
           if (event.metaKey || event.ctrlKey) {
@@ -588,47 +570,33 @@ export function MergedGroupRow({
             key={`${source.platform}:${source.key}`}
             data-resolving={previewPendingSourceKey === sourceKey(source) ? "true" : undefined}
             aria-busy={previewPendingSourceKey === sourceKey(source) ? "true" : undefined}
-            aria-label={
-              layout === "narrow"
-                ? `${source.title || group.title}，单击播放此来源`
-                : `${source.title || group.title}，单击查看此来源详情，双击播放`
-            }
+            aria-label={`${source.title || group.title}，单击查看此来源详情，双击播放`}
             data-local={source.platform === "local" ? "true" : undefined}
             data-source-child="true"
             data-unfold={unfold && sourceLeave === undefined ? "true" : undefined}
             style={unfold ? ({ "--kd-unfold-i": Math.min(index, 8) } as CSSProperties) : undefined}
-            onClick={(event) => {
-              if (layout === "narrow" && event.detail > 1 && !event.metaKey && !event.ctrlKey) return;
-              if (source.platform === "local") {
-                if (layout === "narrow" && !selectionMode) playSource(source);
-                return;
-              }
-              // 移动端选源后立刻播放，不能用全屏详情抽屉拦住结果列表。
+            onClick={() => {
+              if (source.platform === "local") return;
               onPickSource(index);
               // While rows are being picked a source is only chosen: nothing opens or plays.
               if (selectionMode) return;
-              if (layout === "narrow") playSource(source);
-              else onInspect(index);
+              onInspect(index);
             }}
             onDoubleClick={() => {
-              if (layout === "narrow" || selectionMode) return;
+              if (selectionMode) return;
               if (source.platform === "local") return;
               onPickSource(index);
               playSource(source);
             }}
-            // 宽屏本地来源仍只是“已在库中”的提示，保持原来的不可聚焦；竖屏把它
-            // 变成可直接播放的行，才需要纳入键盘 Tab 顺序。
-            tabIndex={source.platform === "local" && layout !== "narrow" ? undefined : 0}
+            // 本地来源只是“已在库中”的提示，不可聚焦。
+            tabIndex={source.platform === "local" ? undefined : 0}
             onKeyDown={(event) => {
               if (event.key !== "Enter" && event.key !== " ") return;
               event.preventDefault();
-              if (source.platform === "local") {
-                if (layout === "narrow" && !selectionMode) playSource(source);
-                return;
-              }
+              if (source.platform === "local") return;
               onPickSource(index);
               if (selectionMode) return;
-              if (layout === "narrow" || event.metaKey || event.ctrlKey) {
+              if (event.metaKey || event.ctrlKey) {
                 playSource(source);
                 return;
               }

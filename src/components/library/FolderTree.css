@@ -23,7 +23,7 @@
   border-right: none;
   background: var(--kd-panel);
 }
-.kd-split[data-layout="wide"] .kd-folder-pane {
+.kd-split .kd-folder-pane {
   padding-top: 0.15rem;
 }
 .kd-folder-list {
@@ -407,20 +407,6 @@ div.kd-stream-status:hover {
   opacity: 0.65;
 }
 
-/* ---------- The tree inside a sheet (phones) ---------- */
-/* `.kd-folder-pane` 原本是 grid 的一栏、高度由父容器给；进了抽屉之后
-   父容器高度是内容撑的，两边互相等对方 → 树被压成 0 高。 */
-.kd-sheet .kd-folder-pane {
-  height: 100%;
-  min-height: 0;
-  border-right: none;
-}
-/* 手机抽屉里的文件夹行比桌面树稍大一点，给手指留下更可靠的点击面积；
-   只放大抽屉版本，不牺牲桌面侧栏一屏能看到的目录数量。 */
-.kd-sheet .kd-folder {
-  height: 2rem;
-  font-size: var(--kd-size);
-}
 .kd-narrow-folder-panel {
   flex: 0 0 clamp(11rem, 38vw, 15rem);
   min-width: 0;
@@ -604,63 +590,6 @@ div.kd-stream-status:hover {
   opacity: 1;
 }
 
-/* 竖屏方块导航保留滚动能力，但不显示或预留原生滚动条。 */
-:root .kd-app[data-portrait="true"] .kd-narrow-folder-rail .kd-scroll {
-  scrollbar-width: none;
-  scrollbar-gutter: auto;
-}
-:root .kd-app[data-portrait="true"] .kd-narrow-folder-rail .kd-scroll::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
-}
-
-/* ---------- Portrait picker: the open source's list in a bottom sheet ---------- */
-.kd-folder-picker {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  padding: 0.35rem 0.5rem;
-}
-.kd-folder-picker button {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 0.6rem;
-  width: 100%;
-  min-height: 2.6rem;
-  padding: 0.4rem 0.6rem;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--kd-text-body);
-  text-align: left;
-  cursor: pointer;
-}
-.kd-folder-picker button:hover {
-  background: var(--kd-hover);
-}
-.kd-folder-picker button[data-active="true"] {
-  color: var(--kd-text);
-  font-weight: 700;
-  background: transparent;
-  box-shadow: none;
-}
-.kd-folder-picker .kd-rail-icon {
-  flex: none;
-  display: inline-flex;
-  color: var(--kd-muted);
-}
-.kd-folder-picker button[data-active="true"] .kd-rail-icon {
-  color: inherit;
-}
-.kd-folder-picker .kd-rail-label {
-  min-width: 0;
-  font-size: var(--kd-size);
-  overflow-wrap: anywhere;
-}
-
 /* ============================================================
  * Rows arriving and folding (sidebarMotion.ts sets the marks; the clock is motion.css).
  *
@@ -684,8 +613,7 @@ div.kd-stream-status:hover {
   min-width: 0;
 }
 .kd-folder-pane,
-.kd-narrow-folder-rail,
-.kd-folder-picker {
+.kd-narrow-folder-rail {
   /* A branch opens and shuts in a beat and a half of the small clock: 240ms. */
   --kd-tree-fold-time: calc(var(--kd-motion-micro) * 1.5);
 }
@@ -820,8 +748,7 @@ div.kd-stream-status:hover {
   color: var(--kd-text) !important;
   font-weight: 700;
 }
-:root[data-theme-pack="sakulaptop98"] .kd-app .kd-narrow-folder-rail button[data-active="true"],
-:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder-picker button[data-active="true"] {
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-narrow-folder-rail button[data-active="true"] {
   color: var(--kd-text);
   font-weight: 700;
 }

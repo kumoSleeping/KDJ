@@ -58,7 +58,7 @@ test("the result list in WebKit scrolls itself: it takes the wheel, keeps the bl
   let asked = 0;
   let props: ResultTableProps = {
     items: [playlist(120)], video: null, loading: false, searched: true, delivery: { id: 1, top: 0, left: 0 }, paneShown: true,
-    layout: "wide", selected: new Set(), selectionMode: false, onSelectionModeChange: noop,
+    selected: new Set(), selectionMode: false, onSelectionModeChange: noop,
     expandedGroups: new Set(), collapsedItems: new Set(), sourceIndex: {}, inspectedGroup: null,
     collectionShown: 50, hasMoreRows: true, loadingMoreRows: false, onShowMoreRows: () => { asked += 1; },
     onToggleSelect: noop, onToggleExpand: noop, onPickSource: noop, onToggleItem: noop, onToggleItemAll: noop,

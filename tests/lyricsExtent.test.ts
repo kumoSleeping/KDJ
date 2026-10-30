@@ -15,24 +15,18 @@ import {
   useLyricsExtent,
 } from "../src/lib/lyricsExtent";
 
-const wide = { tall: false, mobile: false };
-const tall = { tall: true, mobile: false };
-const phoneUpright = { tall: true, mobile: true };
-const phoneOnItsSide = { tall: false, mobile: true };
+const wide = { tall: false };
+const tall = { tall: true };
 
 test("full screen is offered by a tall desktop window only", () => {
   assert.deepEqual(lyricsExtentChoices(tall), ["standard", "longer", "full"]);
   assert.deepEqual(lyricsExtentChoices(wide), ["standard", "longer"]);
-  assert.deepEqual(lyricsExtentChoices(phoneOnItsSide), ["standard", "longer"], "a drawer, but no spanning bubble");
-  assert.deepEqual(lyricsExtentChoices(phoneUpright), [], "the sheet is as long as it can be");
 });
 
 test("a stored full screen is shown as the longer drawer where there is none", () => {
   assert.equal(shownLyricsExtent("full", tall), "full");
   assert.equal(shownLyricsExtent("full", wide), "longer");
-  assert.equal(shownLyricsExtent("full", phoneOnItsSide), "longer");
-  assert.equal(shownLyricsExtent("full", phoneUpright), "longer");
-  for (const shape of [wide, tall, phoneOnItsSide, phoneUpright]) {
+  for (const shape of [wide, tall]) {
     assert.equal(shownLyricsExtent("standard", shape), "standard");
     assert.equal(shownLyricsExtent("longer", shape), "longer");
   }

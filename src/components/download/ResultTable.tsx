@@ -51,7 +51,6 @@ import {
   resultColumnKeysWithData,
   type ResultColumn,
 } from "./resultColumns";
-import type { LayoutMode } from "../../lib/useLayoutMode";
 import {
   collectionReveal,
   collectionToken,
@@ -147,8 +146,6 @@ export interface ResultTableProps {
   delivery: ResultDelivery;
   /** The pane holding the table is on screen; coming back on screen presents the list again. */
   paneShown: boolean;
-  /** 当前布局档位，决定搜索结果行的单击/双击播放行为。 */
-  layout: LayoutMode;
   selected: Set<string>;
   selectionMode: boolean;
   onSelectionModeChange(value: boolean): void;
@@ -323,7 +320,6 @@ const ResultTableView = memo(function ResultTableView({
   searched,
   delivery,
   paneShown,
-  layout,
   selected,
   selectionMode,
   onSelectionModeChange,
@@ -976,7 +972,6 @@ const ResultTableView = memo(function ResultTableView({
         key={group.group_id}
         {...videoSeedFromGroup(group)}
         columns={visibleColumns}
-        layout={layout}
         rowNumber={rowNumber}
         late={lateRows && indent}
         leave={leave}
@@ -1012,7 +1007,6 @@ const ResultTableView = memo(function ResultTableView({
         key={group.group_id}
         group={group}
         columns={visibleColumns}
-        layout={layout}
         indent={indent}
         rowNumber={rowNumber}
         late={lateRows && indent}
@@ -1246,7 +1240,6 @@ const ResultTableView = memo(function ResultTableView({
             {...videoSeedFromInfo(block.video)}
             info={block.video}
             columns={visibleColumns}
-            layout={layout}
             rowNumber={1}
             late={lateRows}
           />

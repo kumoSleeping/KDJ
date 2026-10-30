@@ -88,8 +88,6 @@ import { pointerTrackDropAt, type PointerTrackDrop } from "../../lib/pointerTrac
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
 import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isImageTrack, isProjectTrack, isVideoTrack, thumbUrl } from "../../lib/format";
-import { playClickForLayout, useTrackClickPrefs } from "../../lib/trackClickPrefs";
-import type { LayoutMode } from "../../lib/useLayoutMode";
 import { shouldHandleWorkspaceDelete } from "../../lib/workspacePanes";
 import {
   readWorkspaceSession,
@@ -322,15 +320,6 @@ export interface TrackTableProps {
   persistentSession?: boolean;
   total: number;
   loading: boolean;
-  /**
-   * 当前布局档位，原样落到 `<table data-layout>` 上给 CSS 当判据。
-   *
-   * 换行式（标题一行、元信息一行）**只有 narrow（只剩曲目表这一栏）才准用**。
-   * 之前是 `@container (max-width: 700px)` 判的，判据错在：那量的是曲目表这一栏
-   * 有多宽，于是"窗口 1400、把详情栏拖到 600"也会触发——屏幕明明还摆得下两栏，
-   * 却退化成手机排版。摆不摆得下长条要看还剩几栏，不看这一栏被挤成多窄。
-   */
-  layout: LayoutMode;
   /** 可选紧凑适配；DJ 模式当前保留完整配置列并由外层横向滚动。 */
   fitWidth?: boolean;
   selectedId: number | null;
@@ -930,7 +919,6 @@ export const TrackTable = memo(function TrackTable({
   persistentSession = true,
   total,
   loading,
-  layout,
   fitWidth = false,
   selectedId,
   selectedIds,
@@ -969,8 +957,6 @@ export const TrackTable = memo(function TrackTable({
   );
   const filterFolder = useTableStore((state) => state.filter.folder);
   const removeTracks = useTableStore((state) => state.removeTracks);
-  const widePlay = useTrackClickPrefs((state) => state.widePlay);
-  const narrowPlay = useTrackClickPrefs((state) => state.narrowPlay);
   const localExternalDragMode = usePlaybackPrefs((state) => state.localExternalDragMode);
   const shareContentMode = useSharePrefs((state) => state.contentMode);
   const sameNameSearchPlatforms = useMemo(() => {
@@ -992,7 +978,6 @@ export const TrackTable = memo(function TrackTable({
     localExternalDragMode === "share_link"
     && !window.kdj?.startLinkDrag
     && window.kdj?.platform === "win32";
-  const playClick = playClickForLayout({ widePlay, narrowPlay }, layout);
   const copyToClipboard = useTableStore((state) => state.copyToClipboard);
   const undo = useTableStore((state) => state.undo);
   const undoLast = useTableStore((state) => state.undoLast);
@@ -1051,7 +1036,7 @@ export const TrackTable = memo(function TrackTable({
     if (trace.prevSummaries !== summaryById) { trace.publishes += 1; trace.prevSummaries = summaryById; }
     if (trace.prevDownloads !== downloadTasks) { trace.downloads += 1; trace.prevDownloads = downloadTasks; }
     // Renders caused by the table's own props changing (the workspace rendering), as against its hooks.
-    const props = [total, loading, layout, fitWidth, selectedId, selectedIds, shortcutActive, visible, sort, order, sort2, order2, onSelect, onSort];
+    const props = [total, loading, fitWidth, selectedId, selectedIds, shortcutActive, visible, sort, order, sort2, order2, onSelect, onSort];
     if (trace.prevProps.some((value, index) => value !== props[index])) trace.props += 1;
     trace.prevProps = props;
   }
@@ -2104,7 +2089,7 @@ export const TrackTable = memo(function TrackTable({
     const theme = new MutationObserver(measure);
     theme.observe(document.documentElement, { attributes: true, attributeFilter: ["style", "data-theme", "class"] });
     return () => { observer.disconnect(); theme.disconnect(); };
-  }, [total > 0, layout, colPrefs.hidden, colPrefs.order, pendingDownloads.length > 0]);
+  }, [total > 0, colPrefs.hidden, colPrefs.order, pendingDownloads.length > 0]);
   // 行高变了（字号、主题）：每一行的位置都按新的行高算。
   useLayoutEffect(() => { virtualizer.measure(); }, [rowH, virtualizer]);
 
@@ -2293,31 +2278,19 @@ export const TrackTable = memo(function TrackTable({
         return;
       }
       if (selecting) {
-        // 双点会依次送 detail=1 / 2 两次 click。竖屏的单击就是播放，
-        // 第二下既不该重复起播，也不该把选择状态又翻回去。
-        if (playClick === "single" && event.detail > 1) return;
         // A plain click picks or drops the row; Shift picks the run up to it. Nothing plays.
         onSelect(track.id, event.shiftKey ? "range" : "toggle");
         return;
       }
-      // 同上：先让第一下立即播放，第二下只被吞掉；不要等双击超时，
-      // 否则移动端会感觉点歌迟钝。键盘触发的 detail=0 不受影响。
-      if (playClick === "single" && event.detail > 1) return;
       const mode = selectMode(event);
-      if (playClick === "double" && event.detail === 2 && mode === "replace") {
+      if (event.detail === 2 && mode === "replace") {
         // `click(detail=2)` precedes `dblclick`. Send the audio intent first so opening
         // TrackDetail cannot occupy the main thread before the native Load is queued.
         doubleClickPlaybackRef.current = { trackId: track.id, at: performance.now() };
         playFromTable(track);
       }
+      // 单击只负责选择，双击播放；详情入口留给播放条唱盘（见 PlayerBar.DETAIL_EVENT）。
       onSelect(track.id, mode, event.detail);
-      // 带修饰键的多选不算——那是在攒选区。
-      if (mode !== "replace") return;
-      // 单击播放按设置走；双击模式下单击只负责选择。
-      // 详情入口仍留给播放条唱盘（见 PlayerBar.DETAIL_EVENT）。
-      if (playClick === "single") {
-        playFromTable(track);
-      }
     },
     pointerDown(event, track) {
       if (htmlExternalLinkDrag) {
@@ -2333,7 +2306,7 @@ export const TrackTable = memo(function TrackTable({
     },
     cancelPress,
     doubleClick(track) {
-      if (selecting || playClick !== "double") return;
+      if (selecting) return;
       const submitted = doubleClickPlaybackRef.current;
       doubleClickPlaybackRef.current = null;
       if (
@@ -2397,7 +2370,6 @@ export const TrackTable = memo(function TrackTable({
         role="grid"
         aria-rowcount={count}
         data-kind="library"
-        data-layout={layout}
         data-fit-width={fitWidth || undefined}
         style={listStyle}
       >

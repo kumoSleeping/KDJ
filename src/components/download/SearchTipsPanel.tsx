@@ -58,19 +58,13 @@ function Lessons({ page }: { page: TipsPage }) {
 
 /**
  * 使用提示：每一页教一类功能，由抽屉标题上的页签切换（搜索、下载、可视化、播放器）。
- * 窄屏没有抽屉标题，所以把各页依次排开。
  *
  * 它只负责展示，不持久化任何打开状态；Workspace 会把它当作临时旁路面板，
  * 关闭后仍可回到原先钉住的曲目详情。
  */
-export function SearchTipsPanel({ stacked = false }: { stacked?: boolean }) {
+export function SearchTipsPanel() {
   const page = useTipsPage(state => state.page);
   const pages = shownTipsPages();
-  if (stacked) return <div className="kd-tips-panel">
-    {pages.map(item => <section key={item.id} aria-label={item.title ?? item.label}>
-      <Lessons page={item.id} />
-    </section>)}
-  </div>;
   return <div className="kd-tips-panel">
     <SlidePages page={page} order={pages.map(item => item.id)}>
       <Lessons page={page} />

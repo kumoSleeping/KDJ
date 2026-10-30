@@ -65,7 +65,7 @@ export function loginRemaining(expiresAt: number | undefined, now = Date.now()):
  * 账号面板这一行的排版就地写死，不再走 design.css 的 `.kd-set-*`。
  *
  * 那套类是给已经删掉的"整页设置"写的，右列固定 `width: 15rem`(240px)。
- * 可这个面板住在 ~350px 宽的右侧详情栏里，窄屏还会掉进更窄的底部抽屉——
+ * 可这个面板住在 ~350px 宽的右侧抽屉里——
  * 240px 一被右列吃掉，左边只剩 100 来 px，「网易云音乐」直接被压成一列一个字，
  * 右边那 240px 里却只放着一颗 60px 的按钮，白空一大片。
  *

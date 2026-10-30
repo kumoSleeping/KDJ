@@ -23,6 +23,7 @@ import {
   readPlayerBarCollapsed,
   usePlayerBarAway,
 } from "../src/lib/playerBarAway";
+import { windowIsTall } from "../src/lib/useLayoutMode";
 import {
   advancePlayerBar,
   endPlayerBarSlide,
@@ -354,16 +355,22 @@ test("whatever the listener does, in any order, the bar or the bubble is on scre
 });
 
 // Last: it gives the modules a window for a moment, which the tests above run without.
-test("a phone starts with its bar up and can put it away like a tall desktop window", () => {
+test("a phone is never a tall window: its bar starts up and can be put away", () => {
   const stored = storage();
   const previous = (globalThis as { window?: unknown }).window;
-  Object.assign(globalThis, { window: { kdj: { platform: "android" }, localStorage: stored } });
+  // Even a tall viewport (a rotation on its way, split screen) keeps a phone's wide shape.
+  Object.assign(globalThis, { window: {
+    kdj: { platform: "android" },
+    localStorage: stored,
+    matchMedia: () => ({ matches: true, addEventListener() {}, removeEventListener() {} }),
+  } });
   try {
-    assert.equal(readPlayerBarCollapsed("tall"), false, "the bar is up until the listener puts it away");
-    usePlayerBarAway.setState({ tall: true, collapsed: false });
+    assert.equal(windowIsTall(), false);
+    assert.equal(readPlayerBarCollapsed(), false, "the bar is up until the listener puts it away");
+    usePlayerBarAway.setState({ tall: false, collapsed: false });
     bar().setCollapsed(true);
-    assert.equal(stored.getItem("kd-player-bar-collapsed-tall"), "true");
-    assert.equal(readPlayerBarCollapsed("tall"), true, "and stays away at the next launch");
+    assert.equal(stored.getItem("kd-player-bar-collapsed"), "true");
+    assert.equal(readPlayerBarCollapsed(), true, "and stays away at the next launch");
     assert.equal(playerBarAwayWanted(bar().collapsed, true), true);
   } finally {
     Object.assign(globalThis, { window: previous });

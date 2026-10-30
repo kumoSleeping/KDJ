@@ -39,19 +39,6 @@
 /* The lyrics block carries its own backdrop here (no drawer panel does): it is what the layer
    is laid out against. */
 .kd-side-panels .kd-lyrics[data-backdrop] { position: relative; }
-/* Alone, the task list fills the column; beside the lyrics it keeps a fixed share. */
-.kd-side-panels > .kd-download-window:only-child { flex: 1 1 0; }
-.kd-side-panels > .kd-download-window:only-child > .kd-task-window-body {
-  flex: 1 1 0;
-  height: 0;
-  max-height: none;
-  resize: none;
-}
-/* The narrow layout's sheet holds the column inside this wrapper (it gives way to the visualizer
-   configuration): without a height the task list in it was laid out 2px tall. */
-.kd-aside-restorable { height: 100%; }
-.kd-activity-panel-host { height: 100%; min-height: 0; }
-.kd-activity-panel-host[hidden],
 .kd-split-aside[hidden],
 .kd-split-handle[hidden] { display: none !important; }
 /* The visualizer of the playing song lives in its floating window only. What stays here while
