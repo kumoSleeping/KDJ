@@ -24,6 +24,7 @@ import {
   type AppFontScale,
 } from "../../lib/fontScale";
 import { api } from "../../lib/api";
+import { getBridge } from "../../lib/bridge";
 import { chooseAutoAnalysisMode } from "../../lib/autoAnalyze";
 import { resolveAutoAnalysisMode } from "../../lib/autoAnalysisMode";
 import { formatBytes } from "../../lib/format";
@@ -447,6 +448,8 @@ export function SettingsPanel({ preferences = false, page }: {
   );
   const autoCheck = useUpdateStore((s) => s.autoCheck);
   const setAutoCheck = useUpdateStore((s) => s.setAutoCheck);
+  const autoDownload = useUpdateStore((s) => s.autoDownload);
+  const setAutoDownload = useUpdateStore((s) => s.setAutoDownload);
   const focusEpoch = useUpdateStore((s) => s.focusEpoch);
   const updateSectionRef = useRef<HTMLDivElement>(null);
 
@@ -489,6 +492,14 @@ export function SettingsPanel({ preferences = false, page }: {
                 label="自动检测更新"
                 title="启动时检查一次，之后每 5 分钟静默检查；关掉后只保留手动检查。"
                 onChange={() => setAutoCheck(!autoCheck)}
+              />
+              <Switch
+                checked={autoDownload}
+                label="自动下载更新"
+                title={getBridge().platform === "android"
+                  ? "在 Wi‑Fi 下发现新版本时自己下好并打开安装页，安装仍由系统确认；每个版本只弹一次。"
+                  : "发现新版本后在后台下好，下次启动时自动安装；也可以点上面的「立即重启更新」马上装。"}
+                onChange={() => setAutoDownload(!autoDownload)}
               />
             </div>
           </Panel>

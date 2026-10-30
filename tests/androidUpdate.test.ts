@@ -67,3 +67,12 @@ test("on a metered network nothing is downloaded until the key is pressed; a mis
   assert.equal(asked.length, 1);
   assert.match(useUpdateStore.getState().manualError, /允许 KDJ 安装应用/);
 });
+
+test("with automatic download off a background check on Wi-Fi opens nothing", async () => {
+  const { asked } = await phone("wifi");
+  const { useUpdateStore } = await import("../src/stores/updateStore");
+  useUpdateStore.getState().setAutoDownload(false);
+  await backgroundCheckFound();
+  assert.equal(asked.length, 0);
+  useUpdateStore.getState().setAutoDownload(true);
+});

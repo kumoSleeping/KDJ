@@ -48,6 +48,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 kdj-playback = { version = "1.1.0-rc21", path = "../crates/kdj-playback" }
 tauri-plugin-updater = "2"
+# 暂存的更新包在下次启动装之前重新验一次签（staged_update.rs），和 updater 用同一个库。
+minisign-verify = "0.2"
 semver = "1"
 souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
 # The CLI talks to the running app; artwork for the system media controls is fetched here.

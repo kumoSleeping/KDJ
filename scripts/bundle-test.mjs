@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 const require = createRequire(import.meta.url);
 const source = process.argv[2];
 // Tests that give the page a bridge of their own (window.kdj) instead of the desktop stub below.
-const OWN_BRIDGE = ["tests/youtube-login-ui.test.ts", "tests/androidUpdate.test.ts"];
+const OWN_BRIDGE = ["tests/youtube-login-ui.test.ts", "tests/androidUpdate.test.ts", "tests/desktopUpdate.test.ts"];
 if (!source) throw new Error("usage: node scripts/bundle-test.mjs tests/<name>.test.ts[x]");
 const entry = new Module(`${process.cwd()}/${source.replace(/\.tsx?$/, ".cjs")}`);
 entry.filename = entry.id;

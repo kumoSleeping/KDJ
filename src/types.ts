@@ -1109,6 +1109,11 @@ export interface KdjBridge {
    */
   applyUpdate?: null | ((onProgress?: (progress: UpdateProgress) => void) => Promise<void>);
   /**
+   * 桌面：在后台下载更新包并暂存，下次启动时（窗口露面之前）装上；返回暂存的版本号。
+   * 已经暂存了同一次发布就直接返回。之后点 applyUpdate 会直接装暂存的包。
+   */
+  downloadUpdate?: null | (() => Promise<string>);
+  /**
    * 安卓：在应用里下载 Release 的 APK，下完打开系统安装页（安装和确认仍是系统的）。
    * "permission"：还没有「安装未知应用」授权；askPermission 为真时已打开授权页，允许后再调一次。
    */

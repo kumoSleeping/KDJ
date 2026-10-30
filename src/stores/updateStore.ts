@@ -1,6 +1,8 @@
 /**
  * 软件更新：启动 + 定时静默检查；手动检查才报错。
- * 发现新版本后顶栏出现「待下载」，点进设置里的更新区。
+ * 发现新版本后顶栏出现更新键，点进设置里的更新区。自动下载开着时（默认开），
+ * 桌面在后台下好、下次启动时装上，也可以在设置里立即重启更新；安卓在 Wi‑Fi 下
+ * 下好并弹出系统安装页。
  */
 
 import { create } from "zustand";
@@ -12,6 +14,7 @@ import type { UpdateInfo, UpdateProgress } from "../types";
 import { useAppStore } from "./appStore";
 
 const AUTO_KEY = "kd-auto-update-check";
+const AUTO_DOWNLOAD_KEY = "kd-auto-update-download";
 const INTERVAL_MS = 5 * 60 * 1000;
 /** 安卓自动弹过安装页的版本：每个版本只自动弹一次，之后由顶栏和设置里的键来装。 */
 const ANDROID_OFFERED_KEY = "kd-android-update-offered";
@@ -22,14 +25,15 @@ function unmeteredNetwork(): boolean {
   return !!connection && !connection.saveData && (connection.type === "wifi" || connection.type === "ethernet");
 }
 
-function readAutoCheck(): boolean {
-  const raw = readLocalStorage(AUTO_KEY);
+/** 开关默认开：没写过就是开。 */
+function readSwitch(key: string): boolean {
+  const raw = readLocalStorage(key);
   if (raw === null) return true;
   return raw !== "0" && raw !== "false";
 }
 
-function writeAutoCheck(value: boolean): void {
-  writeLocalStorageNow(AUTO_KEY, value ? "1" : "0");
+function writeSwitch(key: string, value: boolean): void {
+  writeLocalStorageNow(key, value ? "1" : "0");
 }
 
 function errorText(error: unknown): string {
@@ -71,6 +75,12 @@ interface UpdateStore {
   info: UpdateInfo | null;
   /** 自动检测，默认开。 */
   autoCheck: boolean;
+  /** 发现新版本后自动下载，默认开。 */
+  autoDownload: boolean;
+  /** 桌面：已在后台下好、等下次启动安装的版本；没有是空串。 */
+  staged: string;
+  /** 桌面：后台正在下载。 */
+  downloading: boolean;
   checking: boolean;
   applying: boolean;
   /** 仅手动检查失败时写。 */
@@ -80,6 +90,9 @@ interface UpdateStore {
   focusEpoch: number;
 
   setAutoCheck(on: boolean): void;
+  setAutoDownload(on: boolean): void;
+  /** 自动下载开着、发现了新版本时的下一步：桌面后台下好暂存；安卓只在后台检查时下。 */
+  downloadInBackground(info: UpdateInfo, silent: boolean): void;
   /** silent：失败/无更新都不打扰；手动才写 manualError。 */
   check(opts?: { silent?: boolean }): Promise<UpdateInfo | null>;
   /** auto：安卓后台检查发现新版本后自己下载、弹安装页；不打开授权页，失败不报。 */
@@ -95,7 +108,10 @@ let checkSeq = 0;
 
 export const useUpdateStore = create<UpdateStore>((set, get) => ({
   info: null,
-  autoCheck: readAutoCheck(),
+  autoCheck: readSwitch(AUTO_KEY),
+  autoDownload: readSwitch(AUTO_DOWNLOAD_KEY),
+  staged: "",
+  downloading: false,
   checking: false,
   applying: false,
   manualError: "",
@@ -103,8 +119,32 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
   focusEpoch: 0,
 
   setAutoCheck(on) {
-    writeAutoCheck(on);
+    writeSwitch(AUTO_KEY, on);
     set({ autoCheck: on });
+  },
+
+  setAutoDownload(on) {
+    writeSwitch(AUTO_DOWNLOAD_KEY, on);
+    set({ autoDownload: on });
+    const info = get().info;
+    if (on && info) get().downloadInBackground(info, true);
+  },
+
+  downloadInBackground(info, silent) {
+    const state = get();
+    if (!info.newer || !state.autoDownload) return;
+    const download = getBridge().downloadUpdate;
+    if (!download) {
+      if (silent) offerAndroidUpdate(info);
+      return;
+    }
+    if (state.downloading || state.applying || state.staged === info.latest) return;
+    set({ downloading: true });
+    // 静默：失败了下次检查再下；手动「立即重启更新」也会自己下。
+    download().then(
+      (version) => set({ staged: version, downloading: false }),
+      () => set({ downloading: false }),
+    );
   },
 
   async check(opts) {
@@ -115,7 +155,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       const info = await fetchUpdateInfo();
       if (seq !== checkSeq) return info;
       set({ info, checking: false });
-      if (silent) offerAndroidUpdate(info);
+      get().downloadInBackground(info, silent);
       return info;
     } catch (error) {
       if (seq !== checkSeq) return null;
@@ -238,10 +278,10 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
   },
 }));
 
-/** 安卓：后台检查在 Wi‑Fi 下发现新版本，自己下好并弹出系统安装页，每个版本一次。 */
+/** 安卓：自动下载开着时，后台检查在 Wi‑Fi 下发现新版本，自己下好并弹出系统安装页，每个版本一次。 */
 export function offerAndroidUpdate(info: UpdateInfo): void {
   const store = useUpdateStore.getState();
-  if (!info.newer || !getBridge().installAndroidUpdate || store.applying || !unmeteredNetwork()
+  if (!info.newer || !store.autoDownload || !getBridge().installAndroidUpdate || store.applying || !unmeteredNetwork()
     || readLocalStorage(ANDROID_OFFERED_KEY) === info.latest) return;
   void store.apply(undefined, { auto: true });
 }
