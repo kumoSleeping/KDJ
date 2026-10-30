@@ -125,10 +125,6 @@ impl Probe {
         }
         ms(&self.format.duration) - (ms(&stream.start_time) - ms(&self.format.start_time)).max(0)
     }
-    pub fn audio_shift(&self) -> i64 {
-        self.audio().map(|s| ms(&s.start_time)).unwrap_or(0)
-            - self.video().map(|s| ms(&s.start_time)).unwrap_or(0)
-    }
     pub fn check(&self, video: bool) -> Result<i64> {
         let stream = if video {
             self.video().context("文件没有可用的视频流")?

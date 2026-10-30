@@ -50,34 +50,6 @@ pub fn probe_binary() -> Result<PathBuf> {
     which("ffprobe").context("没有找到 ffprobe，请安装完整的 FFmpeg")
 }
 
-/// A media file's length as ffprobe reads it from the container (seconds), for files whose
-/// headers say nothing: a fragmented MP4 / M4A keeps 0 in its `mvhd` and the length in its
-/// fragments, which the tag reader does not add up. None without ffprobe, or past a few seconds.
-pub fn probe_duration_secs(path: &Path) -> Option<f64> {
-    let mut child = std::process::Command::new(probe_binary().ok()?)
-        .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"])
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-    let mut text = String::new();
-    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut text).ok()?;
-    text.trim().parse::<f64>().ok().filter(|secs| secs.is_finite() && *secs > 0.)
-}
 
 /// GUI 启动的 app 看不见的常见安装位置。
 ///

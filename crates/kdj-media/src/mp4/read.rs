@@ -69,6 +69,14 @@ impl Track {
             None => media,
         }
     }
+    /// When the track starts in the movie (seconds): its leading empty edit, as players and
+    /// FFmpeg place it. A media start inside the first edit is trimmed, not moved.
+    pub fn start_secs(&self) -> f64 {
+        if self.movie_timescale == 0 {
+            return 0.;
+        }
+        self.edit_lead as f64 / self.movie_timescale as f64
+    }
     /// AAC configuration when the first sample entry is `mp4a` carrying MPEG-4 audio.
     pub fn aac(&self) -> Option<AacInfo> {
         let entry = self.entries.first()?;

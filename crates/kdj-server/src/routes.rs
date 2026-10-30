@@ -5351,8 +5351,7 @@ fn pcm_envelope(bytes: &[u8]) -> Vec<f64> {
     values
 }
 
-/// The same envelope from a local file, decoded by symphonia (no FFmpeg) from where players
-/// start it, as FFmpeg decodes it.
+/// The same envelope from a local file, decoded by symphonia from where players start it.
 fn native_alignment_envelope(path: &Path) -> Result<Vec<f64>, String> {
     let channels = kdj_media::pcm::inspect(path).map_err(|err| format!("{err:#}"))?.channels as usize;
     let mut bytes = Vec::new();
@@ -5372,7 +5371,7 @@ fn native_alignment_envelope(path: &Path) -> Result<Vec<f64>, String> {
 }
 
 /// The first 210 s of a remote stream: its head is fetched (a DASH audio track holds that in
-/// a few MB) and decoded natively; FFmpeg reads the URL itself where the head is not enough.
+/// a few MB) and decoded natively.
 async fn remote_alignment_envelope(http: reqwest::Client, url: String, headers: Vec<(String, String)>) -> Result<Vec<f64>, String> {
     const HEAD: u64 = 9 * 1024 * 1024;
     let file = std::env::temp_dir().join(format!("kdj-align-{:016x}.m4s", rand::random::<u64>()));
@@ -5405,40 +5404,7 @@ async fn remote_alignment_envelope(http: reqwest::Client, url: String, headers: 
         Err(error) => Err(error),
     };
     let _ = std::fs::remove_file(&file);
-    match native {
-        Ok(envelope) => Ok(envelope),
-        Err(error) if !kdj_providers::ffmpeg::available() => Err(error),
-        Err(_) => {
-            let headers: String = headers.iter().map(|(name, value)| format!("{name}: {value}\r\n")).collect();
-            tokio::task::spawn_blocking(move || decode_alignment_envelope(url, Some(headers))).await.map_err(|err| err.to_string())?
-        }
-    }
-}
-
-fn decode_alignment_envelope(input: String, headers: Option<String>) -> Result<Vec<f64>, String> {
-    let ffmpeg = kdj_providers::ffmpeg::binary().map_err(|err| format!("{err:#}"))?;
-    let mut command = std::process::Command::new(ffmpeg);
-    command.args(["-v", "error", "-t", "210"]);
-    if let Some(headers) = headers {
-        command.args(["-headers", &headers]);
-    }
-    let output = command
-        .args([
-            "-i", &input, "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1",
-        ])
-        .output()
-        .map_err(|err| format!("启动 ffmpeg 失败：{err}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "ffmpeg 解码失败：{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let envelope = pcm_envelope(&output.stdout);
-    if envelope.len() < 20 * 30 {
-        return Err("可用于校准的音频不足 30 秒".into());
-    }
-    Ok(envelope)
+    native
 }
 
 /// 在周期 20Hz 的响度包络上做归一化互相关。返回“视频相对本地音频”的偏移：
@@ -5496,12 +5462,7 @@ async fn video_calibrate(
         headers.push(("Cookie".to_string(), cookies));
     }
     let local_path = track.path;
-    // A song symphonia cannot read (rare containers) is left to FFmpeg where it is installed.
-    let local_job = tokio::task::spawn_blocking(move || {
-        native_alignment_envelope(Path::new(&local_path)).or_else(|error| {
-            if kdj_providers::ffmpeg::available() { decode_alignment_envelope(local_path, None) } else { Err(error) }
-        })
-    });
+    let local_job = tokio::task::spawn_blocking(move || native_alignment_envelope(Path::new(&local_path)));
     let video_job = remote_alignment_envelope(state.preview_http.clone(), video_url, headers);
     let (local, video) = tokio::join!(local_job, video_job);
     let local = local

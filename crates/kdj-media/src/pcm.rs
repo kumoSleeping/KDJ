@@ -30,6 +30,21 @@ pub fn inspect(path: &Path) -> Result<Source> {
     Ok(track.1)
 }
 
+/// The first audio track's length (seconds) as its container states it, without decoding; None
+/// when the container does not say.
+pub fn duration_secs(path: &Path) -> Option<f64> {
+    let (_, (track, source)) = open(path).ok()?;
+    let frames = track.codec_params.n_frames?;
+    let secs = match track.codec_params.time_base {
+        Some(base) => {
+            let time = base.calc_time(frames);
+            time.seconds as f64 + time.frac
+        }
+        None => frames as f64 / source.sample_rate as f64,
+    };
+    (secs.is_finite() && secs > 0.).then_some(secs)
+}
+
 type Opened = (Box<dyn symphonia::core::formats::FormatReader>, (symphonia::core::formats::Track, Source));
 
 fn open(path: &Path) -> Result<Opened> {

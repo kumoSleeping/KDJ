@@ -325,9 +325,9 @@ pub struct TrackTags {
 }
 
 /// A file's length from its container when the tag reader has none: kdj-media adds up an
-/// MP4's fragments (pure Rust); other containers fall back to ffprobe where it is installed.
+/// MP4's fragments; other containers say it through symphonia, or the length stays unknown.
 fn container_duration(path: &Path) -> Option<f64> {
-    kdj_media::remux::duration_secs(path).or_else(|| crate::ffmpeg::probe_duration_secs(path))
+    kdj_media::remux::duration_secs(path).or_else(|| kdj_media::pcm::duration_secs(path))
 }
 
 /// 读一个音频文件的标签与技术参数。
