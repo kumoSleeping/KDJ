@@ -207,11 +207,15 @@ export function AccountRow({
     (account.platform === "youtube" || account.platform === "ytm") && browserAccount;
   const soundcloudAccount = account.platform === "soundcloud";
   const browserMobile = ["android", "ios"].includes(String(getBridge().platform));
-  // On a desktop the ways to log in open in place under the row (AccountLogin); a phone saves
-  // the code to scan as a picture, and has no other application's browser to reuse.
-  const loginInPlace = account.login_method === "qr"
-    ? !browserMobile && getBridge().platform !== "browser"
-    : (youtubeAccount || soundcloudAccount) && browserAccount && !browserMobile;
+  // 桌面 SoundCloud 直接读取所选浏览器 Profile；移动端无法跨应用读取，保留原有
+  // OAuth / deep-link 登录作为回退。
+  const oauthAccount =
+    account.login_method === "oauth" || (soundcloudAccount && browserMobile);
+  // The ways to log in open in place under the row (AccountLogin), on a phone as well (all but
+  // reading another application's browser). The web page saves the code to scan as a picture.
+  const loginInPlace = !oauthAccount && (account.login_method === "qr"
+    ? getBridge().platform !== "browser"
+    : (youtubeAccount || soundcloudAccount) && browserAccount);
   // The sidebar's 登录 of this source: its ways are opened, and the row is brought into view.
   const rowRef = useRef<HTMLDivElement>(null);
   const loginAsked = useLoginRequest((state) =>
@@ -446,10 +450,6 @@ export function AccountRow({
     }
   };
 
-  // 桌面 SoundCloud 直接读取所选浏览器 Profile；移动端无法跨应用读取，保留原有
-  // OAuth / deep-link 登录作为回退。
-  const oauthAccount =
-    account.login_method === "oauth" || (soundcloudAccount && browserMobile);
   return (
     <div ref={rowRef} style={settingRow.row}>
       <div style={settingRow.text}>
@@ -553,8 +553,6 @@ export function AccountRow({
             {oauthBusy && <LoaderCircle size={13} className="kd-spin" />}
             {oauthBusy ? "正在登录" : "登录"}
           </Button>
-        ) : browserAccount && browserMobile ? (
-          <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>匿名可用</span>
         ) : loginInPlace ? (
           <Button size="sm" variant="ghost" aria-expanded={loginOpen} onClick={() => setLoginOpen(open => !open)}>
             {loginOpen ? "收起" : "登录"}

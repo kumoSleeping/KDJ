@@ -10,8 +10,10 @@ Kept: music search/download, local library, BPM/key/loudness analysis, waveforms
 song colours/themes, tempo/EQ, Android MediaSession, audio focus and overlay lyrics.
 File access still requires media permission and a readable local filesystem directory. SAF
 cloud/virtual documents are not a Rust filesystem; selecting one is not support for streaming
-that document. Android deletion is not the desktop recycle bin. Account login offers QR and
-pasted headers, not desktop browser-profile extraction.
+that document. Android deletion is not the desktop recycle bin. Account login opens the desktop's ways in
+place under the account's row, except reading another browser's profile: the QR code (shown
+and saved to the album, since a phone cannot scan its own screen), a Cookie-Editor export
+pasted from a mobile browser, and pasted request headers. SoundCloud keeps its OAuth fallback.
 
 Omitted: visualization production/preview/export, editing, `.kdjv` playback
 and the desktop CLI API. Existing project files, export databases and settings
