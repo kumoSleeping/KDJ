@@ -372,6 +372,12 @@ pub struct TrackTags {
     pub format: String,
 }
 
+/// A file's length from its container when the tag reader has none: kdj-media adds up an
+/// MP4's fragments (pure Rust); other containers fall back to ffprobe where it is installed.
+fn container_duration(path: &Path) -> Option<f64> {
+    kdj_media::remux::duration_secs(path).or_else(|| crate::ffmpeg::probe_duration_secs(path))
+}
+
 /// 读一个音频文件的标签与技术参数。
 ///
 /// 读不出来**不报错**，返回尽可能填满的结构——扫描里遇到一个怪文件
@@ -393,14 +399,14 @@ pub fn read_tags(path: &Path) -> TrackTags {
     // 扫描只要文字标签和技术参数，封面走 read_cover；不跳过的话每个文件都整块读一遍原图
     let options = lenient().read_cover_art(false);
     let Ok(tagged) = Probe::open(path).and_then(|probe| probe.options(options).read()) else {
-        out.duration = crate::ffmpeg::probe_duration_secs(path);
+        out.duration = container_duration(path);
         return out;
     };
 
     let properties = tagged.properties();
     let secs = properties.duration().as_secs_f64();
     // A header with no length (a fragmented M4A, many downloads): the container is asked instead.
-    out.duration = if secs > 0.0 { Some(secs) } else { crate::ffmpeg::probe_duration_secs(path) };
+    out.duration = if secs > 0.0 { Some(secs) } else { container_duration(path) };
     out.bitrate = properties.audio_bitrate().map(|value| value as i64);
     out.samplerate = properties.sample_rate().map(|value| value as i64);
     out.channels = properties.channels().map(|value| value as i64);

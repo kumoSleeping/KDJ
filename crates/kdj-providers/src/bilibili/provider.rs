@@ -683,15 +683,10 @@ impl BilibiliProvider {
             !(req.audio_only && req.video_only),
             "不能同时选择纯音频和纯视频"
         );
-        // durl 单流自带音画，纯音频/纯视频都需要 ffmpeg 抽轨并重新封装。
-        // 安卓无 ffmpeg，不能把音画都有的原片冒充成单轨成品。
-        if (req.audio_only || req.video_only) && !ffmpeg::available() {
-            bail!("下载纯音频或纯视频需要 FFmpeg，这台设备上没有");
-        }
-        // 掐头/留白全靠 ffmpeg（安卓走的是无 ffmpeg 的单流直存路径），
+        // 掐头/留白要把音轨重编码：系统 AAC 编码器或 FFmpeg 至少有一个。
         // 早点把话说明白，别下完整段流才发现偏移根本没生效
-        if req.offset_ms != 0 && !ffmpeg::available() {
-            bail!("调整过 Offset 的下载需要 ffmpeg，这台设备上没有");
+        if req.offset_ms != 0 && !crate::finish::offset_available() {
+            bail!("调整过 Offset 的下载需要系统 AAC 编码器或 FFmpeg，这台设备上都没有");
         }
         let (bvid, requested_index) = self.target_of(req).await?;
         let logged_in = self.logged_in().await;
@@ -712,8 +707,8 @@ impl BilibiliProvider {
         let cid = cid_at(&info, &pages, index);
         let max_height = req.max_height.max(1);
 
-        // 没有 ffmpeg 时只能要单流：DASH 的音画是分开的，不混流就没法用。
-        let want_dash = ffmpeg::available();
+        // DASH 的音画分开，由 kdj-media 原样封装，不需要 FFmpeg。
+        let want_dash = true;
         let playurl = self
             .client
             .playurl(&bvid, cid, qn_for_height(max_height), want_dash)
@@ -723,7 +718,12 @@ impl BilibiliProvider {
         }
         let parsed = streams::parse_playurl(&playurl);
         let is_single = matches!(parsed, PlayUrlData::Single { .. });
-        anyhow::ensure!(want_dash || is_single, "这个视频只提供分离的音画，没有 FFmpeg 不能合并下载");
+        // durl 单流里的 FLV 只有 FFmpeg 能拆：没有它时纯音频、纯视频和 Offset 都做不了，
+        // 不能把音画都有的原片冒充成单轨成品。
+        let raw_flv = matches!(&parsed, PlayUrlData::Single { container, .. } if container == "flv") && !ffmpeg::available();
+        if raw_flv && (req.audio_only || req.video_only || req.offset_ms != 0 || req.transcode) {
+            bail!("这个视频只提供 FLV 单流，纯音频、纯视频和 Offset 需要 FFmpeg，这台设备上没有");
+        }
         // 位置固定的二元组：缺哪个哪个是 None，绝不会错位
         let (video_stream, audio_stream) = streams::pick_best(&parsed, max_height);
 
@@ -736,7 +736,7 @@ impl BilibiliProvider {
         };
         let extension = if req.audio_only {
             "m4a".to_string()
-        } else if is_single && !ffmpeg::available() {
+        } else if raw_flv {
             // 没有 ffmpeg 就原样保留容器，别谎称是 mp4
             match &parsed {
                 PlayUrlData::Single { container, .. } => container.clone(),
@@ -744,7 +744,8 @@ impl BilibiliProvider {
             }
         } else {
             let format = self.ctx.video_format();
-            if format.is_empty() {
+            // MKV 只有 FFmpeg 写得出来；没有它时写 MP4
+            if format.is_empty() || (format == "mkv" && !ffmpeg::available()) {
                 "mp4".to_string()
             } else {
                 format
@@ -831,8 +832,8 @@ impl BilibiliProvider {
             let Some(video) = video_stream.clone() else {
                 bail!("哔哩哔哩没有返回可下载的视频流（该视频可能没有可用的画质档位）");
             };
-            if is_single && !ffmpeg::available() {
-                // 安卓路径：单流本身就是完整文件，直接落盘，不经过 ffmpeg
+            if raw_flv {
+                // 单流本身就是完整文件，没有 FFmpeg 时直接落盘
                 let direct = AtomicDownload::new(&output_path)?;
                 self.fetch_streams(
                     &[(video.candidate_urls(), direct.partial().to_path_buf())],
@@ -864,18 +865,17 @@ impl BilibiliProvider {
             };
             self.fetch_streams(&plan, &cookies, cancel, progress)
                 .await?;
-            let args = if req.video_only {
-                ffmpeg::mux_video_only_args(
-                    &inputs,
-                    &staged,
-                    req.transcode,
-                    max_height,
-                    req.offset_ms,
-                )
-            } else {
-                ffmpeg::mux_args(&inputs, &staged, req.transcode, max_height, req.offset_ms)
-            };
-            ffmpeg::run(&args, &log_path, cancel).await?;
+            crate::finish::mux(
+                &inputs,
+                &staged,
+                req.video_only,
+                req.transcode,
+                max_height,
+                req.offset_ms,
+                &log_path,
+                cancel,
+            )
+            .await?;
         }
 
         // 校验通过后才原子替换到最终路径：ffmpeg 直接写目标文件的话，
@@ -884,7 +884,7 @@ impl BilibiliProvider {
             .map(|meta| meta.len())
             .unwrap_or(0);
         if size == 0 {
-            bail!("FFmpeg 没有生成有效的输出文件");
+            bail!("没有生成有效的输出文件");
         }
         anyhow::ensure!(!cancel.is_cancelled(), "下载已取消");
         let output_path = crate::net::commit_download(&staged, &output_path)?;
@@ -1144,20 +1144,7 @@ impl BilibiliProvider {
         offset_ms: i64,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        // 带偏移必然重编码（见 extract_audio_args），copy 那一趟纯属白跑
-        if offset_ms == 0 {
-            let copy_args = ffmpeg::extract_audio_args(source, staged, true, 0);
-            match ffmpeg::run(&copy_args, log_path, cancel).await {
-                Ok(()) => return Ok(()),
-                Err(err) if err.to_string().contains("取消") => return Err(err),
-                Err(_) => {
-                    // 源音轨不是 AAC（flv 里常见 mp3）时 m4a 容器装不下，退回重编码
-                    let _ = std::fs::remove_file(staged);
-                }
-            }
-        }
-        let args = ffmpeg::extract_audio_args(source, staged, false, offset_ms);
-        ffmpeg::run(&args, log_path, cancel).await
+        crate::finish::extract_audio(source, staged, offset_ms, log_path, cancel).await
     }
 
     /// 收藏夹标题与视频。侧栏和粘贴链接共用同一条分页/归一化路径，避免两处

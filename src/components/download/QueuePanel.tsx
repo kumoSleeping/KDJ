@@ -31,7 +31,6 @@ import { forgetQueueDraft, patchVideoDraft, setQueueDraft } from "../../lib/queu
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useTaskPanelStore } from "../../stores/taskPanelStore";
-import { useFfmpegStore } from "../../stores/ffmpegStore";
 import type { DownloadTask, Quality, TaskPhase, TaskState } from "../../types";
 import { taskCoverKind } from "../../lib/taskCovers";
 import { useDownloadTaskCovers } from "../../lib/useTaskCovers";
@@ -113,9 +112,6 @@ function BilibiliVideoModeControl({
 }) {
   const [busy, setBusy] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number; anchorTop: number } | null>(null);
-  const systemFfmpegAvailable = useAppStore((state) => state.health?.ffmpeg ?? false);
-  const managedFfmpegAvailable = useFfmpegStore((state) => state.status?.ffmpeg.state === "ready");
-  const ffmpegAvailable = systemFfmpegAvailable || managedFfmpegAvailable;
   const editable = task.state === "queued" || task.state === "paused" || task.state === "failed";
   const current: BilibiliDownloadMode = task.quality.toLowerCase() === "audio"
     ? "audio"
@@ -131,7 +127,6 @@ function BilibiliVideoModeControl({
   const choose = (mode: BilibiliDownloadMode) => {
     setMenu(null);
     if (!editable || busy || mode === current) return;
-    if (mode !== "audio_video" && !ffmpegAvailable) return;
     setBusy(true);
     onError("");
     const audioOnly = mode === "audio";
@@ -174,7 +169,6 @@ function BilibiliVideoModeControl({
           onClose={() => setMenu(null)}
         >
           {(["audio_video", "video", "audio"] as const).map((mode) => {
-            const unavailable = mode !== "audio_video" && !ffmpegAvailable && mode !== current;
             return (
               <button
                 key={mode}
@@ -182,8 +176,7 @@ function BilibiliVideoModeControl({
                 role="menuitemradio"
                 className="kd-download-mode-option"
                 aria-checked={mode === current}
-                disabled={!editable || busy || unavailable}
-                title={unavailable ? "下载纯音频或纯视频需要 FFmpeg" : undefined}
+                disabled={!editable || busy}
                 onClick={() => choose(mode)}
               >
                 {mode === current ? (

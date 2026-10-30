@@ -25,7 +25,6 @@ use crate::provider::{
     MusicProvider, ProgressSink, ProviderContext, VideoPreviewStream, VideoPreviewTrack,
     VideoProvider,
 };
-use crate::ffmpeg;
 use crate::tags;
 use crate::youtubemusic::auth::YoutubeAuth;
 
@@ -462,8 +461,8 @@ impl YoutubeProvider {
         Ok(())
     }
 
-    /// 不经 HLS 的视频下载：分轨 H.264 + AAC 下完后用 FFmpeg 原样封装成 MP4（与 B 站相同）。
-    /// 分轨被拒（音乐类视频在没有 GVS PO Token 时一律 403），或没有 FFmpeg（Android），
+    /// 不经 HLS 的视频下载：分轨 H.264 + AAC 下完后原样封装成 MP4（kdj-media，与 B 站相同）。
+    /// 分轨被拒（音乐类视频在没有 GVS PO Token 时一律 403）时，
     /// 改下单文件 H.264/AAC MP4（itag 18，360p）。
     async fn download_direct_video(
         &self,
@@ -474,20 +473,18 @@ impl YoutubeProvider {
         cancel: &CancellationToken,
         progress: &ProgressSink,
     ) -> Result<()> {
-        if ffmpeg::available() {
-            if let Some((video, audio)) = adaptive_h264_aac_pair(formats, max_height) {
-                match self
-                    .fetch_and_mux(&video, &audio, temp, staged, cancel, progress)
-                    .await
-                {
-                    Ok(()) => return Ok(()),
-                    Err(error) if is_stream_forbidden(&error) => tracing::info!(
-                        video_itag = video.itag,
-                        audio_itag = audio.itag,
-                        "YouTube 分轨下载被拒绝，改用单文件 MP4"
-                    ),
-                    Err(error) => return Err(error),
-                }
+        if let Some((video, audio)) = adaptive_h264_aac_pair(formats, max_height) {
+            match self
+                .fetch_and_mux(&video, &audio, temp, staged, cancel, progress)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) if is_stream_forbidden(&error) => tracing::info!(
+                    video_itag = video.itag,
+                    audio_itag = audio.itag,
+                    "YouTube 分轨下载被拒绝，改用单文件 MP4"
+                ),
+                Err(error) => return Err(error),
             }
         }
         let format = native_progressive_mp4(formats, max_height)
@@ -524,12 +521,11 @@ impl YoutubeProvider {
         .await?;
         let muxed = temp.join("muxed.mp4");
         let height = video.height.unwrap_or(0) as i64;
-        let args = ffmpeg::mux_args(&[video_path, audio_path], &muxed, false, height, 0);
-        ffmpeg::run(&args, &temp.join("ffmpeg.log"), cancel).await?;
+        crate::finish::mux(&[video_path, audio_path], &muxed, false, false, height, 0, &temp.join("ffmpeg.log"), cancel).await?;
         std::fs::rename(&muxed, staged).context("提交 YouTube 封装结果失败")
     }
 
-    /// 只要音轨：直接保存 AAC 分轨；被拒时从单文件 MP4 里原样抽出 AAC（需要 FFmpeg）。
+    /// 只要音轨：直接保存 AAC 分轨；被拒时从单文件 MP4 里原样抽出 AAC。
     async fn download_direct_audio(
         &self,
         formats: &[VideoFormat],
@@ -543,18 +539,16 @@ impl YoutubeProvider {
         if let Some(format) = native_audio_format(formats) {
             match self.fetch_format(&format, staged, cancel, progress).await {
                 Ok(()) => return Ok(()),
-                Err(error) if is_stream_forbidden(&error) && ffmpeg::available() => {}
+                Err(error) if is_stream_forbidden(&error) => {}
                 Err(error) => return Err(error),
             }
         }
-        anyhow::ensure!(ffmpeg::available(), "{NO_AUDIO}");
         let progressive = native_progressive_mp4(formats, i64::MAX).context(NO_AUDIO)?;
         let source = temp.join("progressive.m4s");
         self.fetch_format(&progressive, &source, cancel, progress)
             .await?;
         let extracted = temp.join("audio.m4a");
-        let args = ffmpeg::extract_audio_args(&source, &extracted, true, 0);
-        ffmpeg::run(&args, &temp.join("ffmpeg.log"), cancel).await?;
+        crate::finish::extract_audio(&source, &extracted, 0, &temp.join("ffmpeg.log"), cancel).await?;
         std::fs::rename(&extracted, staged).context("提交 YouTube 音轨失败")
     }
 }
@@ -591,7 +585,7 @@ impl MusicProvider for YoutubeProvider {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            // Video downloads are direct (ANDROID streams, muxed by FFmpeg); nothing has to be
+            // Video downloads are direct (ANDROID streams, muxed by kdj-media); nothing has to be
             // prepared by the webview any more.
             external_download_preparation: false,
             search_kinds: YOUTUBE_SEARCH_KINDS,
@@ -2095,11 +2089,9 @@ mod tests {
             &format!("GET /progressive HTTP/1.1 0-{}", RANGE_CHUNK - 1),
             "a stream is asked for in bounded ranges: {requests:?}"
         );
-        if ffmpeg::available() {
-            // The small audio track goes first, so a refusal costs no video bytes.
-            assert!(requests[0].starts_with("GET /audio "), "{requests:?}");
-            assert_eq!(requests.len(), 2, "{requests:?}");
-        }
+        // The small audio track goes first, so a refusal costs no video bytes.
+        assert!(requests[0].starts_with("GET /audio "), "{requests:?}");
+        assert_eq!(requests.len(), 2, "{requests:?}");
 
         // A refusal is typed, so the caller can fall back instead of failing.
         let error = provider

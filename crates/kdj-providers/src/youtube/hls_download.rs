@@ -46,6 +46,34 @@ fn normalize_youtube_playlist(content: String) -> String {
     normalized
 }
 
+/// Where an HLS download may read from.
+#[derive(Clone, Debug)]
+enum HlsScope {
+    /// One protected loopback capability family (the YouTube video HLS route).
+    Loopback(ProtectedHlsScope),
+    /// YouTube's own media hosts over HTTPS (the YouTube Music HLS fallback).
+    YouTube,
+}
+
+impl HlsScope {
+    fn validate(&self, url: &Url) -> Result<()> {
+        match self {
+            Self::Loopback(scope) => scope.validate(url),
+            Self::YouTube => {
+                let host = url.host_str().unwrap_or_default();
+                anyhow::ensure!(
+                    url.scheme() == "https"
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                        && (host.ends_with(".googlevideo.com") || host.ends_with(".youtube.com") || host == "youtube.com"),
+                    "YouTube HLS 子资源离开了 YouTube 的媒体域名"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ProtectedHlsScope {
     scheme: String,
@@ -124,7 +152,7 @@ impl ProtectedHlsScope {
 #[derive(Clone)]
 struct ProtectedHlsSource {
     http: reqwest::Client,
-    scope: ProtectedHlsScope,
+    scope: HlsScope,
 }
 
 impl std::fmt::Debug for ProtectedHlsSource {
@@ -302,12 +330,41 @@ pub async fn download_muxed_h264_aac(
     )
     .build()
     .context("创建 YouTube 本地 HLS 客户端失败")?;
-    let source = Arc::new(ProtectedHlsSource { http, scope });
+    let source = Arc::new(ProtectedHlsSource { http, scope: HlsScope::Loopback(scope) });
+    transmux(source, root, VariantSelection::Index(0), output, cancel, progress).await
+}
+
+/// YouTube Music's HLS fallback: googlevideo's master playlist of muxed H.264/AAC renditions.
+/// The highest-bandwidth variant carries the best audio; it is transmuxed into a fragmented
+/// MP4 (no FFmpeg), from which the caller copies the AAC track.
+pub async fn download_youtube_hls(
+    manifest_url: &str,
+    output: &std::path::Path,
+    cancel: &CancellationToken,
+    progress: &ProgressSink,
+) -> Result<()> {
+    let root = Url::parse(manifest_url).context("YouTube HLS 清单地址无效")?;
+    HlsScope::YouTube.validate(&root)?;
+    let http = crate::net::http_timeouts(reqwest::Client::builder().redirect(reqwest::redirect::Policy::limited(5)))
+        .build()
+        .context("创建 YouTube HLS 客户端失败")?;
+    let source = Arc::new(ProtectedHlsSource { http, scope: HlsScope::YouTube });
+    transmux(source, root, VariantSelection::HighestBandwidth, output, cancel, progress).await
+}
+
+async fn transmux(
+    source: Arc<ProtectedHlsSource>,
+    root: Url,
+    variant: VariantSelection,
+    output: &std::path::Path,
+    cancel: &CancellationToken,
+    progress: &ProgressSink,
+) -> Result<()> {
     let progress_sink = Arc::clone(progress);
     let options = TransmuxOptions {
         // The protected server keeps at most one variant in a master playlist. If the root is
         // already a media playlist this value is ignored by hls-transmux.
-        variant: Some(VariantSelection::Index(0)),
+        variant: Some(variant),
         // Streaming fMP4 stays bounded by one segment, supports files beyond 4 GiB, and is a
         // normal MP4-family file WebKit can seek without a second defragmentation pass.
         output_format: OutputFormat::FragmentedMp4,
@@ -407,7 +464,7 @@ mod tests {
         let (scope, root) = ProtectedHlsScope::from_root(&url).unwrap();
         let source = ProtectedHlsSource {
             http: reqwest::Client::builder().no_proxy().build().unwrap(),
-            scope,
+            scope: HlsScope::Loopback(scope),
         };
         let error = source
             .response(&SourceLocation::Url(root), None)

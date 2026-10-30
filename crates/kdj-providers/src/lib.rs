@@ -4,6 +4,7 @@ pub mod bilibili;
 pub mod browser;
 mod cookie_jar;
 pub mod ffmpeg;
+pub mod finish;
 mod images;
 pub mod net;
 pub mod netease;

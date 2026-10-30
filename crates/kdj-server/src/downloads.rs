@@ -1483,12 +1483,6 @@ impl DownloadManager {
                 entry.task.kind == TaskKind::Video && entry.task.platform == Platform::Bilibili,
                 "下载内容切换目前仅支持 B 站视频"
             );
-            if audio_only || video_only {
-                anyhow::ensure!(
-                    kdj_providers::ffmpeg::available(),
-                    "下载纯音频或纯视频需要 FFmpeg，这台设备上没有"
-                );
-            }
             anyhow::ensure!(
                 matches!(
                     entry.task.state,
