@@ -52,7 +52,7 @@ export function ChromeActions({
           className="kd-chrome-btn"
           data-update="true"
           aria-label={staged ? `新版本 v${latest} 已下载，重启即可更新` : latest ? `有新版本 v${latest} 待下载` : "有更新待下载"}
-          title={staged ? `v${latest} 已下载，下次启动时安装` : latest ? `待下载：v${latest}` : "待下载更新"}
+          title={staged ? `v${latest} 已下载，点进设置更新` : latest ? `待下载：v${latest}` : "待下载更新"}
           data-open={settingsOpen || undefined}
           onClick={openUpdate}
         >
