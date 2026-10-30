@@ -379,14 +379,21 @@ function paintRightImage(c: CanvasRenderingContext2D, s: PreparedStudio, m: Stud
   const scale = 1.015 + power * h * .108 / Math.min(w, h);
   c.scale(scale, scale); c.drawImage(s.right, -w / 2, -h / 2); c.restore();
 }
+/** One line of text at `y`, or the lines the listener broke it into going down from there, all
+ *  at one size that fits the widest of them into `width`. */
 function paintText(c: CanvasRenderingContext2D, text: string, x: number, y: number, size: number, width: number, font: string, weight = "400", color = "#ffffff", outline = true): void {
-  if (!text) return;
+  const lines = text.trim().split(/\r?\n/).map(line => line.trim());
+  if (!lines.some(Boolean)) return;
   c.save(); c.textBaseline = "alphabetic"; c.font = `${weight} ${size}px ${font}`;
-  const measure = c.measureText(text).width;
+  const measure = Math.max(...lines.map(line => c.measureText(line).width));
   const fitted = measure > width ? Math.max(4, size * width / measure) : size;
   c.font = `${weight} ${fitted}px ${font}`;
-  if (outline) { c.strokeStyle = "rgba(9,24,30,.72)"; c.lineWidth = Math.max(.5, fitted * .035); c.lineJoin = "round"; c.strokeText(text, x, y); }
-  c.fillStyle = color; c.fillText(text, x, y); c.restore();
+  for (const [i, line] of lines.entries()) {
+    const at = y + i * fitted * TITLE_LEADING;
+    if (outline) { c.strokeStyle = "rgba(9,24,30,.72)"; c.lineWidth = Math.max(.5, fitted * .035); c.lineJoin = "round"; c.strokeText(line, x, at); }
+    c.fillStyle = color; c.fillText(line, x, at);
+  }
+  c.restore();
 }
 /**
  * A title or a name, laid out in `room` of height. On one line at its size when that fits.
@@ -399,6 +406,14 @@ function titleBlock(c: CanvasRenderingContext2D, text: string, size: number, wid
   const title = text.trim(); if (!title) return { rows: [], height: 0 };
   // Widths per px of size; canvas text scales evenly with it.
   const unit = (value: string, face: string) => { c.font = `${face} 100px ${font}`; return Math.max(.001, c.measureText(value).width / 100); };
+  // Lines the listener broke it into (Enter in the field) are kept as they are, one row each at
+  // one size that fits the widest of them and all of them into the room.
+  const broken = title.split(/\r?\n/).map(line => line.trim());
+  if (broken.length > 1) {
+    const at = Math.min(size, width / Math.max(...broken.map(line => unit(line, weight))), room / (.8 + (broken.length - 1) * TITLE_LEADING));
+    const rows = broken.map(line => ({ text: line, size: at, weight }));
+    return { rows, height: rows.reduce((sum, row, i) => sum + (i ? titleAdvance(row, weight) : row.size * .8), 0) };
+  }
   const whole = unit(title, weight), line = Math.min(size, width / whole);
   let rows: TitleRow[] = [{ text: title, size: line, weight }];
   if (line < size) {

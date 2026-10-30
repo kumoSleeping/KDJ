@@ -263,7 +263,14 @@ async fn cover_render(State(state): State<Arc<AppState>>, Json(p): Json<CoverRen
 struct Analyze { track_id: i64, spectrum: Spectrum }
 // Typed body: a json! Value tree of an 18k-frame timeline peaks ~6x higher and widens every f32 to 17 digits.
 #[derive(Serialize)]
-struct Analyzed { timeline: kdj_analysis::visualizer::FeatureTimeline, signature: String }
+struct Analyzed {
+    timeline: kdj_analysis::visualizer::FeatureTimeline,
+    signature: String,
+    /// Seconds the file states but does not hold: it ends early (cut off while it was downloaded or
+    /// copied). Everything that does decode is drawn and exported; the window says what is missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    missing_tail: Option<f64>,
+}
 
 // Cache the serialized response: a warm reopen needs neither decode/FFT nor a second
 // allocation of thousands of JSON feature objects. File signatures invalidate replacements.
@@ -309,11 +316,10 @@ async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> 
     if let Some(bytes) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return Ok(analysis_response(bytes));
     }
-    // The container's own length, read by the same decoder the analysis uses: no FFmpeg,
-    // so phones analyze as well. Headers that say nothing leave the check to the decode.
-    let header = { let path = audio.clone(); tokio::task::spawn_blocking(move || kdj_analysis::decode::probe_duration(&path)).await.map_err(anyhow::Error::from)?? };
-    // A fragmented MP4 states no length in its header (symphonia reports 0): only the decode counts.
-    let header_ms = header.filter(|secs| secs.is_finite() && *secs > 0.).map(|secs| secs * 1000.);
+    // The length the file states exactly (stated_duration): an MP3 without a Xing / VBRI tag only
+    // lets symphonia guess it, and a fragmented MP4 says nothing; then the decode alone counts.
+    let header = { let path = audio.clone(); tokio::task::spawn_blocking(move || kdj_analysis::decode::stated_duration(&path)).await.map_err(anyhow::Error::from)?? };
+    let header_ms = header.map(|secs| secs * 1000.);
     let length = |ms: f64| api_check(ms >= 1. && ms <= MAX_DURATION_MS as f64, "初版支持最长 30 分钟的完整音频");
     if let Some(ms) = header_ms { length(ms)?; }
     let path = audio.clone(); let token = cancel.clone();
@@ -324,8 +330,10 @@ async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> 
     api_check(fingerprint(&audio)? == signature, "分析期间歌曲已变化，请重新打开工程")?;
     let decoded_ms = timeline.duration_seconds() * 1000.;
     length(decoded_ms)?;
-    if let Some(ms) = header_ms { api_check((decoded_ms - ms).abs() <= 250., "音轨解码不完整，不能导出")?; }
-    let bytes = Bytes::from(serde_json::to_vec(&Analyzed { timeline, signature }).map_err(anyhow::Error::from)?);
+    // A file that ends before the length it states is played, drawn and exported as far as it
+    // goes, as every player plays it; a decode that fails midway has already failed above.
+    let missing_tail = header_ms.map(|ms| (ms - decoded_ms) / 1000.).filter(|secs| *secs > 0.25);
+    let bytes = Bytes::from(serde_json::to_vec(&Analyzed { timeline, signature, missing_tail }).map_err(anyhow::Error::from)?);
     cache.lock().unwrap_or_else(|e| e.into_inner()).insert(key, bytes.clone());
     Ok(analysis_response(bytes))
 }
@@ -420,8 +428,8 @@ async fn render(p: &Export, sound: Sound, audio: &std::path::Path, output: &std:
     let token = job.cancel.clone();
     let _work = tokio::task::spawn_blocking(move || work_scheduler().acquire(WorkRequest::new(WorkClass::MediaComposition), || token.is_cancelled()).map_err(|_| anyhow::anyhow!("可视化导出已取消"))).await??;
     check(&job.cancel)?;
-    let header = { let path = audio.to_path_buf(); tokio::task::spawn_blocking(move || kdj_analysis::decode::probe_duration(&path)).await?? };
-    ensure!(header.filter(|secs| secs.is_finite() && *secs > 0.).is_none_or(|secs| (secs - p.duration).abs() <= 0.25), "音频时长已变化或不完整");
+    // `p.duration` is the length the analysis decoded, which a file cut short holds less of than it
+    // states; the fingerprint below says whether the song changed since.
     ensure!(fingerprint(audio)? == p.signature, "音频已变化，未开始编码");
     let stage = Stage::new(output.parent().context("输出目录无效")?)?;
     job.update(|s| { s.phase = "encoding".into(); s.status = "绘制与编码".into(); });
@@ -537,7 +545,7 @@ mod tests {
         use kdj_analysis::visualizer::{FeatureFrame, FeatureTimeline};
         let frame = FeatureFrame { bands: vec![0.53412354; 3], bass: 0.1, rms: 0.2, onset: 0.3 };
         let timeline = FeatureTimeline { version: 1, sample_rate: 22050, sample_count: 22050, fps: 60, frames: vec![frame; 2] };
-        let body = serde_json::to_string(&Analyzed { timeline, signature: "1:2:3".into() }).unwrap();
+        let body = serde_json::to_string(&Analyzed { timeline, signature: "1:2:3".into(), missing_tail: None }).unwrap();
         assert!(body.contains("[0.53412354,0.53412354,0.53412354]") && !body.contains("0.5341235399"), "{body}");
         let back: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(back["signature"], "1:2:3"); assert_eq!(back["timeline"]["frames"][1]["onset"].as_f64().unwrap() as f32, 0.3);

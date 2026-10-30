@@ -1250,7 +1250,9 @@ export interface VisualizerJobStatus {
 /** All visualizer traffic stays behind the same authenticated local API boundary. */
 export const visualizerApi = {
   analyze: (trackId: number, spectrum: import("../types/audioVisualizer").AudioVisualizerScene["spectrum"], signal?: AbortSignal) =>
-    request<{ timeline: import("../types/audioVisualizer").VisualizerFeatureTimeline; signature: string }>("/visualizer/analyze", { method: "POST", body: JSON.stringify({ track_id: trackId, spectrum }), signal }),
+    // `missing_tail`: seconds the file states but does not hold (cut off when it was downloaded or
+    // copied); what does decode is drawn and exported.
+    request<{ timeline: import("../types/audioVisualizer").VisualizerFeatureTimeline; signature: string; missing_tail?: number }>("/visualizer/analyze", { method: "POST", body: JSON.stringify({ track_id: trackId, spectrum }), signal }),
   cover: async (trackId: number, signal?: AbortSignal): Promise<Blob | null> => {
     const response = await fetch(api.coverUrl(trackId), { signal });
     if (response.status === 204 || response.status === 404) return null;

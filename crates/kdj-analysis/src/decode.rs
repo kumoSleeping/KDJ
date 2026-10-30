@@ -88,6 +88,56 @@ pub fn probe_duration(path: &Path) -> Result<Option<f64>> {
     Ok(track_duration(&track.codec_params))
 }
 
+/// The track's length when its file states it exactly, for checking a whole decode against: a
+/// FLAC's sample count, an MP4's sample table, a WAV's data size, an Ogg's last granule, an MP3's
+/// Xing / Info / VBRI frame count. None when the file says nothing or only lets it be guessed:
+/// symphonia guesses an MP3 without such a tag from the average size of its first 16 frames over
+/// all the bytes that follow, trailing tags (APE with a cover, ID3v1, Lyrics3) included, and a
+/// VBR file's guess is off by however far its opening bitrate is from its average.
+pub fn stated_duration(path: &Path) -> Result<Option<f64>> {
+    use symphonia::core::codecs::{CODEC_TYPE_MP1, CODEC_TYPE_MP2, CODEC_TYPE_MP3};
+    let file = File::open(path).with_context(|| format!("打开音频失败：{}", path.display()))?;
+    let stream = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(&hint, stream, &FormatOptions { enable_gapless: true, ..Default::default() }, &MetadataOptions::default())
+        .with_context(|| format!("无法识别音频格式：{}", path.display()))?;
+    let track = probed.format.tracks().iter().find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        .context("文件里没有可解码的音轨")?;
+    let mpeg = [CODEC_TYPE_MP1, CODEC_TYPE_MP2, CODEC_TYPE_MP3].contains(&track.codec_params.codec);
+    if mpeg && !mpeg_states_its_length(path) {
+        return Ok(None);
+    }
+    Ok(track_duration(&track.codec_params).filter(|secs| secs.is_finite() && *secs > 0.))
+}
+
+/// Whether an MPEG audio file's first frame carries a Xing / Info or VBRI tag, the only places it
+/// states how many frames it holds. A leading ID3v2 tag is skipped.
+fn mpeg_states_its_length(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = File::open(path) else { return false };
+    let mut head = [0u8; 10];
+    let mut start = 0u64;
+    if file.read_exact(&mut head).is_ok() && &head[..3] == b"ID3" {
+        let size = head[6..10].iter().fold(0u64, |size, b| (size << 7) | u64::from(b & 0x7f));
+        start = 10 + size + if head[5] & 0x10 != 0 { 10 } else { 0 };
+    }
+    let mut buf = vec![0u8; 8192];
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return false;
+    }
+    let Ok(read) = file.read(&mut buf) else { return false };
+    let buf = &buf[..read];
+    let Some(sync) = buf.windows(2).position(|w| w[0] == 0xff && w[1] & 0xe0 == 0xe0) else { return false };
+    // The tags sit after the side information: at most 36 bytes past the header for Xing / Info
+    // and exactly 32 past it for VBRI. 64 bytes covers every layout.
+    let frame = &buf[sync..buf.len().min(sync + 4 + 64)];
+    frame.windows(4).any(|w| w == b"Xing" || w == b"Info" || w == b"VBRI")
+}
+
 #[derive(Debug)]
 pub struct DecodedAudio {
     /// 单声道 f32
@@ -493,6 +543,131 @@ pub fn resample_mono_cancellable(
 mod tests {
     use super::*;
 
+    /// MPEG-1 Layer III at 48 kHz mono, 1152 samples a frame, no CRC: a frame of `kbps` whose side
+    /// information is all zero decodes as silence, so MP3s can be made here without an encoder.
+    fn mp3_frame(kbps: u32) -> Vec<u8> {
+        let index = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320].iter().position(|b| *b == kbps).unwrap() as u8;
+        let mut frame = vec![0u8; (144 * kbps * 1000 / 48_000) as usize];
+        frame[..4].copy_from_slice(&[0xff, 0xfb, index << 4 | 1 << 2, 0xc0]);
+        frame
+    }
+    /// The first frame of an MP3 that states its length: a Xing tag after the 17 bytes of mono side information.
+    fn xing_frame(frames: u32) -> Vec<u8> {
+        let mut frame = mp3_frame(128);
+        frame[21..25].copy_from_slice(b"Xing");
+        frame[25..29].copy_from_slice(&1u32.to_be_bytes());
+        frame[29..33].copy_from_slice(&frames.to_be_bytes());
+        frame
+    }
+    fn scratch(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("kdj-length-{}-{name}", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+    fn decoded_seconds(path: &Path) -> Result<f64> {
+        Ok(stream_mono(path, 22050, &|| false, |_| {})?.unwrap())
+    }
+
+    #[test]
+    fn a_vbr_mp3_without_a_xing_tag_states_no_length() {
+        // A quiet opening at 32 kbps, then 320 kbps: symphonia guesses from the opening.
+        let mut bytes = Vec::new();
+        for n in 0..220 { bytes.extend(mp3_frame(if n < 20 { 32 } else { 320 })); }
+        let path = scratch("vbr.mp3", &bytes);
+        let guessed = probe_duration(&path).unwrap().unwrap();
+        let stated = stated_duration(&path).unwrap();
+        let decoded = decoded_seconds(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!((decoded - 220. * 1152. / 48_000.).abs() < 0.1, "{decoded}");
+        assert!(guessed - decoded > 10., "the guess is far off: {guessed} vs {decoded}");
+        assert_eq!(stated, None);
+    }
+
+    #[test]
+    fn trailing_tags_do_not_lengthen_a_cbr_mp3() {
+        // An APE tag with a cover at the end, as tag editors and converters leave one.
+        let mut bytes = Vec::new();
+        for _ in 0..200 { bytes.extend(mp3_frame(128)); }
+        bytes.extend(b"APETAGEX");
+        bytes.extend(vec![0u8; 300 * 1024]);
+        let path = scratch("tagged.mp3", &bytes);
+        let guessed = probe_duration(&path).unwrap().unwrap();
+        let stated = stated_duration(&path).unwrap();
+        let decoded = decoded_seconds(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!((decoded - 200. * 1152. / 48_000.).abs() < 0.1, "{decoded}");
+        assert!(guessed - decoded > 5., "{guessed} vs {decoded}");
+        assert_eq!(stated, None);
+    }
+
+    #[test]
+    fn an_mp3_with_a_xing_tag_states_its_length_after_an_id3_tag() {
+        let mut bytes = b"ID3\x04\x00\x00\x00\x00\x01\x00".to_vec();
+        bytes.extend(vec![0u8; 128]);
+        bytes.extend(xing_frame(100));
+        for _ in 0..100 { bytes.extend(mp3_frame(128)); }
+        let path = scratch("xing.mp3", &bytes);
+        let stated = stated_duration(&path).unwrap().unwrap();
+        let decoded = decoded_seconds(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!((stated - 100. * 1152. / 48_000.).abs() < 0.001, "{stated}");
+        assert!((decoded - stated).abs() < 0.1, "{decoded} vs {stated}");
+    }
+
+    #[test]
+    fn a_truncated_wav_states_more_than_it_decodes() {
+        // The header promises 3 s at 8 kHz mono 16-bit; one second of samples is there.
+        let rate = 8000u32;
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend((36 + rate * 2 * 3).to_le_bytes());
+        bytes.extend(b"WAVEfmt ");
+        bytes.extend(16u32.to_le_bytes());
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(rate.to_le_bytes());
+        bytes.extend((rate * 2).to_le_bytes());
+        bytes.extend(2u16.to_le_bytes());
+        bytes.extend(16u16.to_le_bytes());
+        bytes.extend(b"data");
+        bytes.extend((rate * 2 * 3).to_le_bytes());
+        bytes.extend(vec![0u8; (rate * 2) as usize]);
+        let path = scratch("cut.wav", &bytes);
+        let stated = stated_duration(&path).unwrap().unwrap();
+        let decoded = decoded_seconds(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!((stated - 3.).abs() < 0.01, "{stated}");
+        assert!((decoded - 1.).abs() < 0.05, "{decoded}");
+    }
+
+    /// A frame whose first granule claims 511 big values, more than 288 fit: it cannot be decoded.
+    /// Mono MPEG-1 side information: main_data_begin 9 bits, private 5, scfsi 4, then the
+    /// granule's part2_3_length 12 and big_values 9, at bits 30..39.
+    fn broken_frame() -> Vec<u8> {
+        let mut frame = mp3_frame(32);
+        frame[4 + 3] |= 0b11;
+        frame[4 + 4] |= 0xfe;
+        frame
+    }
+
+    #[test]
+    fn a_few_broken_frames_are_silence_and_many_are_an_error() {
+        let mut few = Vec::new();
+        for n in 0..300 { few.extend(if (150..153).contains(&n) { broken_frame() } else { mp3_frame(32) }); }
+        let path = scratch("few.mp3", &few);
+        let decoded = decoded_seconds(&path);
+        let _ = std::fs::remove_file(&path);
+        let decoded = decoded.unwrap();
+        assert!((decoded - 300. * 1152. / 48_000.).abs() < 0.1, "broken frames keep their place: {decoded}");
+
+        let mut many = Vec::new();
+        for n in 0..300 { many.extend(if n >= 100 { broken_frame() } else { mp3_frame(32) }); }
+        let path = scratch("many.mp3", &many);
+        let error = decoded_seconds(&path).unwrap_err().to_string();
+        let _ = std::fs::remove_file(&path);
+        assert!(error.contains("坏帧"), "{error}");
+        assert!(error.contains("第 2."), "where it starts: {error}");
+    }
+
     #[test]
     fn conversion_grows_for_larger_packets_and_channel_layouts() {
         use std::borrow::Cow;
@@ -759,17 +934,43 @@ pub fn stream_mono(
     let mut mono = VecDeque::<f32>::new();
     let (mut origin, mut total, mut base, mut phase, mut emitted) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let mut kernel: Option<Arc<SincKernel>> = None;
+    let time_base = track.codec_params.time_base;
+    // Frames that do not decode are heard as silence of their own length, as players skip them,
+    // so what follows stays in place; too many of them and the track is not whole.
+    let (mut bad, mut bad_frames, mut first_bad) = (0usize, 0usize, None::<f64>);
+    let at = |frames: usize, rate: u32| if rate > 0 { frames as f64 / f64::from(rate) } else { 0. };
     loop {
         if cancelled() { return Ok(None); }
         let packet = match format.next_packet() {
             Ok(p) => Some(p),
             Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => None,
-            Err(e) => return Err(e.into()),
+            Err(Error::IoError(e)) => bail!("读到第 {:.1} 秒时读取文件出错：{e}", at(total, source_sr)),
+            Err(Error::DecodeError(_)) => {
+                bad += 1;
+                first_bad.get_or_insert(at(total, source_sr));
+                continue;
+            }
+            Err(e) => return Err(e).with_context(|| format!("读到第 {:.1} 秒时无法继续读取", at(total, source_sr))),
         };
         let eof = packet.is_none();
         if let Some(packet) = packet {
             if packet.track_id() != id { continue; }
-            let audio = decoder.decode(&packet)?;
+            let audio = match decoder.decode(&packet) {
+                Ok(audio) => audio,
+                Err(Error::DecodeError(_)) if source_sr > 0 => {
+                    bad += 1;
+                    first_bad.get_or_insert(at(total, source_sr));
+                    let seconds = time_base.map(|base| { let t = base.calc_time(packet.dur()); t.seconds as f64 + t.frac })
+                        .unwrap_or(packet.dur() as f64 / f64::from(source_sr));
+                    let frames = (seconds * f64::from(source_sr)).round() as usize;
+                    bad_frames += frames;
+                    mono.extend(std::iter::repeat_n(0., frames));
+                    total += frames;
+                    continue;
+                }
+                Err(Error::DecodeError(why)) => bail!("音轨开头的帧就解不出来：{why}"),
+                Err(e) => return Err(e.into()),
+            };
             let spec = *audio.spec();
             if source_sr == 0 { source_sr = spec.rate; kernel = Some(sinc_kernel(source_sr, target_sr)); }
             if source_sr != spec.rate { bail!("音轨中途改变采样率"); }
@@ -801,6 +1002,12 @@ pub fn stream_mono(
         let discard = base.saturating_sub(RESAMPLE_TAPS as usize).saturating_sub(origin).min(mono.len());
         mono.drain(..discard); origin += discard;
         if eof { break; }
+    }
+    // A few broken frames are common in files that went through several tools; more than a
+    // second of them, or one in a hundred, and the sound is not what the file holds.
+    let lost = at(bad_frames, source_sr);
+    if bad > 0 && (lost > 1. || bad_frames * 100 > total.max(1)) {
+        bail!("第 {:.1} 秒起有 {bad} 处坏帧（共约 {lost:.1} 秒）解不出来，音轨不完整", first_bad.unwrap_or(0.));
     }
     Ok(Some(emitted as f64 / target_sr as f64))
 }

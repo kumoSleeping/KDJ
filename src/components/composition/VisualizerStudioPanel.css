@@ -15,6 +15,7 @@
 .kd-viz-panel * { box-sizing: border-box; }
 .kd-viz-panel button,
 .kd-viz-panel input,
+.kd-viz-panel textarea,
 .kd-viz-panel .kd-select-control { font: inherit; }
 .kd-viz-panel button {
   display: inline-flex;
@@ -32,7 +33,11 @@
 }
 .kd-viz-panel button:hover:not(:disabled) { color: var(--kd-text); }
 .kd-viz-panel button[aria-pressed="true"] { color: var(--kd-theme); }
-.kd-viz-panel :is(button, input, select):disabled { opacity: .42; cursor: not-allowed; }
+/* A text field of several lines: as tall as its lines, its label on its first line. */
+.kd-viz-panel textarea { display: block; resize: none; line-height: 1.4; overflow: hidden; }
+.kd-viz-row:has(> textarea) { align-items: start; }
+.kd-viz-row:has(> textarea) > span:first-child { line-height: 28px; }
+.kd-viz-panel :is(button, input, select, textarea):disabled { opacity: .42; cursor: not-allowed; }
 .kd-viz-panel :focus-visible { outline: 1px solid var(--kd-muted); outline-offset: 2px; }
 .kd-viz-panel fieldset { margin: 0; border: 0; min-width: 0; }
 
@@ -64,6 +69,8 @@
 .kd-viz-preview .kd-pip-float-chrome button { color: #fff; padding: 0; min-height: 0; }
 .kd-viz-preview .kd-pip-float-chrome button:hover { color: #ddd; }
 .kd-viz-preview .kd-pip-float-chrome button[aria-pressed=true] { color: var(--kd-theme); }
+/* White on the picture whether on or off (design.css, `.kd-pip-float` keys); on is heavier. */
+:root:not([data-theme-pack]) .kd-viz-preview .kd-pip-float-chrome button[aria-pressed=true] { color: #fff; }
 .kd-viz-preview[data-empty-media="true"] .kd-viz-empty > img { display: none; }
 .kd-viz-empty { position: absolute; inset: 0; display: grid; place-items: center; overflow: hidden; color: var(--kd-text); background: color-mix(in srgb, var(--kd-panel) 85%, var(--kd-panel-inset)); }
 .kd-viz-empty > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .25; filter: blur(12px); transform: scale(1.06); }
@@ -126,6 +133,7 @@
 /* A select reads like the text fields around it: its value at the left, the arrow at the right. */
 .kd-viz-panel .kd-select-control { justify-content: space-between; }
 .kd-viz-panel input:not([type=range]):not([type=checkbox]),
+.kd-viz-panel textarea,
 .kd-viz-panel .kd-select-control { width: 100%; min-width: 0; min-height: 28px; padding: 3px 6px; border: 1px solid var(--kd-line-soft); border-radius: 4px; background: var(--kd-viz-field-bg, var(--kd-panel-inset)); color: var(--kd-text); }
 .kd-viz-panel .kd-viz-toggle { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; width: 100%; min-height: 1.75rem; min-width: 0; padding: 0; }
 .kd-viz-toggle .kd-djp-toggle-label { color: var(--kd-text-body); white-space: normal; }

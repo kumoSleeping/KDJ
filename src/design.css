@@ -7462,6 +7462,11 @@ button.kd-camelot-grid-key { cursor: pointer; }
 .kd-pip-float-top, .kd-pip-float-bottom { pointer-events: auto; }
 .kd-pip-float .kd-pip-float-chrome button { color: #fff; }
 .kd-pip-float button[aria-pressed="true"] { color: var(--kd-theme); background: transparent; border: 0; box-shadow: none; }
+/* Over the picture the keys are white in every state: the built-in themes' --kd-theme is the
+   page's ink, black in the light theme, which vanished on a dark picture. A key that is on is
+   drawn heavier instead. A theme pack keeps its own accent. */
+:root:not([data-theme-pack]) .kd-pip-float .kd-pip-float-chrome button[aria-pressed="true"] { color: #fff; }
+.kd-pip-float .kd-pip-float-chrome button[aria-pressed="true"] svg { stroke-width: 2.6; }
 .kd-pip-float-scrub:focus-visible { outline: 1px solid #fff; outline-offset: 3px; }
 .kd-pip-float-chrome button { background: transparent; }
 .kd-pip-float-chrome button:hover { background: transparent; color: #ddd; }
