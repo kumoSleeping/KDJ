@@ -502,7 +502,6 @@ export interface VideoDownloadRequest {
   max_height?: number;
   audio_only?: boolean;
   video_only?: boolean;
-  transcode?: boolean;
   /** 成品起点偏移（毫秒）：正=掐头，负=开头补黑场/静音。见 models.rs。 */
   offset_ms?: number;
   /** 下载完成后挪进这个曲库文件夹；空 = 默认视频目录。 */

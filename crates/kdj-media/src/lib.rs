@@ -5,12 +5,14 @@
 //! - [`h264`] and [`export`]: an encoder's Annex B GOPs into an MP4 video track.
 //! - [`aac`]: the system AAC encoders; [`audio`] and [`pcm`] feed them from any song
 //!   symphonia decodes.
+//! - [`flv`]: 哔哩哔哩's single-stream FLV (H.264 with AAC or MP3) into MP4 by stream copy.
 //! - [`webm`]: WebM Opus into Ogg Opus.
 
 mod bits;
 pub mod aac;
 pub mod audio;
 pub mod export;
+pub mod flv;
 pub mod h264;
 pub mod mp4;
 pub mod pcm;

@@ -280,9 +280,8 @@ impl YoutubeProvider {
             req.offset_ms == 0,
             "原生 YouTube 下载暂不支持音画时间偏移；请关闭音画匹配后重试"
         );
-        // Older queued tasks may still carry `transcode=true` from the shared Bilibili control.
-        // The fixed native YouTube path already guarantees an MP4 container, so migrate that
-        // legacy compatibility intent to the decode-free path instead of making Retry fail.
+        // Older queued tasks may still carry `transcode=true`; no download transcodes any more
+        // and the native YouTube path always writes MP4, so the flag is ignored.
         let target = if !req.url.trim().is_empty() {
             req.url.trim()
         } else {
@@ -324,9 +323,7 @@ impl YoutubeProvider {
         let extension = if req.audio_only {
             "m4a"
         } else {
-            // This path intentionally has one deterministic container. A legacy/global video
-            // format preference must not turn an otherwise valid native YouTube download into a
-            // failure or reintroduce a transcoder.
+            // Every download is MP4; an old MKV preference in the settings is ignored.
             "mp4"
         };
         let stem = sanitize_filename_value(title, &video_id);
@@ -520,8 +517,7 @@ impl YoutubeProvider {
         )
         .await?;
         let muxed = temp.join("muxed.mp4");
-        let height = video.height.unwrap_or(0) as i64;
-        crate::finish::mux(&[video_path, audio_path], &muxed, false, false, height, 0, &temp.join("ffmpeg.log"), cancel).await?;
+        crate::finish::mux(&[video_path, audio_path], &muxed, false, 0, cancel).await?;
         std::fs::rename(&muxed, staged).context("提交 YouTube 封装结果失败")
     }
 
@@ -548,7 +544,7 @@ impl YoutubeProvider {
         self.fetch_format(&progressive, &source, cancel, progress)
             .await?;
         let extracted = temp.join("audio.m4a");
-        crate::finish::extract_audio(&source, &extracted, 0, &temp.join("ffmpeg.log"), cancel).await?;
+        crate::finish::extract_audio(&source, &extracted, 0, cancel).await?;
         std::fs::rename(&extracted, staged).context("提交 YouTube 音轨失败")
     }
 }

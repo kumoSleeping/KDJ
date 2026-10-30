@@ -2239,7 +2239,6 @@ export function Workspace() {
         video: {
           audioOnly: videoAudioOnly,
           maxHeight: settings?.video_max_height ?? 1080,
-          transcode: settings?.video_transcode ?? false,
         },
       });
       setChosen(new Set());
@@ -2249,7 +2248,7 @@ export function Workspace() {
     } catch (error) {
       setQueueError(`加入队列失败：${errorText(error)}`);
     }
-  }, [chosenSources, settings?.default_quality, settings?.video_max_height, settings?.video_transcode, refreshStats, videoAudioOnly]);
+  }, [chosenSources, settings?.default_quality, settings?.video_max_height, refreshStats, videoAudioOnly]);
 
   // 曲目表 / 搜索结果：Cmd/Ctrl + A · C · X · V（Option+V 强制移动）。
   useLibraryClipboard({
@@ -2285,8 +2284,7 @@ export function Workspace() {
           video: {
             audioOnly: videoAudioOnly,
             maxHeight: settings?.video_max_height ?? 1080,
-            transcode: settings?.video_transcode ?? false,
-          },
+            },
         });
         void refreshStats();
       } catch (error) {
@@ -2294,7 +2292,7 @@ export function Workspace() {
         showNotice(`整包下载失败：${errorText(error)}`);
       }
     },
-    [sourceIndex, settings?.default_quality, settings?.video_max_height, settings?.video_transcode, refreshStats, videoAudioOnly],
+    [sourceIndex, settings?.default_quality, settings?.video_max_height, refreshStats, videoAudioOnly],
   );
 
   /**

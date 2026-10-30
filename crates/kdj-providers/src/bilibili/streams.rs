@@ -67,7 +67,7 @@ pub enum PlayUrlData {
         videos: Vec<MediaStream>,
         audios: Vec<MediaStream>,
     },
-    /// durl：单文件 flv/mp4，直接就能用（安卓上没有 ffmpeg 时走这条）
+    /// durl：单文件 flv/mp4（FLV 由 kdj-media 转封装成 MP4）
     Single {
         url: String,
         backup_urls: Vec<String>,

@@ -584,7 +584,7 @@ impl BiliClient {
         .await
     }
 
-    /// 取播放地址。`want_dash = false` 时要 durl 单文件（安卓上没有 ffmpeg 走这条）。
+    /// 取播放地址。`want_dash = false` 时要 durl 单文件。
     pub async fn playurl(&self, bvid: &str, cid: i64, qn: i64, want_dash: bool) -> Result<Value> {
         self.ensure_device_cookie().await?;
         let mixin = self.wbi_key().await?;

@@ -4514,7 +4514,6 @@ export function PlayerBar() {
       video: networkPreview ? {
         audioOnly: false,
         maxHeight: settings?.video_max_height ?? 1080,
-        transcode: settings?.video_transcode ?? false,
       } : undefined,
     })
       .catch((error: unknown) => {

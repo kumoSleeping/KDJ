@@ -121,13 +121,12 @@ export function QueueRowConfig({
       page_title: task.video_page?.title || undefined,
       max_height: Number.isFinite(height) && height > 0 ? height : (settings?.video_max_height ?? 1080),
       audio_only: task.quality === "audio",
-      transcode: mediaProductionAvailable() && videoPlatform !== "youtube" && (settings?.video_transcode ?? false),
       title: task.title,
       artist: task.artist,
       cover: task.cover,
       dest_dir: task.dest_dir,
     });
-  }, [open, task, draft, settings?.video_max_height, settings?.video_transcode, videoPlatform]);
+  }, [open, task, draft, settings?.video_max_height, videoPlatform]);
 
   useEffect(() => {
     if (!open || task.kind !== "video" || !bvid) return;

@@ -5,7 +5,7 @@
 //! 方式动态生成 SAPISIDHASH。它拥有独立于普通 YouTube 视频来源的本机会话。
 //!
 //! 音质档映射：免费流最高约 128k opus、会员约 256k AAC，没有无损，
-//! 所以 Flac 请求按"能拿到的最高码率"处理。HLS 回退交给 FFmpeg 提取音轨。
+//! 所以 Flac 请求按"能拿到的最高码率"处理。HLS 回退由 kdj-media 抽出其中的 AAC。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,7 +61,7 @@ fn target_bitrate(quality: Quality) -> i64 {
     }
 }
 
-/// 解析出来的音频流形态：直链（可试听/下载）或 HLS（只能下载，交给 FFmpeg）。
+/// 解析出来的音频流形态：直链（可试听/下载）或 HLS（只能下载，转封装后抽 AAC）。
 enum StreamSource {
     Direct { url: String, ext: String },
     Hls { url: String },
@@ -245,43 +245,23 @@ impl YoutubeMusicProvider {
     }
 
     /// HLS 音频轨提取：hls-transmux 把清单里码率最高的一档（音画合流的 TS）转成 MP4，
-    /// 再把其中的 AAC 原样装进 m4a。都不经 FFmpeg；纯 Rust 失败而有 FFmpeg 时退回 FFmpeg。
-    /// HLS 是按分片拉取的，没有逐字节进度；跑完一次性报总量。
+    /// 再把其中的 AAC 原样装进 m4a。HLS 是按分片拉取的，没有逐字节进度；跑完一次性报总量。
     async fn download_hls(
         &self,
         url: &str,
         output: &std::path::Path,
         job: &DownloadJob<'_>,
     ) -> Result<()> {
-        let log_path = self.ctx.data_dir.join("ytm-hls-ffmpeg.log");
         job.report(0, 0);
         let video = output.with_extension(format!("hls-{:016x}.partial", rand::random::<u64>()));
-        let native = async {
+        let result = async {
             crate::youtube::hls_download::download_youtube_hls(url, &video, &job.cancel, &job.progress).await?;
             job.check_canceled()?;
-            crate::finish::extract_audio(&video, output, 0, &log_path, &job.cancel).await
+            crate::finish::extract_audio(&video, output, 0, &job.cancel).await
         }
         .await;
         let _ = tokio::fs::remove_file(&video).await;
-        if let Err(error) = native {
-            job.check_canceled()?;
-            anyhow::ensure!(crate::ffmpeg::available(), "{error:#}");
-            tracing::warn!(error = %format!("{error:#}"), "纯 Rust 下载 HLS 失败，改用 FFmpeg");
-            let args = vec![
-                "-y".to_string(),
-                "-i".to_string(),
-                url.to_string(),
-                "-vn".to_string(),
-                "-c:a".to_string(),
-                "copy".to_string(),
-                "-f".to_string(),
-                "ipod".to_string(),
-                output.to_string_lossy().into_owned(),
-            ];
-            crate::ffmpeg::run(&args, &log_path, &job.cancel)
-                .await
-                .context("FFmpeg 提取 HLS 音轨失败")?;
-        }
+        result.context("提取 YouTube Music 的 HLS 音轨失败")?;
         job.check_canceled()?;
         let size = std::fs::metadata(output)
             .map(|meta| meta.len())
