@@ -625,7 +625,9 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
       </>}
       {tab === "text" && <>
         <Group title="歌曲信息">
-          {([["title", "标题"], ["artist", "艺人"], ["album", "专辑"]] as const).map(([key, label]) => <Row key={key} label={label}><input value={p.text[key]} maxLength={500} onChange={e => edit(n => { n.text[key] = e.target.value; })} /></Row>)}
+          {/* Enter starts another line, which the picture keeps (visualizerStudioRenderer). */}
+          {([["title", "标题"], ["artist", "艺人"], ["album", "专辑"]] as const).map(([key, label]) => <Row key={key} label={label}><textarea value={p.text[key]} maxLength={500}
+            rows={Math.min(4, p.text[key].split("\n").length)} spellCheck={false} onChange={e => edit(n => { n.text[key] = e.target.value; })} /></Row>)}
           <Toggle label="显示专辑" checked={p.text.showAlbum === true} onChange={v => edit(n => { n.text.showAlbum = v; })} />
           <Slider label="字号" value={p.text.scale} defaultValue={defaults.text.scale} min={.5} max={1.5} step={.01} format={ratio} onChange={v => edit(n => { n.text.scale = v; })} />
         </Group>
