@@ -16,7 +16,7 @@ The drawer is a **floating panel** opened by controls elsewhere in the window:
   歌曲色彩, see "A backdrop" below). It carries the app's title row (title or
   page tabs, then at the far end the tools and the roll-up button) and its body. It
   covers the list; it never takes a column from it, so the list does not reflow while the drawer
-  moves. Its width is `--kd-drawer-w` (the dragged `--kd-right` up to 45 % of the list's column).
+  moves. Its width is the dragged `--kd-right`, up to its reach (below).
 
 Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`,
 `SlidePages.tsx`, `useDrawerOrder.ts`) and `src/components/workspace/drawerApps.tsx`
@@ -128,9 +128,21 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
 - **Depth.** The panel and the floating media window share one order: whichever was opened or
   touched last is in front (`src/lib/surfaceOrder.ts`).
 - **It takes no room.** The panel floats over the list and its toolbar; nothing beneath it is
-  moved or resized for it. It is resized by its left edge only (width, up to most of the
-  list's column); its height is its app's extent (2026-10-13: a dragged height pinned every
-  app to one value and kept a `fit` panel from following its content, so it was taken out).
+  moved or resized for it. It is resized by its left edge only; its height is its app's extent
+  (2026-10-13: a dragged height pinned every app to one value and kept a `fit` panel from
+  following its content, so it was taken out).
+- **How wide it may be dragged.** Past the list's column and over the sidebar (the open tree
+  or the narrow rail alike), until its left edge is 20 px short of the window's left edge
+  (`DRAWER_EDGE_ROOM`, `drawerReach` in `Drawer.tsx`; 2026-10-31, before that it stopped at the
+  list's column). The strip keeps the panel visibly free of the edge, and its left edge — the
+  only handle that narrows it again — always on screen. `DrawerHost` measures the reach before
+  the first paint and whenever the window or the column changes size, and writes it as
+  `--kd-drawer-reach` on the host; the host's width is the dragged `--kd-right` within it (and
+  never under 16rem while there is room), and a drag of the edge stops at the same value. A
+  width remembered in a larger window is kept as it was stored and shown at the reach, so it
+  comes back when the window does. Over the sidebar the panel is in front of it, as it is of
+  the list (its frame is drawn outside the page, see "Depth"), and takes the pointer there; the
+  strip beyond it is the sidebar's. A finger gets a wider edge (`pointer: coarse`).
 - **Refusing to close.** `close()` may return `false` (an unsaved draft). The drawer then stays,
   and an app that was opened over it gives way.
 - **Held while something flies into it.** Motion aimed at an app (the download parcel,
