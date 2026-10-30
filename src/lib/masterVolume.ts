@@ -67,7 +67,7 @@ interface MasterVolumeState {
 }
 
 /**
- * 应用的最终 MASTER 音量。唱盘、HTML 视频和 mpv 视频小窗都订阅同一份状态，
+ * 应用的最终 MASTER 音量。唱盘和 HTML 视频小窗都订阅同一份状态，
  * 避免底栏推子只改 Rust/CPAL、在线视频仍保持 100%。
  */
 export const useMasterVolume = create<MasterVolumeState>((set, get) => {

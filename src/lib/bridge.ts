@@ -17,8 +17,6 @@ import {
 import type {
   CliInstallStatus,
   KdjBridge,
-  MpvAvailability,
-  MpvPlaybackStatus,
   SavedLoginQr,
   UpdateInfo,
   UpdateProgress,
@@ -121,32 +119,6 @@ async function createTauriBridge(): Promise<KdjBridge> {
       : undefined,
     runYoutubePlayer: desktop || android
       ? (options) => tauriInvoke<string>("youtube_run_player", options)
-      : undefined,
-    mpv: info.platform === "darwin"
-      ? {
-          status: () => tauriInvoke<MpvAvailability>("mpv_status"),
-          open: (options) => tauriInvoke<number>("mpv_open", options),
-          setBounds: (options) => tauriInvoke<void>("mpv_set_bounds", options),
-          control: (generation, action, value) =>
-            tauriInvoke<void>("mpv_control", { generation, action, value }),
-          follow: (generation, position, rate, playing) =>
-            tauriInvoke<void>("mpv_follow", { generation, position, rate, playing }),
-          close: (generation) => tauriInvoke<void>("mpv_close", { generation }),
-          onStatus: (handler) => {
-            let unlisten: (() => void) | undefined;
-            let disposed = false;
-            void import("@tauri-apps/api/webviewWindow").then(({ getCurrentWebviewWindow }) =>
-              getCurrentWebviewWindow().listen<MpvPlaybackStatus>("kdj:mpv-status", event => handler(event.payload)))
-              .then(stop => {
-                if (disposed) stop();
-                else unlisten = stop;
-              });
-            return () => {
-              disposed = true;
-              unlisten?.();
-            };
-          },
-        }
       : undefined,
     // 安卓：opener 的 reveal 不支持，open_path 也打不开 file://；走 MediaStore / FileProvider。
     openPath: (path: string) =>

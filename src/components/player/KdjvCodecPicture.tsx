@@ -1,6 +1,7 @@
 /**
  * A `.kdjv` project's picture decoded with WebCodecs and drawn on one canvas in the page
- * (codecClip.ts; KdjvMpvPicture is the mpv one, KdjvLivePicture the WebView `<video>` one).
+ * (codecClip.ts; KdjvLivePicture is the WebView `<video>` one, kept for a WebView without
+ * WebCodecs). A local video is drawn the same way, as a project of one clip (codecVideo.ts).
  *
  * Each video clip on screen or about to be (kdjvLive.ts `preparedClips`) has its own decoder. A
  * clip waits before its cut with its first frames decoded and comes in moving; while shown it
@@ -10,7 +11,7 @@
  * the clip before it on its last frame (`heldClips`): the picture waits, it never goes black.
  *
  * Being part of the page, the picture scrolls, moves, rounds and is covered like any element.
- * Still images stay HTML over the canvas, as in the mpv picture.
+ * Still images stay HTML over the canvas.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../../lib/api";
@@ -51,10 +52,12 @@ function drawClip(ctx: CanvasRenderingContext2D, project: KdjvLive, c: LiveClip,
 
 let instances = 0;
 
-export function KdjvCodecPicture({ trackId, project, onTransport }: {
+export function KdjvCodecPicture({ trackId, project, onTransport, sourceUrl }: {
   trackId: number;
   project: KdjvLive;
   onTransport?: (transport: LiveTransport) => void;
+  /** Where a source is read from, when it is not a project's (a local video: codecVideo.ts). */
+  sourceUrl?: (source: number) => string;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -63,6 +66,8 @@ export function KdjvCodecPicture({ trackId, project, onTransport }: {
   sized.current = size;
   const transport = useRef(onTransport);
   transport.current = onTransport;
+  const sourceUrlRef = useRef(sourceUrl);
+  sourceUrlRef.current = sourceUrl;
   // Kept across edits of the project: a clip still drawn keeps its decoder.
   const decoders = useRef(new Map<string, ClipDecoder>());
   const images = useRef(new Map<number, HTMLImageElement>());
@@ -108,7 +113,8 @@ export function KdjvCodecPicture({ trackId, project, onTransport }: {
         const c = project.clips[n];
         const source = c && project.sources[c.source];
         if (source?.kind !== "video") return;
-        const url = source.proxy ? api.kdjvProxyUrl(trackId, c.source) : api.kdjvSourceUrl(trackId, c.source);
+        const url = sourceUrlRef.current ? sourceUrlRef.current(c.source)
+          : source.proxy ? api.kdjvProxyUrl(trackId, c.source) : api.kdjvSourceUrl(trackId, c.source);
         const id = `${n}|${url}|${source.file ?? ""}`;
         wanted.add(id);
         let decoder = decoders.current.get(id);

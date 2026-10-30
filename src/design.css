@@ -3224,65 +3224,6 @@ body[data-kd-search-pointer-dragging="true"] * {
   height: 100%;
   aspect-ratio: auto;
 }
-/* mpv draws its picture in a native view under the page, exactly behind this slot, and the page
-   leaves a hole there (videoHoles.ts). Once it shows, the window is see-through over the slot
-   and its controls draw over the picture as they do over a <video>. */
-.kd-pip-native-slot {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-.kd-pip-float[data-native-player="true"],
-.kd-pip-float[data-native-player="true"] .kd-pip-float-stage {
-  background: transparent;
-}
-.kd-pip-float[data-native-player="true"] .kd-pip-video,
-.kd-pip-float[data-native-player="true"] .kd-local-video-swap {
-  display: none;
-}
-/* Black over an mpv picture while it is not shown: it fades rather than blinks (NATIVE_VEIL_MS). */
-.kd-native-veil {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  background: #000;
-  opacity: 1;
-  transition: opacity 160ms ease;
-  pointer-events: none;
-}
-.kd-native-veil[data-shown="true"] {
-  opacity: 0;
-}
-/* A picture that is shown as soon as its veil appears still fades in. */
-@starting-style {
-  .kd-native-veil[data-shown="true"] {
-    opacity: 1;
-  }
-}
-/* A project drawn by mpv (KdjvMpvPicture): its clips are native views under the canvas's hole. */
-.kd-kdjv-live[data-native="true"],
-.kd-kdjv-live[data-native="true"] .kd-kdjv-live-canvas {
-  background: transparent;
-}
-/* The library panel's controls over its mpv picture, drawn outside #root on the slot's box. */
-.kd-native-overlay {
-  z-index: 70;
-  max-width: none;
-  border-radius: 0;
-  box-shadow: none;
-  cursor: default;
-}
-/* While a video shows through the page, only #root paints the app's background. */
-:root[data-video-holes="true"],
-:root[data-video-holes="true"] body {
-  background: transparent !important;
-}
-:root[data-video-holes="true"] #root {
-  background: var(--kd-bg);
-  /* Its own compositing layer: WebKit then applies the clip-path as a shape mask on the GPU, and
-     moving a hole (the floating window dragged) updates the mask instead of repainting the app. */
-  will-change: transform;
-}
 .kd-pip-video {
   display: block;
   width: 100%;

@@ -38,7 +38,7 @@ test("the edge nearer to its side of the viewport is the one that stays", () => 
   near(portrait.h, 352 * 16 / 9);
   near(portrait.x + portrait.w, 1072 + 352);
   near(portrait.y + portrait.h, 618 + 198);
-  // mpv's title row and bar are outside the picture and grows the same way.
+  // A title row and bar outside the picture grow the same way.
   const embedded = resolveFloatRect(remembered, viewport, platform);
   near(embedded.w, 360);
   near(embedded.h, 360 * 9 / 16 + 36);
@@ -156,7 +156,7 @@ test("resizing upwards stops at the chrome and the window cannot outgrow the are
   const tallest = resolveFloatRect({ x: 0, y: 0, w: 5000, h: 5000 * 16 / 9 }, chromed, tall);
   near(tallest.y, limit);
   near(tallest.y + tallest.h, 900 - FLOAT_MEDIA_MARGIN);
-  // The title row and bar around mpv's picture count against the same height.
+  // A title row and bar around the picture count against the same height.
   const embedded = resolveFloatRect({ x: 0, y: 0, w: 5000, h: 2848.5 }, chromed, platform);
   assert.ok(embedded.y >= limit && embedded.y + embedded.h <= 900 - FLOAT_MEDIA_MARGIN + 1e-6);
 });

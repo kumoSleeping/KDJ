@@ -212,7 +212,7 @@ async function runIntegratedVideoSequence(): Promise<{
       import("./videoPip"),
       import("../stores/appStore"),
     ]);
-  // This sequence exercises the video window the user has chosen (mpv or the WebView player).
+  // This sequence exercises the video window's WebView player.
   const initialSettings = useAppStore.getState().settings;
   if (!initialSettings) useAppStore.setState({ settings: await api.getSettings() });
   const host = document.createElement("div");

@@ -70,7 +70,7 @@ export type KeyNotation = "camelot" | "traditional";
 /** 播放控制面板双极滤波器的共振档位；后端将其映射为稳定的 DSP Q。 */
 export type FilterResonance = "low" | "medium" | "high";
 export type AutoAnalysisMode = "light" | "full" | "paused";
-/** The video window: libmpv (when the build carries it) or the WebView `<video>` player. */
+/** Kept in settings from builds that offered libmpv; nothing reads it now. */
 export type VideoPlayerEngine = "mpv" | "web";
 
 export interface Settings {
@@ -83,7 +83,7 @@ export interface Settings {
   stream_cache_enabled: boolean;
   /** 视频在线播放的画质上限，与视频下载画质分开。 */
   video_playback_max_height: number;
-  /** 视频窗口用哪个播放器；没有 libmpv 的安装包始终是 WebView。 */
+  /** 旧版（带 libmpv 的构建）的视频播放器选择；现在不再读取，只随设置原样保留。 */
   video_player: VideoPlayerEngine;
   filename_template: string;
   concurrent_downloads: number;
@@ -1072,24 +1072,6 @@ export interface MiniPlayerBridge {
   fit(width: number, height: number): Promise<void>;
 }
 
-export interface MpvAvailability {
-  available: boolean;
-  version: string | null;
-  error: string | null;
-}
-
-export interface MpvPlaybackStatus {
-  generation: number;
-  playing: boolean;
-  buffering: boolean;
-  ended: boolean;
-  position: number;
-  duration: number;
-  width: number;
-  height: number;
-  error: string | null;
-}
-
 export interface KdjBridge {
   baseUrl: string;
   /** 每次进程启动重新生成；只用于认证本机 HTTP/WS，不得写入日志或持久化到前端。 */
@@ -1117,49 +1099,6 @@ export interface KdjBridge {
     operation: "config" | "decipher" | "transform_n";
     value: string;
   }) => Promise<string>;
-  /** macOS: the video window drawn by libmpv in a native view over the page (mpv_player.rs). */
-  mpv?: {
-    status: () => Promise<MpvAvailability>;
-    open: (options: {
-      url: string;
-      /** Picture only, following KDJ's audio clock (`follow`), instead of its own transport. */
-      follow: boolean;
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      volume: number;
-      start: number;
-      paused: boolean;
-      /** A project clip's part of its source, `WxH+X+Y` in source pixels. */
-      crop?: string;
-      /** Fill the view exactly (it is already the picture's shape). */
-      stretch?: boolean;
-    }) => Promise<number>;
-    setBounds: (options: {
-      generation: number;
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      visible: boolean;
-      opacity?: number;
-      layer?: number;
-    }) => Promise<void>;
-    control: (
-      generation: number,
-      action: "play" | "pause" | "seek" | "volume",
-      value?: number,
-    ) => Promise<void>;
-    follow: (
-      generation: number,
-      position: number | null,
-      rate: number,
-      playing: boolean,
-    ) => Promise<void>;
-    close: (generation?: number) => Promise<void>;
-    onStatus: (handler: (status: MpvPlaybackStatus) => void) => () => void;
-  };
   openPath: (path: string) => Promise<void>;
   revealPath: (path: string) => Promise<void>;
   /** 从曲库启动 Finder / Explorer / Android 的真文件拖动；iOS/浏览器不提供。 */

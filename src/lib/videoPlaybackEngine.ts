@@ -282,7 +282,7 @@ export class VideoSeekEchoGuard {
 
 /** Shared video scheduling over the system media decoder. No copied pixels or bundled codecs.
  * Local playback, streams, YouTube HLS and the mixing editor use the same seek lane and clock
- * policy. The optional mpv window (mpvPlayer.ts) does its own seeking and clock following. */
+ * policy. */
 export class VideoPlaybackEngine {
   private seekQueues = new Map<HTMLVideoElement, VideoSeekQueue>();
   private seekTargets = new WeakMap<HTMLVideoElement, { position: number }>();

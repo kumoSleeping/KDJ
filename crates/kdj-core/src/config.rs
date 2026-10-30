@@ -74,7 +74,8 @@ impl AutoAnalysisMode {
     }
 }
 
-/// 视频窗口的播放器。`Mpv` 只在安装包带了 libmpv 时生效，否则仍用 WebView 的 `<video>`。
+/// 带 libmpv 的旧构建留下的视频播放器选择。现在不再读取（画面一律由 WebView 的 WebCodecs
+/// 解码，不支持的文件退回 `<video>`），只为让设置文件读进来、原样写回而保留。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoPlayerEngine {

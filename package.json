@@ -19,7 +19,6 @@
     "tauri:web:build": "tsc --noEmit && vite build --config vite.tauri.config.ts",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "tauri:build:mpv": "bash scripts/build-libmpv-macos.sh && tauri build --config src-tauri/tauri.mpv.conf.json",
     "test:ytm-media-session": "cargo test -p kdj-server protected_media::tests --lib && cargo test -p kdj-providers completed_protected_spool --lib",
     "probe:ytm-sabr": "tsx scripts/ytm-sabr-probe.ts",
     "release": "bash scripts/release.sh",

@@ -47,24 +47,11 @@ import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
 import { ensureProjectLive, useKdjvLive } from "../../lib/kdjvPlay";
 import { isProjectTrack } from "../../lib/format";
 import { KdjvLivePicture } from "./KdjvLivePicture";
-import { KdjvMpvPicture } from "./KdjvMpvPicture";
 import { KdjvCodecPicture } from "./KdjvCodecPicture";
-import { projectPictureNative, useProjectPicture } from "../../lib/projectPicture";
+import { codecDecodeAvailable, codecVideoRefused, useVideoProject } from "../../lib/codecVideo";
 import { PanelErrorBoundary } from "../RootErrorBoundary";
 import {
-  MpvVideoController,
-  SeekHold,
-  clockReadout,
-  mpvAvailable,
-  prefersMpv,
-  webVideoOff,
-  useMpvAvailable,
-  type MpvBounds,
-  type MpvClock,
-} from "../../lib/mpvPlayer";
-import {
   attachYoutubeVideoPreview,
-  startYoutubePlayback,
   type YoutubeVideoPreviewController,
 } from "../../lib/youtubeVideoPreview";
 import { reportLoginNeeded } from "../../lib/loginNeeded";
@@ -98,8 +85,6 @@ import {
 } from "../download/VideoPreview";
 import { SEEK_EVENT, type SeekDetail } from "../library/Waveform";
 
-/** Corner radius of the floating window, which mpv's hole follows (design.css .kd-pip-float). */
-const FLOAT_RADIUS_PX = 7.2;
 const NETWORK_VIDEO_START_TIMEOUT_MS = 15_000;
 const NETWORK_VIDEO_STALL_TIMEOUT_MS = 12_000;
 
@@ -209,32 +194,11 @@ function isYoutubeSession(
   return session?.source === "network" && session.platform === "youtube";
 }
 
-/**
- * Online previews and local videos play in mpv's native view when the build carries libmpv and
- * the setting allows it (mpvPlayer.ts); a local video follows the native audio clock there.
- * Projects keep their live picture, and the WebView `<video>` path below stays as it was.
- */
-function usesNativePlayer(session: VideoPipSession | null | undefined): boolean {
-  if (!session || !prefersMpv()) return false;
-  if (session.source === "network") return true;
-  return !projectSession(session) && usesLocalVideoDeviceClock();
-}
-
-function mpvClock(trackId: number): MpvClock | null {
-  const clock = getLocalVideoClock(trackId);
-  return clock ? { position: clock.position, rate: clock.rate, playing: clock.playing } : null;
-}
-
-function nativeBounds(node: HTMLElement | null): MpvBounds | null {
-  if (!node) return null;
-  const rect = node.getBoundingClientRect();
-  if (rect.width < 40 || rect.height < 24) return null;
-  return {
-    x: rect.left,
-    y: rect.top,
-    width: rect.width,
-    height: rect.height,
-  };
+interface Bounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 /**
@@ -244,6 +208,20 @@ function nativeBounds(node: HTMLElement | null): MpvBounds | null {
  */
 function projectSession(session: VideoPipSession | null): boolean {
   return session?.source === "local" && (session.project === true || Boolean(useKdjvLive.getState().live[session.trackId]));
+}
+
+/** A local video on the song's clock whose picture is decoded with WebCodecs (codecVideo.ts). */
+function codecVideoSession(session: VideoPipSession | null): boolean {
+  return session?.source === "local" && !projectSession(session) && usesLocalVideoDeviceClock()
+    && codecDecodeAvailable() && !codecVideoRefused(session.trackId);
+}
+
+/**
+ * A local session drawn as a picture that follows the player by itself (a project, or a video
+ * decoded with WebCodecs): no `<video>` here is loaded, started or sought for it.
+ */
+function pictureSession(session: VideoPipSession | null): boolean {
+  return projectSession(session) || codecVideoSession(session);
 }
 
 function mediaUrl(session: VideoPipSession): string {
@@ -266,19 +244,13 @@ function applyPanelChrome(session: VideoPipSession, mode: VideoPreviewMode): voi
 }
 
 export function VideoPipHost() {
-  const nativeSlotRef = useRef<HTMLDivElement | null>(null);
   const pipCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const pipVideoRef = useRef<HTMLVideoElement | null>(null);
   const loadedKeyRef = useRef<string | null>(null);
-  const nativePlayerRef = useRef<MpvVideoController | null>(null);
   const youtubePreviewRef = useRef<YoutubeVideoPreviewController | null>(null);
-  const nativeReadyKeyRef = useRef<string | null>(null);
-  const nativeAutoPlayKeyRef = useRef<string | null>(null);
   const compatRetryKeyRef = useRef<string | null>(null);
-  const nativeFallbackSessionKeyRef = useRef<string | null>(null);
   const desiredPlayingRef = useRef(false);
   const pendingScrubRef = useRef<number | null>(null);
-  const seekHoldRef = useRef(new SeekHold());
   const nativeVideoSeekTimerRef = useRef(0);
   const networkVideoWatchdogRef = useRef(0);
   const networkRetryRef = useRef({ key: "", count: 0 });
@@ -301,7 +273,7 @@ export function VideoPipHost() {
 
   const mode = useVideoPip((state) => state.mode);
   const panelTarget = useVideoPip((state) => state.panelTarget);
-  const [panelBounds, setPanelBounds] = useState<MpvBounds | null>(null);
+  const [panelBounds, setPanelBounds] = useState<Bounds | null>(null);
   const active = useVideoPip((state) => state.active);
   const systemPip = useVideoPip((state) => state.systemPip);
   const playing = useVideoPip((state) => state.playing);
@@ -309,12 +281,6 @@ export function VideoPipHost() {
   const duration = useVideoPip((state) => state.duration);
   const error = useVideoPip((state) => state.error);
   const session = useVideoPip((state) => state.session);
-  const videoPlayerPreference = useAppStore((state) => state.settings?.video_player ?? "mpv");
-  // Re-render once the shell has said whether libmpv could be loaded.
-  const mpvReady = useMpvAvailable();
-  const [nativeFallbackSessionKey, setNativeFallbackSessionKey] = useState<string | null>(null);
-  // mpv has opened: the stage turns transparent over the hole its picture shows through.
-  const [nativeReady, setNativeReady] = useState(false);
   const [videoFullscreen, setVideoFullscreen] = useState(false);
   // The picture's own width / height, once the source has told it. The floating window is the
   // shape of the video it holds, not of a 16:9 frame; a change (metadata arriving, another
@@ -379,29 +345,25 @@ export function VideoPipHost() {
   const showFloating = showSurface && !docked;
   const isLocal = session?.source === "local";
   // A project playing from its sound: its picture is drawn live, in the canvas's shape.
-  const live = useKdjvLive(state => session?.source === "local" ? state.live[session.trackId] : undefined);
-  // A project drawn by mpv's native views (not WebCodecs in the page) needs the native window's ways.
-  const pictureChoice = useProjectPicture();
-  const liveNative = Boolean(live) && projectPictureNative(pictureChoice);
+  const projectLive = useKdjvLive(state => session?.source === "local" ? state.live[session.trackId] : undefined);
+  // A local video is drawn the same way, as a project of one clip, once its file is known to
+  // decode here; a refused one keeps the `<video>` elements below.
+  const codecWanted = session?.source === "local" && !session.project && !projectLive
+    && usesLocalVideoDeviceClock() && codecDecodeAvailable();
+  const videoPicture = useVideoProject(codecWanted && session?.source === "local" ? session.trackId : null);
+  const live = projectLive ?? videoPicture.project ?? undefined;
   useEffect(() => {
     if (!live) return;
     setSourceRatio(live.width / live.height);
     useVideoPip.getState().setDuration(live.duration);
   }, [live]);
-  const shouldUseNativePlayer = (candidate: VideoPipSession | null | undefined): boolean =>
-    usesNativePlayer(candidate) &&
-    Boolean(candidate && nativeFallbackSessionKeyRef.current !== sessionKey(candidate));
-  const isNativePlayer =
-    usesNativePlayer(session) &&
-    Boolean(session && nativeFallbackSessionKey !== sessionKey(session));
-  const key = session
-    ? `${sessionKey(session)}:${videoPlayerPreference}:${mpvReady}:${isNativePlayer ? "platform" : "kdj"}`
-    : "";
+  // A file found not to decode here (`refused`) changes how the session is presented.
+  const key = session ? `${sessionKey(session)}:${videoPicture.refused ? "video" : "picture"}` : "";
   const localSwap = useLocalVideoSwap({
     // WebKit PiP is bound to the concrete source <video>. While it is open, keep that element
     // stable and use the single-video seek fallback instead of swapping it out from underneath PiP.
     // A live project has no video of its own here: its seeks are not prepared on these elements.
-    enabled: Boolean(isLocal && hostActive && !systemPip && !live && !(session?.source === "local" && session.project)),
+    enabled: Boolean(isLocal && hostActive && !systemPip && !live && !(session?.source === "local" && session.project) && !(codecWanted && !videoPicture.refused)),
     trackId: session?.source === "local" ? session.trackId : null,
     desiredPlayingRef,
     getRate: () => {
@@ -418,13 +380,6 @@ export function VideoPipHost() {
     transportEchoGuard: videoTransportEchoGuardRef.current,
   });
 
-  // A dev HMR update can briefly pair a new frontend with an older Tauri command set. The same
-  // fallback also covers a video mpv cannot open. Keep the user's persisted preference intact
-  // and retry the preferred player for the next session.
-  useEffect(() => {
-    nativeFallbackSessionKeyRef.current = null;
-    setNativeFallbackSessionKey(null);
-  }, [session ? sessionKey(session) : "", videoPlayerPreference]);
   const activeVideo = localSwap.activeVideo;
   // Place, size and motion of the window come from the box it shares with the visualizer.
   const floatWindow = useFloatingMediaWindow({
@@ -437,10 +392,7 @@ export function VideoPipHost() {
       extraHeight: 0,
       minWidth: 0,
     },
-    // A transform cannot carry the native view of mpv's picture.
-    // mpv's pictures (a video's, a project's clips) and the page's holes over them do not follow
-    // a transform: the window moves without one while they are in it.
-    motion: !isNativePlayer && !liveNative && !videoFullscreen,
+    motion: !videoFullscreen,
     contentKey: session ? sessionKey(session) : "",
     title: session?.title ?? "",
     picture: activeVideo,
@@ -450,10 +402,10 @@ export function VideoPipHost() {
 
   useEffect(() => {
     const video = activeVideo();
-    if (!active || session?.source !== "network" || isNativePlayer || !video) return;
+    if (!active || session?.source !== "network" || !video) return;
     return observeVideoPreview(video, session,
       () => useVideoPip.getState().session === session && activeVideo() === video);
-  }, [active, session, isNativePlayer, activeVideo, localSwap.activeSlot]);
+  }, [active, session, activeVideo, localSwap.activeSlot]);
 
   const commitPreviewAudioFocus = (sessionKeyValue: string) => {
     if (focusedPreviewKeyRef.current === sessionKeyValue) return;
@@ -472,7 +424,6 @@ export function VideoPipHost() {
       for (const video of localSwap.videoRefs.current) {
         if (video) video.volume = gain;
       }
-      void nativePlayerRef.current?.setVolume(gain).catch(() => undefined);
     };
     const unlistenVolume = useMasterVolume.subscribe(apply);
     const unlistenCrossfade = useCrossfade.subscribe(apply);
@@ -591,12 +542,8 @@ export function VideoPipHost() {
   useEffect(
     () => () => {
       if (fullscreenRef.current) void getCurrentWindow().setFullscreen(false);
-      nativePlayerRef.current?.dispose();
-      nativePlayerRef.current = null;
       void youtubePreviewRef.current?.dispose();
       youtubePreviewRef.current = null;
-      nativeReadyKeyRef.current = null;
-      nativeAutoPlayKeyRef.current = null;
       localSynchronizerRef.current?.dispose();
       videoSeekEchoGuardRef.current?.clear();
       videoTransportEchoGuardRef.current?.clear();
@@ -622,13 +569,8 @@ export function VideoPipHost() {
   };
 
   const stopHost = () => {
-    setNativeReady(false);
-    nativePlayerRef.current?.dispose();
-    nativePlayerRef.current = null;
     void youtubePreviewRef.current?.dispose();
     youtubePreviewRef.current = null;
-    nativeReadyKeyRef.current = null;
-    nativeAutoPlayKeyRef.current = null;
     window.clearTimeout(nativeVideoSeekTimerRef.current);
     window.clearTimeout(networkVideoWatchdogRef.current);
     networkVideoWatchdogRef.current = 0;
@@ -728,11 +670,6 @@ export function VideoPipHost() {
   };
 
   const suspendLocalHost = (next: Extract<VideoPipSession, { source: "local" }>) => {
-    // mpv's view would stay drawn over the page: close it, it opens again in a moment.
-    if (nativePlayerRef.current) {
-      stopHost();
-      return;
-    }
     const nextKey = `${sessionKey(next)}:kdj`;
     // A panel-first session has no local source to retain. A source left by another session must
     // still be torn down; only the exact local session receives the non-destructive suspension.
@@ -753,7 +690,7 @@ export function VideoPipHost() {
   };
 
   const ensureHostPlaying = (next: VideoPipSession) => {
-    const nextKey = `${sessionKey(next)}:${shouldUseNativePlayer(next) ? "platform" : "kdj"}`;
+    const nextKey = `${sessionKey(next)}:kdj`;
     const latestLocalSync =
       next.source === "local" ? getLatestPlayerSync(next.trackId) : null;
     const shouldPlay = latestLocalSync
@@ -763,172 +700,14 @@ export function VideoPipHost() {
         : desiredPlayingRef.current || next.source === "network" || next.autoPlay;
     desiredPlayingRef.current = shouldPlay;
     useVideoPip.getState().setError("");
-    // A live project follows the player's clock by itself; there is no video here to start, and
-    // the one played before it is let go (useLocalVideoSwap `unload`).
-    if (projectSession(next)) {
+    // A live project, and a video decoded with WebCodecs, follow the player's clock by
+    // themselves; there is no video here to start, and the one played before is let go
+    // (useLocalVideoSwap `unload`).
+    if (pictureSession(next)) {
       pauseHostVideos();
       localSwap.unload();
-      // The video played before (mpv) goes too: left open it stayed on screen under the project.
-      nativePlayerRef.current?.dispose();
-      nativePlayerRef.current = null;
-      nativeReadyKeyRef.current = null;
-      nativeAutoPlayKeyRef.current = null;
-      setNativeReady(false);
       loadedKeyRef.current = null;
-      if (next.source === "local") ensureProjectLive(next.trackId);
-      return;
-    }
-    if (shouldUseNativePlayer(next)) {
-      if (loadedKeyRef.current !== nextKey) {
-        nativePlayerRef.current?.dispose();
-        nativePlayerRef.current = null;
-        void youtubePreviewRef.current?.dispose();
-        youtubePreviewRef.current = null;
-        nativeReadyKeyRef.current = null;
-        nativeAutoPlayKeyRef.current = null;
-        localSwap.cancelPending();
-        for (const item of localSwap.videoRefs.current) {
-          if (!item) continue;
-          item.pause();
-          if (item.src) {
-            item.removeAttribute("src");
-            item.load();
-          }
-        }
-        const bounds = nativeBounds(nativeSlotRef.current);
-        if (!bounds) {
-          useVideoPip.getState().setError("视频窗口尚未就绪");
-          return;
-        }
-        let controller: MpvVideoController;
-        const fallbackToWebPlayer = () => {
-          if (
-            nativePlayerRef.current !== controller ||
-            loadedKeyRef.current !== nextKey
-          ) {
-            return;
-          }
-          controller.dispose();
-          nativePlayerRef.current = null;
-          nativeReadyKeyRef.current = null;
-          nativeAutoPlayKeyRef.current = null;
-          loadedKeyRef.current = null;
-          useVideoPip.getState().setPlaying(false);
-          useVideoPip.getState().setError("");
-          const fallbackKey = sessionKey(next);
-          nativeFallbackSessionKeyRef.current = fallbackKey;
-          setNativeFallbackSessionKey(fallbackKey);
-        };
-        // macOS has no WebView player to fall back to (webVideoOff): the window says what failed.
-        const failNative = (reason: unknown) => {
-          if (nativePlayerRef.current !== controller || loadedKeyRef.current !== nextKey) return;
-          if (!webVideoOff()) {
-            fallbackToWebPlayer();
-            return;
-          }
-          if (isYoutubeSession(next)) reportLoginNeeded("youtube", reason);
-          const pip = useVideoPip.getState();
-          pip.setPlaying(false);
-          pip.setError(`视频无法播放：${reason instanceof Error ? reason.message : String(reason)}`);
-        };
-        const local = next.source === "local";
-        const youtube = isYoutubeSession(next)
-          ? startYoutubePlayback({ platform: "youtube", bvid: next.bvid, page: next.page })
-          : null;
-        controller = new MpvVideoController({
-          url: youtube ? youtube.url : mediaUrl(next),
-          release: youtube?.release,
-          // A local video is the picture of the song playing: mute, on the audio clock.
-          follow: local,
-          bounds,
-          volume: import.meta.env.DEV && import.meta.env.VITE_KDJ_YOUTUBE_E2E === "1" ? 0 : currentNetworkVolume(),
-          start: local ? (mpvClock(next.trackId)?.position ?? latestLocalSync?.position ?? 0) : 0,
-          paused: true,
-          onStatus: (status) => {
-            if (
-              nativePlayerRef.current !== controller ||
-              loadedKeyRef.current !== nextKey
-            ) {
-              return;
-            }
-            const pip = useVideoPip.getState();
-            // A local video's bar shows the song's clock (the clock effect); an online one, mpv's.
-            if (!local && pendingScrubRef.current === null && seekHoldRef.current.accept(status.position)) pip.setPosition(status.position);
-            pip.setDuration(status.duration);
-            pip.setPlaying(status.playing || status.buffering);
-            if (status.width > 0 && status.height > 0) {
-              const ratio = status.width / status.height;
-              setSourceRatio(current => current !== null && Math.abs(current - ratio) < 1e-3 ? current : ratio);
-            }
-            if (local) return;
-            if (status.playing) {
-              commitPreviewAudioFocus(nextKey);
-            } else if (!status.buffering) {
-              clearPreviewAudioFocus();
-            }
-            if (status.ended) desiredPlayingRef.current = false;
-          },
-          onError: (reason: Error) => {
-            if (nativePlayerRef.current !== controller) return;
-            failNative(reason);
-          },
-        });
-        nativePlayerRef.current = controller;
-        loadedKeyRef.current = nextKey;
-        void controller.done
-          .then(() => {
-            if (
-              nativePlayerRef.current !== controller ||
-              loadedKeyRef.current !== nextKey
-            ) {
-              return;
-            }
-            nativeReadyKeyRef.current = nextKey;
-            setNativeReady(true);
-            if (local) {
-              controller.follow(mpvClock(next.trackId));
-              return;
-            }
-            if (
-              desiredPlayingRef.current &&
-              nativeAutoPlayKeyRef.current !== nextKey
-            ) {
-              nativeAutoPlayKeyRef.current = nextKey;
-              void controller.play().catch((reason: unknown) => {
-                if (nativePlayerRef.current !== controller) return;
-                useVideoPip.getState().setPlaying(false);
-                useVideoPip
-                  .getState()
-                  .setError(reason instanceof Error ? reason.message : String(reason));
-              });
-            }
-          })
-          .catch((reason: unknown) => {
-            if (nativePlayerRef.current !== controller) return;
-            if (reason instanceof DOMException && reason.name === "AbortError") return;
-            failNative(reason);
-          });
-        return;
-      }
-      const controller = nativePlayerRef.current;
-      if (!controller || nativeReadyKeyRef.current !== nextKey) return;
-      // A local video's transport is the song's: the clock effect below drives it.
-      if (next.source === "local") return;
-      if (!shouldPlay) {
-        clearPreviewAudioFocus();
-        void controller.pause().catch(() => undefined);
-        useVideoPip.getState().setPlaying(false);
-        return;
-      }
-      if (nativeAutoPlayKeyRef.current !== nextKey) {
-        nativeAutoPlayKeyRef.current = nextKey;
-        void controller.play().catch((reason: unknown) => {
-          useVideoPip.getState().setPlaying(false);
-          useVideoPip
-            .getState()
-            .setError(reason instanceof Error ? reason.message : String(reason));
-        });
-      }
+      if (next.source === "local" && projectSession(next)) ensureProjectLive(next.trackId);
       return;
     }
     let video = activeVideo();
@@ -940,12 +719,8 @@ export function VideoPipHost() {
     if (!hasLoadedSessionSource(loadedKeyRef.current, nextKey, next)) {
       localSynchronizerRef.current?.reset(video);
       compatRetryKeyRef.current = null;
-      nativePlayerRef.current?.dispose();
-      nativePlayerRef.current = null;
       void youtubePreviewRef.current?.dispose();
       youtubePreviewRef.current = null;
-      nativeReadyKeyRef.current = null;
-      nativeAutoPlayKeyRef.current = null;
       if (next.source === "local") {
         localSwap.load(nextKey, mediaUrl(next));
       } else {
@@ -1182,9 +957,7 @@ export function VideoPipHost() {
     let cancelled = false;
     const frame = requestAnimationFrame(() => {
       if (cancelled) return;
-      tracePlayback("video-window", {
-        source: session.source, engine: shouldUseNativePlayer(session) ? "mpv" : "web", mpv: mpvAvailable() ? 1 : 0,
-      });
+      tracePlayback("video-window", { source: session.source, engine: pictureSession(session) ? "codec" : "web" });
       ensureHostPlaying(session);
     });
     return () => {
@@ -1194,34 +967,6 @@ export function VideoPipHost() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, hostLifecycle, panelReady, Boolean(live)]);
 
-  // mpv draws in a native view under the page. Keep it (and the page's hole) on the slot while
-  // the KDJ window is dragged, resized, or switched between videos, and hide it with the surface.
-  useEffect(() => {
-    if (!isNativePlayer) return;
-    const controller = nativePlayerRef.current;
-    if (!controller) return;
-    let cancelled = false;
-    const frame = requestAnimationFrame(() => {
-      const bounds = nativeBounds(nativeSlotRef.current);
-      if (!cancelled) {
-        const shown = Boolean(showSurface && bounds);
-        const radius = docked || videoFullscreen ? 0 : FLOAT_RADIUS_PX;
-        // The picture moves with the window, dragged or resized (the hole moves on the GPU,
-        // videoHoles.ts); hidden with the surface it goes at once.
-        void controller.setBounds(bounds ?? { x: 0, y: 0, width: 0, height: 0 }, shown, radius, true).catch((reason: unknown) => {
-          if (cancelled || nativePlayerRef.current !== controller) return;
-          useVideoPip
-            .getState()
-            .setError(reason instanceof Error ? reason.message : String(reason));
-        });
-      }
-    });
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(frame);
-    };
-  }, [floatRect.w, floatRect.h, floatRect.x, floatRect.y, isNativePlayer, showSurface, videoFullscreen, panelBounds, sourceRatio, nativeReady, docked]);
-
   // 切走应用（窗口失焦 / 页面隐藏）时，默认把正在播的浮动预览送进系统画中画
   useEffect(() => {
     let hideTimer = 0;
@@ -1229,7 +974,8 @@ export function VideoPipHost() {
       // Android enters from the Activity lifecycle, before it becomes backgrounded.
       if (canAndroidVideoPip()) return;
       const pip = useVideoPip.getState();
-      if (shouldUseNativePlayer(pip.session)) return;
+      // A picture drawn in the page has no `<video>` to hand to the system.
+      if (pictureSession(pip.session)) return;
       const floats = pip.mode === "float";
       if (
         !pip.active ||
@@ -1276,19 +1022,7 @@ export function VideoPipHost() {
       const at = (event as CustomEvent<VideoPipSeekDetail>).detail?.position;
       const current = useVideoPip.getState().session;
       if (!current || !Number.isFinite(at)) return;
-      if (current.source === "network" && shouldUseNativePlayer(current)) {
-        const target = Math.max(0, at as number);
-        useVideoPip.getState().setPosition(target);
-        void nativePlayerRef.current?.seek(target).catch((reason: unknown) => {
-          useVideoPip
-            .getState()
-            .setError(reason instanceof Error ? reason.message : String(reason));
-        });
-        return;
-      }
-      const video = activeVideo();
-      if (!video) return;
-      if (current?.source === "local") {
+      if (current.source === "local") {
         window.dispatchEvent(
           new CustomEvent<SeekDetail>(SEEK_EVENT, {
             detail: {
@@ -1300,6 +1034,8 @@ export function VideoPipHost() {
         );
         return;
       }
+      const video = activeVideo();
+      if (!video) return;
       void localSynchronizerRef.current!.seek(video, Math.max(0, at as number)).catch((reason: unknown) => {
         if (useVideoPip.getState().session !== current) return;
         if (reason instanceof DOMException && reason.name === "AbortError") return;
@@ -1311,8 +1047,8 @@ export function VideoPipHost() {
       const current = useVideoPip.getState().session;
       const pip = useVideoPip.getState();
       if (!current || !pip.active) return;
-      if (current.source === "local" && (projectSession(current) || shouldUseNativePlayer(current))) {
-        // A live project's picture (and mpv's) follows the player: the key only starts or stops it.
+      if (current.source === "local" && pictureSession(current)) {
+        // A picture that follows the player by itself: the key only starts or stops the player.
         broadcastMediaSync({ owner: "local-video", action: pip.playing ? "pause" : "play", trackId: current.trackId });
         return;
       }
@@ -1322,25 +1058,6 @@ export function VideoPipHost() {
         pip.setFailed(false);
         pip.setError("");
         ensureHostPlaying(current);
-        return;
-      }
-      if (shouldUseNativePlayer(current)) {
-        const controller = nativePlayerRef.current;
-        if (!controller) return;
-        if (pip.playing) {
-          desiredPlayingRef.current = false;
-          clearPreviewAudioFocus();
-          pip.setPlaying(false);
-          void controller.pause().catch((reason: unknown) => {
-            pip.setError(reason instanceof Error ? reason.message : String(reason));
-          });
-        } else {
-          desiredPlayingRef.current = true;
-          void controller.play().catch((reason: unknown) => {
-            pip.setPlaying(false);
-            pip.setError(reason instanceof Error ? reason.message : String(reason));
-          });
-        }
         return;
       }
       const video = activeVideo();
@@ -1381,19 +1098,10 @@ export function VideoPipHost() {
   useEffect(() => {
     if (!isLocal || session?.source !== "local" || !usesLocalVideoDeviceClock()) return;
     const trackId = session.trackId;
-    const readout = clockReadout(position => useVideoPip.getState().setPosition(position));
     const apply = () => {
       const pip = useVideoPip.getState();
       if (!pip.active || pip.mode !== "float" || pip.session?.source !== "local" || pip.session.trackId !== trackId) return;
-      if (projectSession(pip.session)) return;
-      if (shouldUseNativePlayer(pip.session)) {
-        // A drag on the window's own bar shows its position until it is let go (seekTo).
-        if (pendingScrubRef.current === null) nativePlayerRef.current?.follow(mpvClock(trackId));
-        const clock = getLocalVideoClock(trackId);
-        if (clock) desiredPlayingRef.current = clock.playing;
-        if (clock && pendingScrubRef.current === null) readout(clock.position);
-        return;
-      }
+      if (pictureSession(pip.session)) return;
       const video = activeVideo();
       if (!video || localSwap.isHoldingPosition()) return;
       const clock = getLocalVideoClock(trackId);
@@ -1411,7 +1119,7 @@ export function VideoPipHost() {
     video?.addEventListener("seeked", apply);
     apply();
     return () => { unsubscribe(); video?.removeEventListener("loadeddata", apply); video?.removeEventListener("seeked", apply); };
-  }, [isLocal, session?.source === "local" ? session.trackId : null, localSwap.activeSlot, hostActive, systemPip, isNativePlayer]);
+  }, [isLocal, session?.source === "local" ? session.trackId : null, localSwap.activeSlot, hostActive, systemPip, key]);
 
   useEffect(() => {
     if (!isLocal || !session || session.source !== "local") return;
@@ -1508,11 +1216,6 @@ export function VideoPipHost() {
       // 本地小窗静音跟时钟，主播放条开声不该把它掐掉
       if (useVideoPip.getState().session?.source === "local") return;
       desiredPlayingRef.current = false;
-      if (shouldUseNativePlayer(useVideoPip.getState().session)) {
-        void nativePlayerRef.current?.pause().catch(() => undefined);
-        useVideoPip.getState().setPlaying(false);
-        return;
-      }
       activeVideo()?.pause();
     };
     window.addEventListener(AUDIO_FOCUS_EVENT, onFocus);
@@ -1520,11 +1223,11 @@ export function VideoPipHost() {
   }, []);
 
   useEffect(() => {
-    if (isNativePlayer) return;
     const video = activeVideo();
     if (!video) return;
-    // A live project's picture is KdjvLivePicture's: these elements say nothing about it.
-    const stillActive = () => localSwap.isActiveVideo(video) && !projectSession(useVideoPip.getState().session);
+    // A picture that follows the player (a project, a video decoded with WebCodecs) is
+    // KdjvCodecPicture's: these elements say nothing about it.
+    const stillActive = () => localSwap.isActiveVideo(video) && !pictureSession(useVideoPip.getState().session);
     const onSize = () => {
       if (!stillActive() || !(video.videoWidth > 0) || !(video.videoHeight > 0)) return;
       const ratio = video.videoWidth / video.videoHeight;
@@ -1741,7 +1444,7 @@ export function VideoPipHost() {
       video.removeEventListener("ended", onEnded);
       video.removeEventListener("error", onError);
     };
-  }, [activeVideo, isNativePlayer, localSwap.activeSlot, localSwap.isActiveVideo]);
+  }, [activeVideo, localSwap.activeSlot, localSwap.isActiveVideo]);
 
   useEffect(() => {
     const output = pipVideoRef.current;
@@ -1811,38 +1514,6 @@ export function VideoPipHost() {
     const current = useVideoPip.getState().session;
     if (!current || !Number.isFinite(at)) return;
     const next = Math.max(0, duration > 0 ? Math.min(duration, at) : at);
-    if (current.source === "local" && shouldUseNativePlayer(current)) {
-      useVideoPip.getState().setPosition(next);
-      // While dragging, the picture shows the dragged spot; on release the song seeks and the
-      // picture follows its clock again.
-      if (!syncPlayer) nativePlayerRef.current?.follow({ position: next, rate: 0, playing: false });
-      else seekHoldRef.current.set(next);
-      window.dispatchEvent(
-        new CustomEvent<SeekDetail>(SEEK_EVENT, {
-          detail: {
-            trackId: current.trackId,
-            position: next,
-            preview: !syncPlayer,
-            scrubbing: !syncPlayer,
-            forceCommit: syncPlayer,
-          },
-        }),
-      );
-      return;
-    }
-    if (shouldUseNativePlayer(current)) {
-      useVideoPip.getState().setPosition(next);
-      if (syncPlayer) {
-        void nativePlayerRef.current?.seek(next).catch((reason: unknown) => {
-          useVideoPip
-            .getState()
-            .setError(reason instanceof Error ? reason.message : String(reason));
-        });
-      }
-      return;
-    }
-    const video = activeVideo();
-    if (!video) return;
     if (current.source === "local") {
       useVideoPip.getState().setPosition(next);
       window.dispatchEvent(
@@ -1857,7 +1528,9 @@ export function VideoPipHost() {
         }),
       );
       return;
-    } else {
+    }
+    const video = activeVideo();
+    if (video) {
       void localSynchronizerRef.current!.seek(video, next).catch((reason: unknown) => {
         if (useVideoPip.getState().session !== current) return;
         if (reason instanceof DOMException && reason.name === "AbortError") return;
@@ -1881,13 +1554,12 @@ export function VideoPipHost() {
   };
 
   useEffect(() => {
-    configureAndroidVideoPip(Boolean(hostActive && mode === "float" && !isNativePlayer), playing, sourceRatio ?? 16 / 9);
-  }, [hostActive, mode, isNativePlayer, playing, sourceRatio]);
+    configureAndroidVideoPip(Boolean(hostActive && mode === "float"), playing, sourceRatio ?? 16 / 9);
+  }, [hostActive, mode, playing, sourceRatio]);
   useEffect(() => () => configureAndroidVideoPip(false, false, 16 / 9), []);
 
   const title = session?.title || "视频预览";
 
-  // Outside #root: the page's hole over mpv's picture cuts everything inside it (videoHoles.ts).
   return createPortal(
     <div
       className="kd-pip-host"
@@ -1899,7 +1571,6 @@ export function VideoPipHost() {
         className={showSurface ? "kd-pip-float" : "kd-pip-shell"}
         data-docked={docked ? "true" : undefined}
         data-fullscreen={showSurface && videoFullscreen ? "true" : undefined}
-        data-native-player={showSurface && (isNativePlayer || liveNative) ? "true" : undefined}
         style={
           showSurface && docked && panelBounds
             ? { left: panelBounds.x, top: panelBounds.y, width: panelBounds.width, height: panelBounds.height }
@@ -1917,18 +1588,6 @@ export function VideoPipHost() {
           // Floating: the stage is the video's own shape, live. Docked and fullscreen fill the
           // box they are given (see the stylesheet).
           style={showFloating && !videoFullscreen && sourceRatio ? { aspectRatio: String(sourceRatio) } : undefined}>
-          {isNativePlayer && (
-            <div
-              ref={nativeSlotRef}
-              className="kd-pip-native-slot"
-              aria-hidden="true"
-            />
-          )}
-          {showSurface && (isNativePlayer || liveNative) && (
-            // Black over mpv's picture until its first frame can show; then it fades away.
-            <div className="kd-native-veil" aria-hidden="true"
-              data-shown={isNativePlayer ? (nativeReady ? "true" : undefined) : "true"} />
-          )}
           <video
             ref={localSwap.bindVideo(0)}
             className="kd-pip-video"
@@ -1951,19 +1610,15 @@ export function VideoPipHost() {
           />
           {live && showSurface && session?.source === "local" && (
             <PanelErrorBoundary name="工程画面" turn={session.trackId}>
-              {liveNative
-                ? <KdjvMpvPicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
-                    const pip = useVideoPip.getState();
-                    if (pendingScrubRef.current === null) pip.setPosition(position);
-                    if (pip.playing !== playing) pip.setPlaying(playing);
-                  }} />
-                : webVideoOff()
-                  ? <KdjvCodecPicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
-                    const pip = useVideoPip.getState();
-                    if (pendingScrubRef.current === null) pip.setPosition(position);
-                    if (pip.playing !== playing) pip.setPlaying(playing);
-                  }} />
-                  : <KdjvLivePicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
+              {codecDecodeAvailable()
+                ? <KdjvCodecPicture trackId={session.trackId} project={live}
+                    sourceUrl={projectLive ? undefined : () => api.videoUrl(session.trackId)}
+                    onTransport={({ position, playing }) => {
+                      const pip = useVideoPip.getState();
+                      if (pendingScrubRef.current === null) pip.setPosition(position);
+                      if (pip.playing !== playing) pip.setPlaying(playing);
+                    }} />
+                : <KdjvLivePicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
                     const pip = useVideoPip.getState();
                     if (pendingScrubRef.current === null) pip.setPosition(position);
                     if (pip.playing !== playing) pip.setPlaying(playing);
@@ -1983,7 +1638,7 @@ export function VideoPipHost() {
             <FloatingVideoControls title={title} playing={playing} position={position} duration={duration}
               fullscreen={videoFullscreen} onClose={close} onToggle={toggle}
               onFullscreen={() => void applyVideoFullscreen(!videoFullscreen)} error={error}
-              extra={showFloating && !isNativePlayer && canSystemPip() ? <button type="button" aria-label="系统画中画"
+              extra={showFloating && !live && canSystemPip() ? <button type="button" aria-label="系统画中画"
                 title="系统画中画（切走应用时也会自动打开）" onClick={event => {
                   event.stopPropagation();
                   const video = systemPipTarget();
@@ -2025,12 +1680,12 @@ export function VideoPipHost() {
                 pendingScrubRef.current = null;
                 const current = useVideoPip.getState().session;
                 const video = activeVideo();
-                if (current?.source === "local" && video) {
+                if (current?.source === "local") {
                   window.dispatchEvent(
                     new CustomEvent<SeekDetail>(SEEK_EVENT, {
                       detail: {
                         trackId: current.trackId,
-                        position: isNativePlayer ? useVideoPip.getState().position : video.currentTime,
+                        position: pictureSession(current) || !video ? useVideoPip.getState().position : video.currentTime,
                         preview: true,
                         scrubbing: false,
                       },

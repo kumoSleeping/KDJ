@@ -27,8 +27,6 @@ import { api } from "../../lib/api";
 import { chooseAutoAnalysisMode } from "../../lib/autoAnalyze";
 import { resolveAutoAnalysisMode } from "../../lib/autoAnalysisMode";
 import { getBridge } from "../../lib/bridge";
-import { useMpvAvailable, webVideoOff } from "../../lib/mpvPlayer";
-import { codecDecodeAvailable, setProjectPicture, useProjectPicture } from "../../lib/projectPicture";
 import { formatBytes } from "../../lib/format";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
@@ -274,8 +272,6 @@ export function SettingsPanel({ preferences = false, page }: {
 }) {
   const on = (id: SettingsPage) => !page || page === id;
   const settings = useAppStore((state) => state.settings);
-  const mpvAvailable = useMpvAvailable();
-  const projectPicture = useProjectPicture();
   const saveSettings = useAppStore((state) => state.saveSettings);
   const [appFontScale, setFontScale] = useState(() => Number.parseFloat(document.documentElement.style.fontSize) || readAppFontScale());
   useEffect(() => {
@@ -624,33 +620,6 @@ export function SettingsPanel({ preferences = false, page }: {
                   video_playback_max_height: Number(next),
                 }).catch(() => undefined)}
               />
-              {/* macOS plays every video in mpv for now (webVideoOff): no choice to offer there. */}
-              {mpvAvailable && !webVideoOff() && (
-                <CycleToggle
-                  label="视频播放器"
-                  value={settings?.video_player ?? "mpv"}
-                  options={[
-                    { id: "mpv", text: "mpv" },
-                    { id: "web", text: "系统 WebView" },
-                  ]}
-                  title="本地视频和在线视频预览的小窗。mpv 原生解码，跳转更快；系统 WebView 是原来的播放器。"
-                  onChange={(next) => void saveSettings({
-                    video_player: next,
-                  }).catch(() => undefined)}
-                />
-              )}
-              {webVideoOff() && codecDecodeAvailable() && (
-                <CycleToggle
-                  label="工程画面"
-                  value={projectPicture}
-                  options={[
-                    { id: "codec", text: "WebCodecs" },
-                    { id: "mpv", text: "mpv" },
-                  ]}
-                  title="剪辑和 VJ 工程播放时的画面。WebCodecs 用系统解码器在页面里作画；mpv 是叠在页面下的原生视图。只记在这台电脑上。"
-                  onChange={(next) => setProjectPicture(next)}
-                />
-              )}
               <Switch
                 checked={settings?.stream_cache_enabled ?? false}
                 disabled={!settings || streamCacheBusy}

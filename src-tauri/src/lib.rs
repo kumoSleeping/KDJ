@@ -40,8 +40,6 @@ mod media_tools;
 #[cfg(target_os = "macos")]
 mod macos_window_drag;
 #[cfg(desktop)]
-mod mpv_player;
-#[cfg(desktop)]
 mod release_version;
 #[cfg(desktop)]
 mod share_clipboard;
@@ -2270,8 +2268,6 @@ pub fn run() {
         #[cfg(any(desktop, target_os = "android"))]
         app.manage(youtube_proof::YoutubeProofState::default());
         #[cfg(desktop)]
-        app.manage(mpv_player::MpvState::default());
-        #[cfg(desktop)]
         app.manage(midi::MidiHub::spawn(app.handle().clone()));
         #[cfg(any(desktop, target_os = "android"))]
         app.manage(
@@ -2380,12 +2376,6 @@ pub fn run() {
         midi::midi_send,
         youtube_proof::youtube_mint_gvs_po_token,
         youtube_proof::youtube_run_player,
-        mpv_player::mpv_status,
-        mpv_player::mpv_open,
-        mpv_player::mpv_set_bounds,
-        mpv_player::mpv_control,
-        mpv_player::mpv_follow,
-        mpv_player::mpv_close,
         mini_player::mini_player_state,
         mini_player::mini_player_collapse,
         mini_player::mini_player_reveal,

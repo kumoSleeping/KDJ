@@ -113,24 +113,6 @@ export async function prewarmYoutubeVideoPreview(input: YoutubeVideoPreviewInput
   await preparedHls(input);
 }
 
-/**
- * The same local HLS session for a player that is not a `<video>` element (the mpv window):
- * its loopback URL, and the release that cancels its upstream transfers.
- */
-export function startYoutubePlayback(input: YoutubeVideoPreviewInput): {
-  url: Promise<string>;
-  release: () => Promise<void>;
-} {
-  const url = preparedHls(input).then(prepared => api.startYoutubeVideoPlayback(prepared));
-  let released: Promise<void> | null = null;
-  return {
-    url,
-    release: () => released ??= url
-      .then(playbackUrl => api.revokeYoutubeVideoPlayback(playbackUrl))
-      .catch(() => undefined),
-  };
-}
-
 /** Test/logout hook: invalidate short-lived local HLS capabilities held by the frontend. */
 export function clearYoutubeVideoPreviewCache(): void {
   preparationCache.clear();
