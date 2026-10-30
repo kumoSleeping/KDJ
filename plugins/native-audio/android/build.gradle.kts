@@ -5,7 +5,8 @@ plugins {
 
 android {
     namespace = "app.tauri.nativeaudio"
-    compileSdk = 34
+    // 35：前台服务类型 mediaProcessing 与 Service.onTimeout(int, int)。
+    compileSdk = 35
 
     defaultConfig {
         minSdk = 26

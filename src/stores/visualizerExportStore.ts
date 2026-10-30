@@ -11,6 +11,7 @@ import { checkVisualizerExportSupport } from "../lib/visualizerExportSupport";
 import { showTask } from "../components/tasks/taskBubbleStore";
 import { requestVisualizerExports, type VisualizerExportCommand } from "../lib/kvjWindow";
 import { getBridge } from "../lib/bridge";
+import { finishAndroidExport, idleAndroidExport, reportAndroidExport } from "../lib/androidExportNotice";
 
 interface State {
   tasks: VisualizerExportTask[];
@@ -72,6 +73,7 @@ async function pump(): Promise<void> {
       window.addEventListener("pagehide", leaving);
       try {
         const preparing = update(task.id, { phase: "preparing", status: "正在准备画面", error: "", progress: 0 })!;
+        reportAndroidExport(task.name, 0, preparing.status);
         await persist(preparing);
         const draft = await loadVisualizerExportSnapshot(task.id);
         const { runStudioExport } = await import("../lib/visualizerStudioExport");
@@ -79,22 +81,25 @@ async function pump(): Promise<void> {
         const final = await runStudioExport(draft, task.outputPath, controller.signal, status => {
           if (!["done", "failed", "canceled"].includes(status.phase)) {
             update(task.id, { phase: status.phase, progress: status.progress, status: status.status });
+            reportAndroidExport(task.name, status.progress, status.status);
           }
         });
         if (final.phase === "failed") captureDiagnostic("visualizer-export", "encoder", final.error, `width=${task.width} height=${task.height} fps=${task.fps}`);
-        let outputPath = final.output_path || task.outputPath, error = final.error;
+        let outputPath = final.output_path || task.outputPath, error = final.error, uri = "";
         // A phone's download folder is the app's own: the video goes on to the gallery (Movies/KDJ).
         const publish = getBridge().publishVideo;
         if (final.phase === "done" && publish) {
           update(task.id, { status: "正在存入相册" });
-          try { outputPath = (await publish({ path: outputPath, name: task.filename })).path; }
+          try { ({ path: outputPath, uri } = await publish({ path: outputPath, name: task.filename })); }
           catch (failure) { error = `视频已导出到 ${outputPath}，但没能存入相册：${message(failure)}`; }
         }
         update(task.id, { phase: final.phase, progress: final.progress, status: final.status, error, outputPath });
+        if (final.phase !== "canceled") finishAndroidExport(task.name, final.phase === "done", error || outputPath, uri);
       } catch (error) {
         const canceled = error instanceof DOMException && error.name === "AbortError";
         if (!canceled) captureDiagnostic("visualizer-export", "frame-producer", error, `width=${task.width} height=${task.height} fps=${task.fps}`);
         update(task.id, { phase: canceled ? "canceled" : "failed", status: canceled ? "已取消" : "导出失败", error: canceled ? "" : message(error) });
+        if (!canceled) finishAndroidExport(task.name, false, message(error));
       } finally {
         window.removeEventListener("pagehide", leaving);
         const final = useVisualizerExportStore.getState().tasks.find(t => t.id === task.id);
@@ -103,7 +108,7 @@ async function pump(): Promise<void> {
         finish();
       }
     }
-  } finally { pumping = false; }
+  } finally { pumping = false; idleAndroidExport(); }
 }
 
 export const useVisualizerExportStore = create<State>((set, get) => ({
