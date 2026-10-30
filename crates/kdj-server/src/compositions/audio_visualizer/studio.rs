@@ -314,16 +314,21 @@ async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> 
     if let Some(bytes) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return Ok(analysis_response(bytes));
     }
-    let probe = media::probe(&audio, &cancel).await?;
-    let duration = probe.check(false)?;
-    api_check((1..=MAX_DURATION_MS).contains(&duration), "初版支持最长 30 分钟的完整音频")?;
+    // The container's own length, read by the same decoder the analysis uses: no FFmpeg,
+    // so phones analyze as well. Headers that say nothing leave the check to the decode.
+    let header = { let path = audio.clone(); tokio::task::spawn_blocking(move || kdj_analysis::decode::probe_duration(&path)).await.map_err(anyhow::Error::from)?? };
+    let header_ms = header.map(|secs| secs * 1000.);
+    let length = |ms: f64| api_check(ms >= 1. && ms <= MAX_DURATION_MS as f64, "初版支持最长 30 分钟的完整音频");
+    if let Some(ms) = header_ms { length(ms)?; }
     let path = audio.clone(); let token = cancel.clone();
     let timeline = tokio::task::spawn_blocking(move || {
         let _background = kdj_core::thread_qos::prefer_background();
         kdj_analysis::visualizer::analyze_at_fps(&path, &p.spectrum, 60, &|| token.is_cancelled())
     }).await.map_err(anyhow::Error::from)??;
     api_check(fingerprint(&audio)? == signature, "分析期间歌曲已变化，请重新打开工程")?;
-    api_check((timeline.duration_seconds() * 1000. - duration as f64).abs() <= 250., "音轨解码不完整，不能导出")?;
+    let decoded_ms = timeline.duration_seconds() * 1000.;
+    length(decoded_ms)?;
+    if let Some(ms) = header_ms { api_check((decoded_ms - ms).abs() <= 250., "音轨解码不完整，不能导出")?; }
     let bytes = Bytes::from(serde_json::to_vec(&Analyzed { timeline, signature }).map_err(anyhow::Error::from)?);
     cache.lock().unwrap_or_else(|e| e.into_inner()).insert(key, bytes.clone());
     Ok(analysis_response(bytes))
