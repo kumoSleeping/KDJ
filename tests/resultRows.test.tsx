@@ -117,6 +117,25 @@ test("the result table: the same picking, and the download key in the first data
     // Shift-click: the run from the row touched last (d), skipping what cannot be picked.
     await click(row("b"), { shiftKey: true });
     assert.deepEqual(picked(), ["0:b", "0:c", "0:d"]);
+    // A picked row drags the whole pick (to the downloads key, a folder or the queue); letting go picks nothing.
+    const { activeSearchDrag } = await import("../src/lib/searchDrag");
+    document.elementFromPoint = () => null;
+    const pointer = (type: string, x: number) => {
+      const event = mouse(type, { clientX: x, clientY: 10, button: 0 });
+      Object.defineProperties(event, { pointerId: { value: 3 }, pointerType: { value: "mouse" } });
+      return event;
+    };
+    let dragged: string[] = [];
+    await act(async () => {
+      row("d").dispatchEvent(pointer("pointerdown", 100));
+      window.dispatchEvent(pointer("pointermove", 140));
+      const payload = activeSearchDrag();
+      dragged = payload?.kind === "audio" ? payload.sources.map(entry => `${entry.platform}:${entry.key}`) : [];
+      window.dispatchEvent(pointer("pointerup", 140));
+    });
+    assert.deepEqual(dragged, ["wyy:2", "qqm:3", "wyy:4"]);
+    await click(row("d"));
+    assert.deepEqual(picked(), ["0:b", "0:c", "0:d"], "the click that ends a drag does not drop the row");
     // Enter / Space on a focused row pick it too.
     await key(" ", row("e"));
     assert.deepEqual(picked(), ["0:b", "0:c", "0:d", "0:e"]);
