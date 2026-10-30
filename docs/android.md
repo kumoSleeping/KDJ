@@ -13,20 +13,19 @@ cloud/virtual documents are not a Rust filesystem; selecting one is not support 
 that document. Android deletion is not the desktop recycle bin. Account login offers QR and
 pasted headers, not desktop browser-profile extraction.
 
-Omitted: visualization production/preview/export, editing, `.kdjv` playback, FFmpeg/ffprobe,
+Omitted: visualization production/preview/export, editing, `.kdjv` playback
 and the desktop CLI API. Existing project files, export databases and settings
 are not removed or rewritten to implement this boundary. Shared palette extraction remains.
 
 `platformFeatures.ts` gates actions and export-store initialization. The mobile Vite graph
 omits production panels and the export worker. The Rust mobile router does not register
-CLI, workshop, visualizer, FFmpeg status or video-calibration routes; the provider's FFmpeg
-binary boundary rejects mobile calls as well. A stale UI or direct request cannot start those
+CLI, workshop, visualizer or video-calibration routes. A stale UI or direct request cannot start those
 jobs. Desktop routes and panels are unchanged.
 
 Local video uses the system WebView for pictures and Rust for audio: supported formats are
 still their intersection, not a bundled universal decoder. There is no compatibility transcode.
 Bilibili can download complete single streams; separated-track mux, extraction and Offset are
-not offered. YouTube's HLS remux/download remains pure Rust, without FFmpeg.
+not offered. YouTube's HLS remux/download remains pure Rust. KDJ has no FFmpeg on any platform.
 
 ## Native audio and background work
 

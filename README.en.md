@@ -78,13 +78,13 @@ KDJ packs cross-platform search, download, local library management, and music a
   - Lightweight Tauri desktop app; Android supported; automatic update checks on launch
 
 > [!NOTE]
-> Everyday library management, analysis and playback do not need FFmpeg. The mixing editor's media reading, tempo change and export, video mux and audio extraction, and visualizer export do.
+> KDJ does not use FFmpeg. Downloads, playback and visualizer export use pure Rust and the system's own decoders and encoders; what a system cannot do is listed in [Known limitations](docs/known-limitations.md).
 
 ### Android
 
 - Android 8+ on arm64 devices; YouTube playback needs Android 9+ and a current Android System WebView.
 - Music search/download, library, analysis, waveforms, lyrics, themes and system media controls; overlay lyrics and video picture-in-picture.
-- No visualizer production or FFmpeg. Video formats depend on system support.
+- No visualizer production. Video formats depend on system support.
 - See [Android](docs/android.md) for adaptation details and device acceptance checks.
 
 ## Build for development
