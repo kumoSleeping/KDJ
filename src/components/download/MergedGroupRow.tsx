@@ -19,6 +19,7 @@ import {
   type SongPreviewItem,
 } from "../../lib/songPreview";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
+import { startLongPress } from "../../lib/longPress";
 import type { CollectionResult, MergedGroup, Platform, SongSource } from "../../types";
 import { albumOfSource } from "../../lib/searchCollections";
 import { copyText } from "../../lib/copyText";
@@ -150,7 +151,7 @@ export function MergedGroupRow({
   const shareLink =firstSourceShareLink(group.sources, sourceIndex);
   const shareContentMode = useSharePrefs((state) => state.contentMode);
   const multi = group.sources.length > 1;
-  const pressTimerRef = useRef<number | null>(null);
+  const pressRef = useRef<(() => void) | null>(null);
   const pointerDragCleanupRef = useRef<(() => void) | null>(null);
   const suppressClickRef = useRef(false);
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
@@ -175,7 +176,7 @@ export function MergedGroupRow({
   const previewPending = Boolean(
     previewSource && previewPendingSourceKey === sourceKey(previewSource),
   );
-  useEffect(() => () => pointerDragCleanupRef.current?.(), []);
+  useEffect(() => () => { pointerDragCleanupRef.current?.(); pressRef.current?.(); }, []);
 
   const toggleSelection = (range = false) => {
     onToggleSelect(range);
@@ -514,21 +515,9 @@ export function MergedGroupRow({
             }) ?? null;
             return;
           }
-          const x = event.clientX;
-          const y = event.clientY;
-          pressTimerRef.current = window.setTimeout(() => {
-            setRowMenu({ x, y });
-            suppressClickRef.current = true;
-            pressTimerRef.current = null;
-          }, 480);
-        }}
-        onPointerUp={() => {
-          if (pressTimerRef.current !== null) window.clearTimeout(pressTimerRef.current);
-          pressTimerRef.current = null;
-        }}
-        onPointerCancel={() => {
-          if (pressTimerRef.current !== null) window.clearTimeout(pressTimerRef.current);
-          pressTimerRef.current = null;
+          // A finger or a pen: held still, the same menu as the right click (lib/longPress.ts).
+          pressRef.current?.();
+          pressRef.current = startLongPress(event.nativeEvent, { open: (x, y) => setRowMenu({ x, y }) });
         }}
         {...foldingRowProps(leave)}
       >

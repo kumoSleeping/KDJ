@@ -86,6 +86,12 @@ wide window; held upright it is a tall one, exactly as a tall desktop window
 rail names on up to two lines. A click selects a row and a double click plays it, as on the
 desktop.
 
+A long press is the right click (`src/lib/longPress.ts`, for any finger or pen, on any system):
+a row held still opens the menu its right click opens (on Android at the WebView's own long press,
+about 500 ms; elsewhere at 480 ms), and the click its release makes is swallowed. A library row still held at 1.1 s, unmoved, gives the menu up for the
+system's drag of its files (or share link) to another app. A finger that moves first scrolls;
+the mouse's drags to a folder, a deck or the downloads key are not touched.
+
 The back key closes the topmost layer (a drawer, a menu, a floating window), one per press,
 by handing the page an Escape (`src/lib/androidBack.ts`, through Tauri's `back-button` event;
 `core:app` listener permissions in `capabilities/mobile-player.json`). When nothing takes it,

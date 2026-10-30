@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, FolderOpen, Library, Link2, LoaderCircle, Play, Search } from "lucide-react";
+import { startLongPress } from "../../lib/longPress";
 import { api } from "../../lib/api";
 import { copyShareContent } from "../../lib/shareClipboard";
 import { formatBpm } from "../../lib/format";
@@ -46,7 +47,7 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   /** 复选框不是常驻装饰：桌面右键、触屏长按后才进入显式批选模式。 */
   const [selectionMode, setSelectionMode] = useState(false);
-  const pressTimerRef = useRef<number | null>(null);
+  const pressRef = useRef<(() => void) | null>(null);
   const suppressClickRef = useRef<number | null>(null);
   const [drop, setDrop] = useState<{ id: number; before: boolean } | null>(null);
   const scope = useHarmonicScope((state) => state.scope);
@@ -121,18 +122,8 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
   };
 
   const cancelPress = () => {
-    if (pressTimerRef.current !== null) window.clearTimeout(pressTimerRef.current);
-    pressTimerRef.current = null;
-  };
-
-  /** 触屏没有右键：按住 480ms 打开与桌面右键完全相同的菜单。 */
-  const beginLongPress = (track: Track, x: number, y: number) => {
-    cancelPress();
-    pressTimerRef.current = window.setTimeout(() => {
-      setRowMenu({ x, y, track });
-      suppressClickRef.current = track.id;
-      pressTimerRef.current = null;
-    }, 480);
+    pressRef.current?.();
+    pressRef.current = null;
   };
 
   const reorder = (targetId: number, before: boolean) => {
@@ -244,7 +235,10 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
           }}
           onPointerDown={(event) => {
             if (event.pointerType !== "mouse") {
-              beginLongPress(match.track, event.clientX, event.clientY);
+              // 触屏、触控笔按住不动：打开与右键相同的菜单（lib/longPress.ts）。
+              cancelPress();
+              const track = match.track;
+              pressRef.current = startLongPress(event.nativeEvent, { open: (x, y) => setRowMenu({ x, y, track }) });
             }
           }}
           onPointerUp={cancelPress}
