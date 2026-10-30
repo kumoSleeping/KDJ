@@ -78,6 +78,17 @@ Its PiP callback presents only the video surface and keeps WebView decoding resu
 separate from both in-app floating windows and overlay lyrics. Device support is checked before
 the control is offered. `android-postinit.sh` restores the manifest capability after Tauri init.
 
+## Updates
+
+The update check is the shared GitHub Release check; on Android its URL is the signed APK of the
+device's ABI. 下载并安装 downloads that APK inside the app (`UpdateInstaller.kt`, only from this
+repository's Release, only a package with KDJ's application ID) into the app's cache and opens
+the system installer: installation, signature checking and the upgrade remain the system's. The
+first time, Android asks to allow KDJ to install apps (`REQUEST_INSTALL_PACKAGES`). When the
+background check finds a newer version on Wi‑Fi/Ethernet, the APK is downloaded and the installer
+page opened by itself, once per version; on a metered or unknown network nothing is downloaded
+until the key is pressed. There is no silent install.
+
 ## Packaging and acceptance
 
 A `v*` release run of `rust-build` calls `rust-android.yml`; the latter also remains manually
@@ -94,6 +105,7 @@ Local narrow checks:
 
 ```sh
 node --import tsx --test tests/androidLite.test.ts tests/youtubeSabrUpload.test.ts
+node --conditions=import scripts/test-dom-ui.mjs androidUpdate
 TAURI_ENV_PLATFORM=androideabi npm run tauri:web:build
 ```
 

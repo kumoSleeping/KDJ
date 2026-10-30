@@ -1103,9 +1103,19 @@ export interface KdjBridge {
   /**
    * 桌面独有的一键更新：下载 + 校验 + 原地替换 + 重启，全程由
    * tauri-plugin-updater 托管。非桌面壳是 null/缺席——调用方按平台
-   * 各给各的操作（安卓开 Release 页下 APK，浏览器开发布页）。
+   * 各给各的操作（安卓见 installAndroidUpdate，浏览器开发布页）。
    */
   applyUpdate?: null | ((onProgress?: (progress: UpdateProgress) => void) => Promise<void>);
+  /**
+   * 安卓：在应用里下载 Release 的 APK，下完打开系统安装页（安装和确认仍是系统的）。
+   * "permission"：还没有「安装未知应用」授权；askPermission 为真时已打开授权页，允许后再调一次。
+   */
+  installAndroidUpdate?: (options: {
+    url: string;
+    version: string;
+    askPermission: boolean;
+    onProgress?: (progress: UpdateProgress) => void;
+  }) => Promise<"installing" | "permission">;
   windowControl: (action: "minimize" | "maximize" | "close" | "drag") => void;
   /** 主窗口收成迷你播放器再放回来（src/lib/miniPlayer.ts）。只有桌面壳的主窗口有。 */
   miniPlayer?: MiniPlayerBridge;

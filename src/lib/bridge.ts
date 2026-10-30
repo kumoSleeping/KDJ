@@ -4,7 +4,9 @@
 
 import {
   addOverlayMovedListener,
+  addUpdateProgressListener,
   checkOverlayPermission,
+  installUpdateApk,
   openLocalPath,
   pickLibraryFolder,
   requestOverlayPermission,
@@ -196,6 +198,18 @@ async function createTauriBridge(): Promise<KdjBridge> {
           }
         }
       : null,
+    installAndroidUpdate: android
+      ? async ({ url, version, askPermission, onProgress }) => {
+          const listener = await addUpdateProgressListener(({ downloaded, total }) =>
+            onProgress?.({ stage: "downloading", downloaded, total: total ?? null, message: "" }));
+          try {
+            const { installing } = await installUpdateApk({ url, version, askPermission });
+            return installing ? "installing" : "permission";
+          } finally {
+            void listener.unregister().catch(() => {});
+          }
+        }
+      : undefined,
     pickFolder: async (options) => {
       // 安卓 dialog 没有 folder picker；走系统 ACTION_OPEN_DOCUMENT_TREE。
       if (android) {

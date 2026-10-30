@@ -29,6 +29,7 @@ Default permissions for the plugin
 - `allow-publish-video`
 - `allow-start-file-drag`
 - `allow-pick-library-folder`
+- `allow-install-update-apk`
 
 ## Permission Table
 
@@ -217,6 +218,32 @@ Enables the initialize command without any pre-configured scope.
 <td>
 
 Denies the initialize command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:allow-install-update-apk`
+
+</td>
+<td>
+
+Enables the install_update_apk command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-install-update-apk`
+
+</td>
+<td>
+
+Denies the install_update_apk command without any pre-configured scope.
 
 </td>
 </tr>

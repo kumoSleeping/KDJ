@@ -68,6 +68,8 @@ export function UpdateRow() {
               </>
             ) : canSelfUpdate ? (
               "下载并重启"
+            ) : isAndroid && info.url.endsWith(".apk") ? (
+              "下载并安装"
             ) : isAndroid ? (
               "下载 APK"
             ) : (
