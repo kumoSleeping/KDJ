@@ -3107,6 +3107,7 @@ dependencies = [
  "kdj-providers",
  "kdj-server",
  "midir",
+ "minisign-verify",
  "ndk-context",
  "objc2",
  "objc2-app-kit",

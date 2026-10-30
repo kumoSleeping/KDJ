@@ -15,6 +15,8 @@ export function UpdateRow() {
   const applying = useUpdateStore((s) => s.applying);
   const notice = useUpdateStore((s) => s.manualError);
   const progress = useUpdateStore((s) => s.progress);
+  const staged = useUpdateStore((s) => s.staged);
+  const downloading = useUpdateStore((s) => s.downloading);
   const check = useUpdateStore((s) => s.check);
   const apply = useUpdateStore((s) => s.apply);
   const clearManualError = useUpdateStore((s) => s.clearManualError);
@@ -53,7 +55,11 @@ export function UpdateRow() {
                   ? `当前 v${current}`
                   : "点右边看看有没有新版本"
                 : info.newer
-                  ? `发现新版本 v${info.latest}（当前 v${info.current}）`
+                  ? staged === info.latest
+                    ? `v${info.latest} 已下载，下次启动时自动安装`
+                    : downloading
+                      ? `正在后台下载 v${info.latest}（当前 v${info.current}）`
+                      : `发现新版本 v${info.latest}（当前 v${info.current}）`
                   : `已是最新 v${info.current}`)}
           </div>
           <InlineNotice text={notice} onDismiss={clearManualError} />
@@ -67,7 +73,7 @@ export function UpdateRow() {
                 <LoaderCircle className="kd-spin" size={12} /> 更新中
               </>
             ) : canSelfUpdate ? (
-              "下载并重启"
+              staged === info.latest ? "立即重启更新" : "下载并重启"
             ) : isAndroid && info.url.endsWith(".apk") ? (
               "下载并安装"
             ) : isAndroid ? (

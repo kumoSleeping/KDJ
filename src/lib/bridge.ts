@@ -199,6 +199,7 @@ async function createTauriBridge(): Promise<KdjBridge> {
           }
         }
       : null,
+    downloadUpdate: desktop ? () => tauriInvoke<string>("download_update") : null,
     installAndroidUpdate: android
       ? async ({ url, version, askPermission, onProgress }) => {
           const listener = await addUpdateProgressListener(({ downloaded, total }) =>
@@ -376,6 +377,7 @@ function createBrowserBridge(): KdjBridge {
     readClipboardText: () => navigator.clipboard.readText(),
     checkUpdate: null,
     applyUpdate: null,
+    downloadUpdate: null,
     windowControl: () => {},
     setWindowBackground: () => {},
     onSidecarLog: () => () => {},

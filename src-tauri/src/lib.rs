@@ -40,6 +40,8 @@ mod macos_window_drag;
 #[cfg(desktop)]
 mod release_version;
 #[cfg(desktop)]
+mod staged_update;
+#[cfg(desktop)]
 mod share_clipboard;
 #[cfg(any(desktop, target_os = "android"))]
 mod youtube_proof;
@@ -902,13 +904,66 @@ fn fail_update(app: &tauri::AppHandle, error: impl ToString) -> String {
     message
 }
 
+/// 后台下载更新包并暂存（staged_update.rs），下次启动时装；返回暂存的版本号。
+/// 已经暂存了同一次发布就直接返回。前端在自动下载开着时，发现新版本后调它。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tauri::command]
+async fn download_update(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    if cfg!(debug_assertions) {
+        return Err("开发包不能自更新".into());
+    }
+    let lock = app.state::<staged_update::UpdateLock>();
+    let _guard = lock.0.lock().await;
+    let updater = app.updater().map_err(|err| err.to_string())?;
+    let Some(update) = updater.check().await.map_err(|err| err.to_string())? else {
+        staged_update::clear(&app);
+        return Err("已经是最新版本".into());
+    };
+    if staged_update::read(&app, &update).is_some() {
+        return Ok(update.version);
+    }
+    let progress_app = app.clone();
+    let mut downloaded_bytes = 0u64;
+    let bytes = update
+        .download(
+            move |chunk, total| {
+                downloaded_bytes = downloaded_bytes.saturating_add(chunk as u64);
+                progress_app
+                    .state::<UpdateProgressState>()
+                    .replace(UpdateProgress {
+                        stage: "downloading",
+                        downloaded: downloaded_bytes,
+                        total,
+                        message: "正在后台下载更新包".into(),
+                    });
+            },
+            || {},
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    staged_update::write(&app, &update, &bytes)?;
+    app.state::<UpdateProgressState>().replace(UpdateProgress::default());
+    tracing::info!(version = update.version, "更新包已在后台下好，下次启动时安装");
+    Ok(update.version)
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+async fn download_update() -> Result<String, String> {
+    Err("这个平台不支持后台下载更新".into())
+}
+
 /// 一键更新：查 → 下载（minisign 校验）→ 原地替换 → 重启。
+/// 后台已经暂存了这次发布的包就直接装它，不再下载；后台还在下载就等它下完。
 /// 全托管在 Rust 侧，前端一次 invoke 到底；错误原样带回去就地显示。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 async fn apply_update(app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
     let started = std::time::Instant::now();
+    let lock = app.state::<staged_update::UpdateLock>();
+    let _guard = lock.0.lock().await;
     app.state::<UpdateProgressState>().replace(UpdateProgress {
         stage: "checking",
         downloaded: 0,
@@ -924,38 +979,40 @@ async fn apply_update(app: tauri::AppHandle) -> Result<(), String> {
         return Err(fail_update(&app, "已经是最新版本"));
     };
 
-    let progress_app = app.clone();
-    let install_app = app.clone();
-    let mut downloaded_bytes = 0u64;
-    update
-        .download_and_install(
-            move |chunk, total| {
-                downloaded_bytes = downloaded_bytes.saturating_add(chunk as u64);
-                progress_app
-                    .state::<UpdateProgressState>()
-                    .replace(UpdateProgress {
-                        stage: "downloading",
-                        downloaded: downloaded_bytes,
-                        total,
-                        message: "正在下载并校验更新包".into(),
-                    });
-                tracing::info!("更新下载中：{downloaded_bytes}/{total:?}");
-            },
-            move || {
-                let current = install_app.state::<UpdateProgressState>().get();
-                install_app
-                    .state::<UpdateProgressState>()
-                    .replace(UpdateProgress {
-                        stage: "installing",
-                        downloaded: current.downloaded,
-                        total: current.total.or(Some(current.downloaded)),
-                        message: "签名校验通过，正在安装".into(),
-                    });
-                tracing::info!("更新下载完成，开始安装");
-            },
-        )
-        .await
-        .map_err(|err| fail_update(&app, err))?;
+    let bytes = match staged_update::read(&app, &update) {
+        Some(bytes) => bytes,
+        None => {
+            let progress_app = app.clone();
+            let mut downloaded_bytes = 0u64;
+            update
+                .download(
+                    move |chunk, total| {
+                        downloaded_bytes = downloaded_bytes.saturating_add(chunk as u64);
+                        progress_app
+                            .state::<UpdateProgressState>()
+                            .replace(UpdateProgress {
+                                stage: "downloading",
+                                downloaded: downloaded_bytes,
+                                total,
+                                message: "正在下载并校验更新包".into(),
+                            });
+                        tracing::info!("更新下载中：{downloaded_bytes}/{total:?}");
+                    },
+                    || tracing::info!("更新下载完成，开始安装"),
+                )
+                .await
+                .map_err(|err| fail_update(&app, err))?
+        }
+    };
+    let downloaded = app.state::<UpdateProgressState>().get().downloaded.max(bytes.len() as u64);
+    app.state::<UpdateProgressState>().replace(UpdateProgress {
+        stage: "installing",
+        downloaded,
+        total: Some(downloaded),
+        message: "签名校验通过，正在安装".into(),
+    });
+    update.install(&bytes).map_err(|err| fail_update(&app, err))?;
+    staged_update::clear(&app);
     let completed = app.state::<UpdateProgressState>().get();
     app.state::<UpdateProgressState>().replace(UpdateProgress {
         stage: "restarting",
@@ -2272,6 +2329,14 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
         }
         app.manage(UpdateProgressState::default());
+        #[cfg(desktop)]
+        {
+            app.manage(staged_update::UpdateLock::default());
+            // 上次在后台下好的更新包在这里装：主窗口还没显示，装上就直接重启进新版本。
+            if !NO_GUI.load(std::sync::atomic::Ordering::SeqCst) {
+                staged_update::install_at_launch(app.handle());
+            }
+        }
         #[cfg(any(desktop, target_os = "android"))]
         app.manage(youtube_proof::YoutubeProofState::default());
         #[cfg(desktop)]
@@ -2364,6 +2429,7 @@ pub fn run() {
         open_external,
         check_desktop_update,
         get_update_progress,
+        download_update,
         apply_update,
         pick_folder,
         pick_folders,
@@ -2396,6 +2462,7 @@ pub fn run() {
         open_external,
         check_desktop_update,
         get_update_progress,
+        download_update,
         apply_update,
         pick_folder,
         pick_folders,
@@ -2422,6 +2489,7 @@ pub fn run() {
         open_external,
         check_desktop_update,
         get_update_progress,
+        download_update,
         apply_update,
         pick_folder,
         pick_folders,

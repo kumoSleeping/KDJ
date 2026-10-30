@@ -35,6 +35,7 @@ export function ChromeActions({
   useEffect(() => { if (onTips) greetTipsOnNewBuild(); }, [onTips]);
   const updateReady = useUpdateStore((s) => Boolean(s.info?.newer));
   const latest = useUpdateStore((s) => s.info?.latest ?? "");
+  const staged = useUpdateStore((s) => Boolean(s.staged) && s.staged === s.info?.latest);
   const openUpdateSection = useUpdateStore((s) => s.openUpdateSection);
   const openUpdate = onOpenUpdate ?? openUpdateSection;
   return (
@@ -50,8 +51,8 @@ export function ChromeActions({
           type="button"
           className="kd-chrome-btn"
           data-update="true"
-          aria-label={latest ? `有新版本 v${latest} 待下载` : "有更新待下载"}
-          title={latest ? `待下载：v${latest}` : "待下载更新"}
+          aria-label={staged ? `新版本 v${latest} 已下载，重启即可更新` : latest ? `有新版本 v${latest} 待下载` : "有更新待下载"}
+          title={staged ? `v${latest} 已下载，下次启动时安装` : latest ? `待下载：v${latest}` : "待下载更新"}
           data-open={settingsOpen || undefined}
           onClick={openUpdate}
         >
