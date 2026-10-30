@@ -3249,6 +3249,7 @@ dependencies = [
  "rookie",
  "rusqlite",
  "rust-ini",
+ "semver",
  "serde",
  "serde_json",
  "sha1",

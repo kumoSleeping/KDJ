@@ -6,6 +6,7 @@
 //! 止步于"版本号 + 下载页 URL"，别把安装逻辑塞进来。
 
 use anyhow::{Context, Result};
+use semver::{Prerelease, Version};
 use serde::Serialize;
 
 const RELEASES_LATEST: &str = "https://api.github.com/repos/kumoSleeping/KDJ/releases/latest";
@@ -99,18 +100,33 @@ fn signed_android_apk_url(body: &serde_json::Value, prefer: AndroidAbi) -> Optio
     preferred.or(universal)
 }
 
-/// "v0.2.1" / "0.2.1" → (0, 2, 1)。解析不了当 (0,0,0)——
-/// 宁可把奇形怪状的 tag 当旧版本忽略，也别在这里 panic。
-fn triple(version: &str) -> (u64, u64, u64) {
-    let clean = version.trim().trim_start_matches('v');
-    let mut parts = clean
-        .split(['.', '-', '+'])
-        .map_while(|part| part.parse::<u64>().ok());
-    (
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-    )
+/// GitHub tag → 可比较的版本。tag 写作 `v1.1.0-rc19`，semver 会把 `rc19`
+/// 当成一个字母数字标识按字符串比（`rc10 < rc9`），所以把 `alpha`/`beta`/`rc`
+/// 后面直接跟的序号拆成 `rc.19`，让序号按数字比；规则与桌面
+/// `src-tauri/src/release_version.rs` 一致。解析不了返回 None。
+fn release_version(version: &str) -> Option<Version> {
+    let mut version = Version::parse(version.trim().trim_start_matches('v')).ok()?;
+    for stage in ["alpha", "beta", "rc"] {
+        let Some(sequence) = version.pre.as_str().strip_prefix(stage) else {
+            continue;
+        };
+        if !sequence.is_empty() && sequence.bytes().all(|byte| byte.is_ascii_digit()) {
+            if let Ok(pre) = Prerelease::new(&format!("{stage}.{sequence}")) {
+                version.pre = pre;
+            }
+        }
+        break;
+    }
+    Some(version)
+}
+
+/// `candidate` 是否比 `current` 新。任一边解析不了都算"不新"——
+/// 宁可把奇形怪状的 tag 当旧版本忽略，也别在这里 panic 或误报更新。
+fn is_newer(current: &str, candidate: &str) -> bool {
+    match (release_version(current), release_version(candidate)) {
+        (Some(current), Some(candidate)) => candidate > current,
+        _ => false,
+    }
 }
 
 pub async fn check(current: &str) -> Result<UpdateInfo> {
@@ -133,19 +149,19 @@ pub async fn check(current: &str) -> Result<UpdateInfo> {
     if tag.is_empty() {
         anyhow::bail!("GitHub 返回里没有 tag_name，可能还没有任何 Release");
     }
-    let is_newer = triple(&tag) > triple(current);
+    let newer = is_newer(current, &tag);
     let release_url = body["html_url"].as_str().unwrap_or_default();
     let url = if cfg!(target_os = "android") {
         match signed_android_apk_url(&body, host_android_abi()) {
             Some(url) => url,
-            None if is_newer => anyhow::bail!("新版本正在生成签名 APK，请稍后再检查"),
+            None if newer => anyhow::bail!("新版本正在生成签名 APK，请稍后再检查"),
             None => release_url,
         }
     } else {
         release_url
     };
     Ok(UpdateInfo {
-        newer: is_newer,
+        newer,
         latest: tag.trim_start_matches('v').to_string(),
         current: current.to_string(),
         url: url.to_string(),
@@ -163,17 +179,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_triples_compare_like_humans_expect() {
-        assert!(triple("v0.3.0") > triple("0.2.1"));
-        assert!(
-            triple("0.2.10") > triple("0.2.9"),
-            "逐段数值比，不是字符串比"
-        );
-        assert!(triple("1.0.0") > triple("0.99.99"));
-        assert_eq!(triple("v0.2.1"), triple("0.2.1"), "v 前缀不参与比较");
-        // 解析不了的当 (0,0,0)：奇形怪状的 tag 永远不会被当成"新版本"
-        assert_eq!(triple("nightly"), (0, 0, 0));
-        assert!(!(triple("nightly") > triple("0.0.1")));
+    fn versions_compare_like_humans_expect() {
+        assert!(is_newer("0.2.1", "v0.3.0"));
+        assert!(is_newer("0.2.9", "0.2.10"), "逐段数值比，不是字符串比");
+        assert!(is_newer("0.99.99", "1.0.0"));
+        assert!(!is_newer("0.2.1", "v0.2.1"), "v 前缀不参与比较");
+        assert!(!is_newer("v0.2.1", "0.2.1"));
+    }
+
+    #[test]
+    fn rc_tags_are_compared_by_sequence_number() {
+        for (current, tag, expected) in [
+            // 1.1.0-rc18 → rc19：曾经被当成同一个 (1,1,0)，安卓收不到提示
+            ("1.1.0-rc18", "v1.1.0-rc19", true),
+            ("1.1.0-rc19", "v1.1.0-rc18", false),
+            ("1.1.0-rc19", "v1.1.0-rc19", false),
+            // rc9 → rc10：semver 原样按字符串比会得出 rc10 < rc9
+            ("1.1.0-rc9", "v1.1.0-rc10", true),
+            ("1.1.0-rc10", "v1.1.0-rc9", false),
+            // 预发布 → 同号正式版是升级，反过来不是
+            ("1.1.0-rc19", "v1.1.0", true),
+            ("1.1.0", "v1.1.0-rc19", false),
+            // 正式版 → 下一个 patch 的 rc 是升级，不是回退
+            ("1.1.0", "v1.1.1-rc1", true),
+            ("1.1.1-rc1", "v1.1.0", false),
+            ("1.0.2", "v1.1.0-rc1", true),
+            ("1.1.0-rc19", "v1.0.9", false),
+        ] {
+            assert_eq!(is_newer(current, tag), expected, "{current} -> {tag}");
+        }
+    }
+
+    #[test]
+    fn unparseable_tags_are_never_newer() {
+        for tag in ["nightly", "", "v", "1.1", "v1.1.0-", "1.1.0-rc19 beta", "release-1.2.0", "latest"] {
+            assert!(!is_newer("1.1.0-rc19", tag), "{tag:?}");
+            assert!(!is_newer("0.0.1", tag), "{tag:?}");
+        }
+        assert!(!is_newer("not-a-version", "v9.9.9"), "本机版本解析不了时也不报更新");
     }
 
     #[test]

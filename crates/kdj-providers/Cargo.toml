@@ -37,6 +37,8 @@ percent-encoding = "2.3.2"
 qrcode = { version = "0.14.1", default-features = false, features = ["image"] }
 rand = "0.8"
 regex = "1.13.1"
+# 检查更新：比较 GitHub tag 与本机版本（含 rcN 预发布号）。
+semver = "1"
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls-no-provider", "json", "stream", "gzip", "charset", "http2", "cookies", "query", "form"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
