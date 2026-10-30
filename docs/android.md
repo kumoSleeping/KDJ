@@ -92,6 +92,10 @@ about 500 ms; elsewhere at 480 ms), and the click its release makes is swallowed
 system's drag of its files (or share link) to another app. A finger that moves first scrolls;
 the mouse's drags to a folder, a deck or the downloads key are not touched.
 
+A preview's fullscreen hides the status and navigation bars (`kdjAndroid.setImmersive`,
+`src/lib/windowFullscreen.ts`): Android has no Tauri window plugin, and the app already fills the
+screen. A swipe from the edge shows the bars for a moment; the back key leaves fullscreen.
+
 The back key closes the topmost layer (a drawer, a menu, a floating window), one per press,
 by handing the page an Escape (`src/lib/androidBack.ts`, through Tauri's `back-button` event;
 `core:app` listener permissions in `capabilities/mobile-player.json`). When nothing takes it,

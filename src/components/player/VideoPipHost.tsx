@@ -21,7 +21,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { createPortal } from "react-dom";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { isWindowFullscreen, setWindowFullscreen } from "../../lib/windowFullscreen";
 import "./AndroidVideoPip.css";
 import { canAndroidVideoPip, configureAndroidVideoPip, enterAndroidVideoPip } from "../../lib/androidVideoPip";
 import { PictureInPicture2 } from "lucide-react";
@@ -281,7 +281,7 @@ export function VideoPipHost() {
     if (next) setVideoFullscreen(true);
     fullscreenTransitionRef.current = true;
     try {
-      await getCurrentWindow().setFullscreen(next);
+      await setWindowFullscreen(next);
       if (fullscreenRequestRef.current === request && !next) {
         setVideoFullscreen(false);
       }
@@ -486,8 +486,7 @@ export function VideoPipHost() {
       if (!fullscreenRef.current || fullscreenTransitionRef.current) return;
       cancelAnimationFrame(syncFrame);
       syncFrame = requestAnimationFrame(() => {
-        void getCurrentWindow()
-          .isFullscreen()
+        void isWindowFullscreen()
           .then((nativeFullscreen) => {
             if (nativeFullscreen || !fullscreenRef.current || fullscreenTransitionRef.current) {
               return;
@@ -522,7 +521,7 @@ export function VideoPipHost() {
 
   useEffect(
     () => () => {
-      if (fullscreenRef.current) void getCurrentWindow().setFullscreen(false);
+      if (fullscreenRef.current) void setWindowFullscreen(false).catch(() => undefined);
       void youtubePreviewRef.current?.dispose();
       youtubePreviewRef.current = null;
       localSynchronizerRef.current?.dispose();
