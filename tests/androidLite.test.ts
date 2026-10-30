@@ -1,3 +1,4 @@
+// @run tsx
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile, mkdtemp, mkdir, writeFile, copyFile, rm } from "node:fs/promises";

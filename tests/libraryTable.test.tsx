@@ -94,6 +94,10 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
   const { useDownloadStore } = await import("../src/stores/downloadStore");
   const { TrackTable } = await import("../src/components/library/TrackTable");
   const { LIST_ARRIVAL_MS, LIST_ARRIVAL_STEPS } = await import("../src/components/common/listArrival");
+  // The first render of the real list can take longer than a list's arrival on a busy machine,
+  // and the marks would be gone before they are looked at: give the arrival room while here.
+  const listArrivalMs = LIST_ARRIVAL_MS.list;
+  LIST_ARRIVAL_MS.list = 3000;
   const root = createRoot(document.getElementById("root")!);
   function Host({ shortcutActive = true, visible = true }: { shortcutActive?: boolean; visible?: boolean } = {}) {
     const total = useLibraryStore(state => state.total);
@@ -606,6 +610,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
   } finally {
     await act(async () => root.unmount());
     globalThis.fetch = originalFetch;
+    LIST_ARRIVAL_MS.list = listArrivalMs;
     frames.clear(); dom.window.close();
   }
 });

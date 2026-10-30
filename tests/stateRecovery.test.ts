@@ -34,6 +34,7 @@ test("reconnect downloads reconcile missed completions without regressing newer 
   const store = loadStore("src/stores/downloadStore.ts", {
     zustand: { create }, "../lib/api": { api: { downloads: () => pending.promise } },
     "../lib/downloadDisplay": downloadDisplay, "../lib/downloadOrder": downloadOrder,
+    "../lib/diagnostics": { noteAction() {} },
     "../lib/queueTaskDraft": { forgetQueueDraft() {}, rememberVideoEnqueue() {} },
     "../lib/downloadDisplayCache": {
       hintForDownload() {}, pruneDownloadDisplayCache() {}, rememberDownloadDisplays() {}, syncDownloadDisplayCache() {},
@@ -139,6 +140,7 @@ function appStore(api: Record<string, unknown>) {
     "./libraryStore": { useLibraryStore: noStore },
     "./streamBrowseStore": { useStreamBrowseStore: noStore },
     "./sidebarVisibilityStore": { useSidebarVisibilityStore: noStore },
+    "./aiStore": { useAiStore: { getState: () => ({ handleEvent() {} }) } },
   };
   const exports: Record<string, any> = {};
   vm.runInNewContext(ts.transpileModule(readFileSync("src/stores/appStore.ts", "utf8"), {

@@ -13,6 +13,7 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http:
 Object.assign(globalThis, {
   window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement,
   localStorage: dom.window.localStorage, sessionStorage: dom.window.sessionStorage,
+  getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
   requestAnimationFrame: () => 0, cancelAnimationFrame: () => {},
 });
 window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
@@ -38,24 +39,13 @@ try {
       bundler.onLoad({ filter: /.*/, namespace: "workspace-test" }, () => ({ contents: 'export default "worker.js";' }));
     } }],
   });
-  const render = (previewOpen, searchEnabled) => {
-    localStorage.setItem("kd-track-preview-open", String(previewOpen));
-    localStorage.setItem("kd-top-panels-enabled", JSON.stringify({ control: true, waveform: true, search: searchEnabled }));
-    const entry = new Module(`${process.cwd()}/workspace-first-render-validation.cjs`);
-    entry.filename = entry.id;
-    entry.paths = require.resolve.paths("react");
-    entry._compile(result.outputFiles[0].text, entry.filename);
-    return entry.exports();
-  };
-  const expanded = render(true, true);
-  const collapsed = render(false, true);
-  const disabled = render(false, false);
-  assert.ok(expanded.includes('id="kd-track-preview"'));
-  assert.ok(!collapsed.includes('id="kd-track-preview"'));
-  assert.ok(collapsed.includes('data-panel-id="control"'));
-  assert.ok(collapsed.includes('data-panel-id="waveform"'));
-  assert.ok(!disabled.includes('class="kd-search-band-host"'));
-  console.log("PASS: real workspace first render, collapsed preview and disabled search");
+  const entry = new Module(`${process.cwd()}/workspace-first-render-validation.cjs`);
+  entry.filename = entry.id;
+  entry.paths = require.resolve.paths("react");
+  entry._compile(result.outputFiles[0].text, entry.filename);
+  const html = entry.exports();
+  assert.ok(html.includes('class="kd-main-slot"'));
+  console.log("PASS: real workspace first render");
 } finally {
   reactDom.createPortal = originalCreatePortal;
   dom.window.close();

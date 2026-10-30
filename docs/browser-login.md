@@ -143,4 +143,4 @@ Windows 上（2026-10-14，候选构建）：KDJ 启动的临时窗口里 Google
 收藏数显示 0 而浏览器里是 184。
 
 验证命令：`cargo test -p kdj-providers --lib browser`，
-`node scripts/test-library-ui.mjs tests/youtube-login-ui.test.ts`。
+`npm test -- youtube-login-ui`。

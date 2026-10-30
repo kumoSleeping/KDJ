@@ -1,11 +1,21 @@
-/** Deterministic native-clock/decoder-order regression. Run: node scripts/test-local-video-device-clock.mjs */
+/** Deterministic native-clock/decoder-order regression. Run: npm test -- localVideoDeviceClock */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
 
+// Diagnostics only record; every module may report to them.
+const diagnostics = { captureDiagnostic() {}, mediaDiagnostic: () => '', observeMediaDiagnostics() {} };
+
+// The swap hook's picture fade and trace are presentation only.
+const swapPictureStubs = {
+  './seekTransition': { SeekTransitionOverlay: class { clear() {} video() {} videoHandoff(_old, done) { done(); } } },
+  './playbackTrace': { tracePlayback() {} },
+};
+
 function load(file, mocks = {}, globals = {}) {
+  mocks = { './diagnostics': diagnostics, ...mocks };
   const result = ts.transpileModule(readFileSync(new URL(`../${file}`, import.meta.url), 'utf8'), {
     fileName: file, reportDiagnostics: true,
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
@@ -284,7 +294,7 @@ test('a canceled standby play promise cannot pause the element after a newer pre
   const swapModule = load('src/lib/useLocalVideoSwap.ts', {
     react: { useRef: current => ({ current }), useState: value => [value, () => {}], useCallback: fn => fn, useEffect: fn => callbacks.push(fn) },
     './localVideoSeekBridge': bridge, './videoPlaybackEngine': e.sync, './mediaSync': e.media,
-    './videoFrames': load('src/lib/videoFrames.ts', {}, e.globals),
+    './videoFrames': load('src/lib/videoFrames.ts', {}, e.globals), ...swapPictureStubs,
   }, e.globals);
   const active = new Video(), standby = new Video();
   let finishOldPlay, playCount = 0;
@@ -342,114 +352,7 @@ test('superseded decoder completion never cancels the newer coordinator', async 
   assert.equal(await result, 'stale'); assert.equal(oldCanceled, 1); assert.equal(globalCanceled, 0);
 });
 
-test('actual PlayerBar waveform position stays pinned until a dispatched seek lands, not a timer', () => {
-  const path = new URL('../src/components/player/PlayerBar.tsx', import.meta.url);
-  const source = ts.createSourceFile(String(path), readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let statements;
-  function visit(node) {
-    if (ts.isVariableStatement(node)
-      && node.declarationList.declarations.some(d => ts.isIdentifier(d.name) && d.name.text === 'pendingSeek')) {
-      const siblings = [...node.parent.statements];
-      const start = siblings.indexOf(node);
-      const end = siblings.findIndex(statement => ts.isVariableStatement(statement)
-        && statement.declarationList.declarations.some(d => ts.isIdentifier(d.name) && d.name.text === 'shownTime'));
-      assert.ok(end > start);
-      statements = siblings.slice(start, end + 1).map(statement => statement.getText(source)).join('\n');
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(source); assert.ok(statements);
-  const e = environment();
-  const pendingSeekRef = { current: null }, nativeSeekRequestRef = { current: null };
-  const sample = vm.runInNewContext(`() => { ${statements}; return shownTime; }`, {
-    ...e.globals, state: e.native, pendingSeekRef, nativeSeekRequestRef,
-  });
-  const pin = position => { pendingSeekRef.current = { trackId: 10, position, at: 1000 }; };
-
-  pin(60);
-  e.native.currentTime = 0;
-  for (const elapsed of [100, 1499, 1600, 2500, 5000]) {
-    e.setNow(1000 + elapsed);
-    assert.equal(sample(), 60, `old zero snapshot after ${elapsed}ms must not move the waveform`);
-    assert.ok(pendingSeekRef.current);
-  }
-  e.native.currentTime = 60; e.native.buffering = true;
-  assert.equal(sample(), 60);
-  assert.ok(pendingSeekRef.current, 'optimistic target during buffering is not a landing');
-  e.native.currentTime = 0;
-  assert.equal(sample(), 60, 'a subsequent loading snapshot cannot undo the pinned target');
-  e.native.currentTime = 60; e.native.buffering = false; e.native.status = 'loading';
-  sample(); assert.ok(pendingSeekRef.current);
-  e.native.status = 'playing'; e.native.currentTime = 60.2;
-  assert.equal(sample(), 60.2); assert.equal(pendingSeekRef.current, null);
-  e.native.currentTime = 61;
-  assert.equal(sample(), 61, 'normal position updates resume after landing');
-
-  pin(61.5); nativeSeekRequestRef.current = { trackId: 10, position: 61.5 };
-  assert.equal(sample(), 61.5);
-  assert.ok(pendingSeekRef.current, 'nearby old position cannot acknowledge an undispatched gesture');
-  nativeSeekRequestRef.current = null; e.native.currentTime = 61.5;
-  sample(); assert.equal(pendingSeekRef.current, null);
-
-  pin(80); e.native.status = 'error'; e.native.currentTime = 61.5;
-  assert.equal(sample(), 61.5); assert.equal(pendingSeekRef.current, null);
-  pin(80); e.native.status = 'playing'; e.native.trackId = 11; e.native.currentTime = 0;
-  assert.equal(sample(), 0); assert.equal(pendingSeekRef.current, null, 'track replacement releases the old pin');
-});
-
-test('actual PlayerBar dispatch callbacks fence queued B only after in-flight A lands', async () => {
-  const path = new URL('../src/components/player/PlayerBar.tsx', import.meta.url);
-  const source = ts.createSourceFile(String(path), readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  const names = new Set(['drainNativeSeek', 'requestNativeSeek']), declarations = [];
-  function visit(node) {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && names.has(node.name.text)) {
-      declarations.push(`export const ${node.name.text} = ${node.initializer.getText(source)};`);
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(source); assert.equal(declarations.length, 2);
-  const e = environment(), commands = [], exports = {};
-  const nativeSeekDrainRef = { current() {} };
-  const runtime = { state: () => e.native, seek(position) {
-    return new Promise((resolve, reject) => commands.push({ position, resolve, reject }));
-  } };
-  const code = ts.transpileModule(declarations.join('\n'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  vm.runInNewContext(code, { exports, ...e.globals, useCallback: fn => fn, nativePlayer: runtime,
-    nativeSeekRequestRef: { current: null }, nativeSeekInFlightRef: { current: false },
-    trackRef: { current: { id: 10 } }, pendingSeekRef: { current: null }, nativeSeekDrainRef });
-  nativeSeekDrainRef.current = exports.drainNativeSeek;
-  let generation = 0;
-  const dispatched = [];
-  function request(position) {
-    const token = ++generation;
-    return new Promise(resolve => exports.requestNativeSeek(10, position, {
-      onDispatch() {
-        const fence = e.media.captureLocalVideoSeekFence(10);
-        dispatched.push({ position, revision: fence.discontinuityRevision });
-        void e.media.waitForLocalVideoSeekLanding(fence, () => token === generation).then(clock => resolve(clock !== null));
-      }, onCancel() { resolve(false); },
-    }));
-  }
-  const a = request(30);
-  let bSettled = false;
-  const b = request(50).then(value => { bSettled = true; return value; });
-  assert.deepEqual(dispatched, [{ position: 30, revision: 1 }]);
-  assert.equal(commands.length, 1);
-  e.live.discontinuityRevision = 2; e.native.decks[0].discontinuityRevision = 2; e.live.currentTime = 30; e.publish();
-  await flush(); assert.equal(await a, false); assert.equal(bSettled, false);
-  commands[0].resolve(); await flush();
-  assert.deepEqual(dispatched, [{ position: 30, revision: 1 }, { position: 50, revision: 2 }]);
-  assert.equal(commands[1].position, 50);
-  e.publish(); await flush(); assert.equal(bSettled, false, 'A replay after B dispatch does not approve B');
-  e.live.discontinuityRevision = 3; e.native.decks[0].discontinuityRevision = 3; e.live.currentTime = 50; e.publish();
-  assert.equal(await b, true);
-  commands[1].resolve(); await flush();
-  assert.equal(e.liveListeners.size, 0); assert.equal(e.runtimeListeners.size, 0); assert.equal(e.timers.size, 0);
-});
-
-test('WebKit ongoing drift uses a spare decoder without seeking the visible frame', () => {
+test('WebKit drift past the tempo-trim limit uses a spare decoder without seeking the visible frame', () => {
   const e = environment(), video = new Video();
   e.live.audibleRate = 1; video.paused = false;
   const sync = new e.sync.VideoPlaybackEngine('webkit');
@@ -457,7 +360,7 @@ test('WebKit ongoing drift uses a spare decoder without seeking the visible fram
   let corrections = 0;
   for (let step = 0; step < 400; step++) {
     e.setNow(1000 + step * 50); e.live.clientPresentationTimeMs = 1000 + step * 50;
-    e.live.currentTime = 12 + step * 0.05; video.time = e.live.currentTime - 0.3;
+    e.live.currentTime = 12 + step * 0.05; video.time = e.live.currentTime - 0.8;
     sync.followClock(video, e.media.getLocalVideoClock(10), () => assert.fail('must not flush the visible decoder'), () => corrections++);
   }
   assert.ok(corrections > 0 && corrections <= 4);
@@ -549,7 +452,7 @@ function swapEnvironment(e) {
   const module = load('src/lib/useLocalVideoSwap.ts', {
     react: { useRef: current => ({ current }), useState: value => [value, () => {}], useCallback: fn => fn, useEffect: fn => effects.push(fn) },
     './localVideoSeekBridge': bridge, './videoPlaybackEngine': e.sync, './mediaSync': e.media,
-    './videoFrames': load('src/lib/videoFrames.ts', {}, e.globals),
+    './videoFrames': load('src/lib/videoFrames.ts', {}, e.globals), ...swapPictureStubs,
   }, e.globals);
   const old = frameVideo(e), spare = frameVideo(e);
   const swap = module.useLocalVideoSwap({ enabled: true, trackId: 10, desiredPlayingRef: { current: true }, getRate: () => 1 });

@@ -1,5 +1,5 @@
 // The progressive waveform of an online song (src/lib/waveformCache.ts): where on the rail the
-// server's prefixes and its finished waveform land. Runs bundled (scripts/test-library-ui.mjs):
+// server's prefixes and its finished waveform land. Runs bundled (scripts/bundle-test.mjs):
 // waveformCache reaches the native player client through the API module.
 import assert from "node:assert/strict";
 import test from "node:test";

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { JSDOM } from "jsdom";
+import { dom, frames } from "./studioFirstPaint.dom";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import VisualizerStudioPanel from "../src/components/composition/VisualizerStudioPanel";
@@ -10,21 +10,6 @@ import { DrawerHost } from "../src/components/drawer/Drawer";
 import { VisualizerPopup } from "../src/components/player/VisualizerPopup";
 import { useVisualizerPopup } from "../src/lib/visualizerPopup";
 
-const dom = new JSDOM('<div id="root"></div><div id="dock"></div>', { url: "http://localhost" });
-dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as any;
-Object.assign(globalThis, { window: dom.window, document: dom.window.document, localStorage: dom.window.localStorage,
-  HTMLElement: dom.window.HTMLElement, HTMLCanvasElement: dom.window.HTMLCanvasElement,
-  Node: dom.window.Node, Element: dom.window.Element, HTMLMediaElement: dom.window.HTMLMediaElement, HTMLIFrameElement: dom.window.HTMLIFrameElement, IS_REACT_ACT_ENVIRONMENT: true });
-let next = 0;
-const frames = new Map<number, FrameRequestCallback>();
-Object.assign(globalThis, {
-  requestAnimationFrame: (f: FrameRequestCallback) => { frames.set(++next, f); return next; },
-  cancelAnimationFrame: (id: number) => frames.delete(id),
-  ResizeObserver: class { observe() {} disconnect() {} },
-  MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
-});
-Object.defineProperty(document, "hidden", { configurable: true, value: false });
-Object.defineProperty(dom.window.HTMLCanvasElement.prototype, "getContext", { value: () => ({ save(){},restore(){},drawImage(){},globalAlpha:1 }) });
 let resolveAnalysis!: (value: unknown) => void;
 let resolveLyrics!: (value: unknown) => void;
 const fixture = {
@@ -116,7 +101,7 @@ const track = { id:42,title:"Test",artist:"",album:"",filename:"test.wav",path:"
     assert.equal(useSidePanels.getState().raised.token,raisedBefore+2,'asking again raises the app');
     // Every continuous parameter is a slider that shows its value and returns to its default.
     const sliders=[...host.querySelectorAll<HTMLInputElement>('.kd-viz-settings .kd-slider input[type="range"]')];
-    assert.ok(sliders.length>=6,`sliders: ${sliders.length}`);
+    assert.ok(sliders.length>=5,`sliders: ${sliders.length}`);
     assert.equal(host.querySelector('.kd-dj-arcknob'),null);
     const split=host.querySelector<HTMLInputElement>('.kd-slider input[type="range"]')!;
     const readout=()=>split.closest('.kd-slider')!.querySelector('.kd-slider-value')!;

@@ -20,6 +20,7 @@ function fixture() {
       removeLocalStorage: key => storage.delete(key), writeLocalStorageNow: (key,value) => storage.set(key,value), writeLocalStorageSoon: (key,value) => storage.set(key,value) },
     './playTrack': { playTrack: track => { state.current = track; } },
     '@tauri-apps/api/event': { emitTo: async () => {} },
+    './windowRole': { isEditorWindow: false },
   };
   function load(name) {
     if (stubs[name]) return stubs[name];

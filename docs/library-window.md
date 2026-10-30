@@ -32,7 +32,7 @@
 
 ## 自动验证
 
-- `npm run test:library`：请求竞态、超时与重试、远跳、缓存上限、滚动条几何、行的到场，以及真实 React 行列表和状态模块的 JSDOM 测试（`tests/libraryTable.test.tsx`、`tests/resultTable.test.tsx`）。
+- `npm test`：请求竞态、超时与重试、远跳、缓存上限、滚动条几何、行的到场，以及真实 React 行列表和状态模块的 JSDOM 测试（`tests/libraryTable.test.tsx`、`tests/resultTable.test.tsx`）。
 - `npm run typecheck`。
 - `cargo test -p kdj-library --lib library_index_`：完整索引与分页在主副排序/筛选下顺序一致，以及一万条数据库记录的直接末尾摘要查询。
 - `cargo check -p kdj-server --lib`。

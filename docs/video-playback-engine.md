@@ -44,7 +44,7 @@
 
 ## 验证
 
-`node scripts/test-local-video-device-clock.mjs` 验证设备时钟、连续跳转、合成预览、真实帧回调判定、取消资源释放。`npm run typecheck` 验证前端调用约束。
+`npm test -- localVideoDeviceClock` 验证设备时钟、连续跳转、合成预览、真实帧回调判定、取消资源释放。`npm run typecheck` 验证前端调用约束。
 
 实机验收需要在 Tauri 壳内分别覆盖本地和网络视频的普通播放、暂停跳转、播放中连续跳转、详情/浮窗/系统 PiP 切换，以及混合编辑的多轨、片段边界和速度变化。记录实测数据后才能判断卡顿是否消除；模拟测试不能替代跨平台解码性能验收。
 
