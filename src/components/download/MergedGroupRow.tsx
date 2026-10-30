@@ -505,7 +505,9 @@ export function MergedGroupRow({
         }}
         onPointerDown={(event) => {
           if (event.pointerType === "mouse") {
-            if (!selectable || selectionMode || event.metaKey || event.ctrlKey || event.shiftKey) return;
+            // Picking still drags: a picked row carries the whole pick (ResultTable `dragSources`), and
+            // the mousedown above has already kept WebKit's own drag from starting, so this is the only one.
+            if (!selectable || event.metaKey || event.ctrlKey || event.shiftKey) return;
             pointerDragCleanupRef.current?.();
             pointerDragCleanupRef.current = onPointerDragStart?.(event, () => {
               suppressClickRef.current = true;
