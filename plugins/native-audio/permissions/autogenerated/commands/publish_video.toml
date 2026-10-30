@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-publish-video"
+description = "Enables the publish_video command without any pre-configured scope."
+commands.allow = ["publish_video"]
+
+[[permission]]
+identifier = "deny-publish-video"
+description = "Denies the publish_video command without any pre-configured scope."
+commands.deny = ["publish_video"]

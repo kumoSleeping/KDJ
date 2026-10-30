@@ -1101,6 +1101,8 @@ export interface KdjBridge {
   }) => Promise<string>;
   openPath: (path: string) => Promise<void>;
   revealPath: (path: string) => Promise<void>;
+  /** Android：把导出的视频从应用私有目录挪进系统相册（Movies/KDJ），返回它在那里的路径。 */
+  publishVideo?: (options: { path: string; name: string }) => Promise<{ uri: string; path: string }>;
   /** 从曲库启动 Finder / Explorer / Android 的真文件拖动；iOS/浏览器不提供。 */
   startFileDrag?: (options: {
     paths: string[];

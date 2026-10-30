@@ -125,6 +125,9 @@ async function createTauriBridge(): Promise<KdjBridge> {
       android ? openLocalPath(path) : tauriInvoke<void>("open_path", { path }),
     revealPath: (path: string) =>
       android ? openLocalPath(path) : tauriInvoke<void>("reveal_path", { path }),
+    publishVideo: android
+      ? (options) => tauriInvoke<{ uri: string; path: string }>("plugin:native-audio|publish_video", options)
+      : undefined,
     startFileDrag: android
       ? async ({ paths, label }) => {
           await startFileDrag(paths, label);

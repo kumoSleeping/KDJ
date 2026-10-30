@@ -9,6 +9,7 @@ import { useAppStore } from "./appStore";
 import { isEditorWindow, usesVisualizerWindow } from "../lib/windowRole";
 import { ensureFfmpegForExport } from "../lib/ffmpegRequired";
 import { requestVisualizerExports, type VisualizerExportCommand } from "../lib/kvjWindow";
+import { getBridge } from "../lib/bridge";
 
 interface State {
   tasks: VisualizerExportTask[];
@@ -80,8 +81,15 @@ async function pump(): Promise<void> {
           }
         });
         if (final.phase === "failed") captureDiagnostic("visualizer-export", "encoder", final.error, `width=${task.width} height=${task.height} fps=${task.fps}`);
-        update(task.id, { phase: final.phase, progress: final.progress, status: final.status,
-          error: final.error, outputPath: final.output_path || task.outputPath });
+        let outputPath = final.output_path || task.outputPath, error = final.error;
+        // A phone's download folder is the app's own: the video goes on to the gallery (Movies/KDJ).
+        const publish = getBridge().publishVideo;
+        if (final.phase === "done" && publish) {
+          update(task.id, { status: "正在存入相册" });
+          try { outputPath = (await publish({ path: outputPath, name: task.filename })).path; }
+          catch (failure) { error = `视频已导出到 ${outputPath}，但没能存入相册：${message(failure)}`; }
+        }
+        update(task.id, { phase: final.phase, progress: final.progress, status: final.status, error, outputPath });
       } catch (error) {
         const canceled = error instanceof DOMException && error.name === "AbortError";
         if (!canceled) captureDiagnostic("visualizer-export", "frame-producer", error, `width=${task.width} height=${task.height} fps=${task.fps}`);
