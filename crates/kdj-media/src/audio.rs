@@ -60,6 +60,14 @@ pub fn encode(path: &Path, scratch: &Path, source: usize, rate: Option<u32>, bit
         Ok(())
     })?;
     total += decoded.saturating_sub(shape.skip);
+    // Not every encoder drains its delay at end of stream (MediaCodec's c2.android.aac does
+    // not): silence after the song pushes the last real samples out; the edit hides it.
+    let mut tail = priming as usize + aac::FRAME;
+    while tail > 0 {
+        let n = tail.min(aac::FRAME);
+        store(encoder.encode(&silence[..n * channels as usize])?, &mut samples)?;
+        tail -= n;
+    }
     store(encoder.finish()?, &mut samples)?;
     drop(store);
     file.into_inner().map_err(|e| e.into_error())?.sync_data()?;
