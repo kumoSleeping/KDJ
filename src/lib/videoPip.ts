@@ -106,8 +106,6 @@ export type VideoPipSession =
       title: string;
       author: string;
       autoPlay: boolean;
-      /** A `.kdjv` project: its picture is drawn live (KdjvLivePicture), never loaded as a video. */
-      project?: boolean;
     };
 
 /** Both sessions show the same video, the one the host keeps loaded (VideoPipHost `sessionKey`). */

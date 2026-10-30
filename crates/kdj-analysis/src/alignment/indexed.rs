@@ -1,12 +1,12 @@
 //! Bounded-block retrieval and global correspondence assembly. Coarse scores are
 //! proposals only; all accepted positions still pass the acoustic verifier.
 use super::*;
-use kdj_core::composition::CompositionVideoSection;
+use super::MatchedSection;
 
 #[derive(Clone, Default)]
 pub struct RecordingMatch {
     pub offset_ms: Option<f64>,
-    pub sections: Vec<CompositionVideoSection>,
+    pub sections: Vec<MatchedSection>,
     pub fuzzy: PositionSuggestions,
     /// Coherent forward-only short-version alternatives, always explicit review.
     pub short_review: Vec<Vec<FuzzyPlacement>>,

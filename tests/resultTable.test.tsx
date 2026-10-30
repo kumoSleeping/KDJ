@@ -71,7 +71,7 @@ test("the result list: every presented list cascades once, and an opened collect
   let asked = 0;
   const base: ResultTableProps = {
     items: [], video: null, loading: false, searched: true, delivery: { id: 0, top: 0, left: 0 }, paneShown: true,
-    layout: "wide", selected: new Set(), selectionMode: false, onSelectionModeChange: noop,
+    selected: new Set(), selectionMode: false, onSelectionModeChange: noop,
     expandedGroups: new Set(), collapsedItems: new Set(), sourceIndex: {}, inspectedGroup: null,
     collectionShown: 50, hasMoreRows: false, loadingMoreRows: false, onShowMoreRows: () => { asked += 1; },
     onToggleSelect: noop, onToggleExpand: noop, onPickSource: noop, onToggleItem: noop, onToggleItemAll: noop,

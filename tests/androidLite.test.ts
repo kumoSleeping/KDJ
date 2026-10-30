@@ -29,7 +29,7 @@ test("Android module graph omits production panels, keeps the visualizer and its
     const { default: config } = await import("../vite.tauri.config");
     const plugin = (config as any).plugins.find((item: any) => item.name === "kdj-mobile-media-panels");
     assert.ok(plugin);
-    for (const name of ["LaneEditor", "KdjvLivePicture", "AiPanel", "FfmpegPanel"]) {
+    for (const name of ["KvjApp"]) {
       const id = plugin.resolveId(`../${name}`);
       assert.ok(id);
       assert.match(plugin.load(id), /return null/);
@@ -43,7 +43,7 @@ test("Android module graph omits production panels, keeps the visualizer and its
   }
 });
 
-test("postinit adds native PiP without broadening network permissions, idempotently", async () => {
+test("postinit adds native PiP and locks landscape without broadening network permissions, idempotently", async () => {
   const root = await mkdtemp(join(tmpdir(), "kdj-android-manifest-"));
   try {
     const script = await readFile("scripts/android-postinit.sh", "utf8");
@@ -55,6 +55,7 @@ test("postinit adds native PiP without broadening network permissions, idempoten
     execFileSync("python3", ["-c", program!, gradle, manifest]);
     const result = await readFile(manifest, "utf8");
     assert.match(result, /android:supportsPictureInPicture="true"/);
+    assert.match(result, /android:screenOrientation="sensorLandscape"/);
     assert.match(result, /android:networkSecurityConfig="@xml\/kdj_network_security_config"/);
     assert.match(await readFile(gradle, "utf8"), /"false"/);
     execFileSync("python3", ["-c", program!, gradle, manifest]);

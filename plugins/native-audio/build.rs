@@ -24,6 +24,7 @@ const COMMANDS: &[&str] = &[
     "publish_video",
     "start_file_drag",
     "pick_library_folder",
+    "install_update_apk",
 ];
 
 fn main() {

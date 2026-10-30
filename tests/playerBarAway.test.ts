@@ -23,6 +23,7 @@ import {
   readPlayerBarCollapsed,
   usePlayerBarAway,
 } from "../src/lib/playerBarAway";
+import { windowIsTall } from "../src/lib/useLayoutMode";
 import {
   advancePlayerBar,
   endPlayerBarSlide,
@@ -110,23 +111,21 @@ test("each shape of the window keeps its own choice: a wide one the bar, a tall 
 });
 
 test("the bar is only away where the bubble can stand in for it", () => {
-  assert.equal(playerBarAwayWanted(true, true, true), true);
-  assert.equal(playerBarAwayWanted(false, true, true), false);
-  assert.equal(playerBarAwayWanted(true, false, true), false, "no song: nothing for the bubble to show");
-  assert.equal(playerBarAwayWanted(true, true, false), false, "a phone keeps its bar");
+  assert.equal(playerBarAwayWanted(true, true), true);
+  assert.equal(playerBarAwayWanted(false, true), false);
+  assert.equal(playerBarAwayWanted(true, false), false, "no song: nothing for the bubble to show");
 });
 
 test("an app that has the window sends the bar away without touching the listener's choice", () => {
   const stored = storage();
   relaunch();
   song = true;
-  assert.equal(playerBarAwayWanted(false, true, true, true), true, "the bubble is the window's transport");
-  assert.equal(playerBarAwayWanted(false, false, true, true), false, "no song: nothing for the bubble to show");
-  assert.equal(playerBarAwayWanted(false, true, false, true), false, "a phone keeps its bar");
+  assert.equal(playerBarAwayWanted(false, true, true), true, "the bubble is the window's transport");
+  assert.equal(playerBarAwayWanted(false, false, true), false, "no song: nothing for the bubble to show");
 
   // A wide window with the bar up: full-screen lyrics take the window, then give it back.
   let taken = true;
-  const drive = () => advancePlayerBar(playerBarAwayWanted(bar().collapsed, song, true, taken));
+  const drive = () => advancePlayerBar(playerBarAwayWanted(bar().collapsed, song, taken));
   drive();
   assert.equal(bar().phase, "leaving");
   assert.equal(info().barAway, true, "the bubble is kept, with its transport, from the start of the slide");
@@ -352,5 +351,28 @@ test("whatever the listener does, in any order, the bar or the bubble is on scre
     const name = names[random(names.length)];
     moves[name]();
     pass(`after step ${step} (${name}), phase ${bar().phase}`);
+  }
+});
+
+// Last: it gives the modules a window for a moment, which the tests above run without.
+test("a phone is never a tall window: its bar starts up and can be put away", () => {
+  const stored = storage();
+  const previous = (globalThis as { window?: unknown }).window;
+  // Even a tall viewport (a rotation on its way, split screen) keeps a phone's wide shape.
+  Object.assign(globalThis, { window: {
+    kdj: { platform: "android" },
+    localStorage: stored,
+    matchMedia: () => ({ matches: true, addEventListener() {}, removeEventListener() {} }),
+  } });
+  try {
+    assert.equal(windowIsTall(), false);
+    assert.equal(readPlayerBarCollapsed(), false, "the bar is up until the listener puts it away");
+    usePlayerBarAway.setState({ tall: false, collapsed: false });
+    bar().setCollapsed(true);
+    assert.equal(stored.getItem("kd-player-bar-collapsed"), "true");
+    assert.equal(readPlayerBarCollapsed(), true, "and stays away at the next launch");
+    assert.equal(playerBarAwayWanted(bar().collapsed, true), true);
+  } finally {
+    Object.assign(globalThis, { window: previous });
   }
 });

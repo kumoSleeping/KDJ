@@ -259,7 +259,6 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
           typeof source.payload.page_title === "string" ? source.payload.page_title : undefined,
         max_height: Number(source.payload.max_height) || 1080,
         audio_only: Boolean(source.payload.audio_only),
-        transcode: Boolean(source.payload.transcode),
         title: source.title,
         artist: source.artists.join(", "),
         cover: source.cover,

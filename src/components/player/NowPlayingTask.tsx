@@ -13,7 +13,6 @@ import { newerRevision } from "../../lib/coverLoad";
 import { useSongColor, useSongColorAvailable } from "../../lib/songColor";
 import { songSwapEntranceDelay } from "../../lib/songSwapMotion";
 import { useWindowTaken } from "../../lib/windowTaken";
-import { useLaneEditor } from "../../stores/laneEditorStore";
 import { useLibraryStore } from "../../stores/libraryStore";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
 import type { TaskBubbleSpec } from "../tasks/taskBubbleSchema";
@@ -30,13 +29,10 @@ import { MiniPlayerKeys } from "./MiniPlayer";
 export const NOW_PLAYING_TASK = "now-playing";
 
 /**
- * A song started as a preview is not announced: the editor playing a project open in it, or the
- * visualizer configuration playing the song it is set up for. The listener started it there and
- * is looking at it there.
+ * A song started as a preview is not announced: the visualizer configuration playing the song it
+ * is set up for. The listener started it there and is looking at it there.
  */
 function previewing(trackId: number): boolean {
-  const editor = useLaneEditor.getState();
-  if (editor.open && editor.projects.some(project => project.trackId === trackId)) return true;
   return useVisualizerStudioStore.getState().track?.id === trackId;
 }
 const MINI_PLAYER_KEYS = <MiniPlayerKeys />;

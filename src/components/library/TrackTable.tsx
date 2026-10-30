@@ -21,9 +21,7 @@ import {
   Trash2,
   Video,
   Image as ImageIcon,
-  Clapperboard,
 } from "lucide-react";
-import { useLaneEditor } from "../../stores/laneEditorStore";
 import { libraryDemand, restoreLibraryAnchor } from "../../lib/libraryViewport";
 import { listScrollsItself, rowListPadding, useRowList, useScrollMotion } from "../common/rowList";
 import { scrollTopTo } from "../../lib/wheelScroll";
@@ -89,10 +87,7 @@ import { pointerAccepts } from "../../lib/dragRefusal";
 import { pointerTrackDropAt, type PointerTrackDrop } from "../../lib/pointerTrackDrop";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
-import { exportProject } from "../../lib/kdjvPlay";
 import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isImageTrack, isProjectTrack, isVideoTrack, thumbUrl } from "../../lib/format";
-import { playClickForLayout, useTrackClickPrefs } from "../../lib/trackClickPrefs";
-import type { LayoutMode } from "../../lib/useLayoutMode";
 import { shouldHandleWorkspaceDelete } from "../../lib/workspacePanes";
 import {
   readWorkspaceSession,
@@ -122,9 +117,10 @@ import {
 } from "../../lib/tableColumnPrefs";
 import { ContextMenu, InlineNotice } from "../common";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
-import { mediaProductionAvailable, visualizerExportAvailable } from "../../lib/platformFeatures";
+import { visualizerExportAvailable } from "../../lib/platformFeatures";
 import { canVisualizeTrack, useVisualizerPopup } from "../../lib/visualizerPopup";
 import { exportVisualizerTracks, reportVisualizerExportError } from "../../lib/visualizerExportActions";
+import { useVisualizerExportBlocked } from "../../lib/visualizerExportSupport";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { dragPreviewFromBlob, vinylDragPreview } from "../../lib/dragPreview";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
@@ -133,8 +129,6 @@ import { requestExploreSearch } from "../../lib/vjSearch";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, normalizeSearchPlatforms } from "../../lib/searchPlatforms";
 import { readLocalStorage } from "../../lib/storageWrite";
-import { aiDropElementAt, fromLocalTracks } from "../../lib/aiAttachments";
-import { useAiStore } from "../../stores/aiStore";
 
 /** @deprecated 请从 `lib/playTrack` 引用；保留 re-export 以免旧 import 断掉。 */
 export { PLAY_EVENT, playTrack, parsePlayRequest, type PlayRequest } from "../../lib/playTrack";
@@ -326,15 +320,6 @@ export interface TrackTableProps {
   persistentSession?: boolean;
   total: number;
   loading: boolean;
-  /**
-   * 当前布局档位，原样落到 `<table data-layout>` 上给 CSS 当判据。
-   *
-   * 换行式（标题一行、元信息一行）**只有 narrow（只剩曲目表这一栏）才准用**。
-   * 之前是 `@container (max-width: 700px)` 判的，判据错在：那量的是曲目表这一栏
-   * 有多宽，于是"窗口 1400、把详情栏拖到 600"也会触发——屏幕明明还摆得下两栏，
-   * 却退化成手机排版。摆不摆得下长条要看还剩几栏，不看这一栏被挤成多窄。
-   */
-  layout: LayoutMode;
   /** 可选紧凑适配；DJ 模式当前保留完整配置列并由外层横向滚动。 */
   fitWidth?: boolean;
   selectedId: number | null;
@@ -374,36 +359,27 @@ export function isCoverSettled(track: TrackSummary): boolean {
   const key = coverKeyOf(track);
   return coversShown.has(key) || coversMissing.has(key);
 }
-/** A video's first frame is extracted on demand; a service that is restarting is asked again. */
-const COVER_RETRIES = 12;
-const COVER_RETRY_MS = 3000;
-
 /**
  * 曲库表的封面格：一个普通的 <img>，由浏览器自己的图片管线请求、解码和缓存。行在视口外两三屏
  * 就挂好（rowList.ts），所以图片进入视口时已经在了，不用 lazy。浏览器显示过的封面（coversShown）
- * 重新挂载时同步解码，不闪。没有封面的音频记在 coversMissing 里，再次挂载时第一帧就是唱盘；视频
- * 首帧由后端抽取，服务短暂重启或抽帧排队时换个地址稍后再试，不能一次失败就永久空白。
+ * 重新挂载时同步解码，不闪。没有封面的音频记在 coversMissing 里，再次挂载时第一帧就是唱盘；没有
+ * 内嵌封面的视频由窗口解一帧交给后端（videoCover.ts），成了就再读一次，解不了就显示视频标记。
  */
 function TrackCoverThumb({ track }: { track: TrackSummary }) {
   const isVideo = isVideoTrack(track.format);
   const key = coverKeyOf(track);
   const [attempt, setAttempt] = useState(0);
   const [missing, setMissing] = useState(() => coversMissing.has(key));
-  const retryTimer = useRef<number | null>(null);
   useEffect(() => {
     setAttempt(0);
     setMissing(coversMissing.has(key));
-    return () => {
-      if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
-      retryTimer.current = null;
-    };
   }, [key]);
   const revision = isVideo && attempt > 0 ? `${track.modified_at}-${attempt}` : track.modified_at;
   return (
     <span className="kd-thumb" draggable={false}>
-      {missing && !isVideo ? (
-        <VinylPlaceholder />
-      ) : missing ? null : (
+      {missing ? (
+        isVideo ? <span className="kd-thumb-video" role="img" aria-label="视频"><Video size={14} aria-hidden="true" /></span> : <VinylPlaceholder />
+      ) : (
         <img
           src={api.coverUrl(track.id, revision, 64)}
           alt=""
@@ -411,15 +387,16 @@ function TrackCoverThumb({ track }: { track: TrackSummary }) {
           draggable={false}
           onLoad={() => coverSettled(key, true)}
           onError={() => {
-            if (!isVideo || attempt >= COVER_RETRIES) {
+            if (!isVideo || attempt > 0) {
               coverSettled(key, false);
               setMissing(true);
               return;
             }
-            retryTimer.current = window.setTimeout(() => {
-              retryTimer.current = null;
-              setAttempt((value) => value + 1);
-            }, COVER_RETRY_MS);
+            // videoCover.ts brings mediabunny, which the list itself does not need until here.
+            void import("../../lib/videoCover").then(module => module.requestVideoCover(track.id)).catch(() => false).then(made => {
+              if (made) setAttempt(1);
+              else { coverSettled(key, false); setMissing(true); }
+            });
           }}
         />
       )}
@@ -544,9 +521,9 @@ function trackCell(
       return (
         <div key={key} className="kd-list-cell kd-td-strong" role="gridcell" data-col="title" data-flex="" title={track.title || track.filename}>
           <TrackCoverThumb track={track} />
-          {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。KDJ 视频工程写一个「工程」小标签。 */}
+          {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。旧版曲库里的 KDJ 视频工程写一个「工程」小标签。 */}
           {isProjectTrack(track.format) ? (
-            <span className="kd-video-mark kd-project-mark" title="KDJ 视频工程：由本机文件拼成，在 KDJ 里播放">工程</span>
+            <span className="kd-video-mark kd-project-mark" title="KDJ 视频工程：这一版不再支持，文件留在原处">工程</span>
           ) : isVideoTrack(track.format) && (
             <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
               <Video size={11} aria-hidden="true" />
@@ -942,7 +919,6 @@ export const TrackTable = memo(function TrackTable({
   persistentSession = true,
   total,
   loading,
-  layout,
   fitWidth = false,
   selectedId,
   selectedIds,
@@ -981,8 +957,6 @@ export const TrackTable = memo(function TrackTable({
   );
   const filterFolder = useTableStore((state) => state.filter.folder);
   const removeTracks = useTableStore((state) => state.removeTracks);
-  const widePlay = useTrackClickPrefs((state) => state.widePlay);
-  const narrowPlay = useTrackClickPrefs((state) => state.narrowPlay);
   const localExternalDragMode = usePlaybackPrefs((state) => state.localExternalDragMode);
   const shareContentMode = useSharePrefs((state) => state.contentMode);
   const sameNameSearchPlatforms = useMemo(() => {
@@ -1004,7 +978,6 @@ export const TrackTable = memo(function TrackTable({
     localExternalDragMode === "share_link"
     && !window.kdj?.startLinkDrag
     && window.kdj?.platform === "win32";
-  const playClick = playClickForLayout({ widePlay, narrowPlay }, layout);
   const copyToClipboard = useTableStore((state) => state.copyToClipboard);
   const undo = useTableStore((state) => state.undo);
   const undoLast = useTableStore((state) => state.undoLast);
@@ -1063,7 +1036,7 @@ export const TrackTable = memo(function TrackTable({
     if (trace.prevSummaries !== summaryById) { trace.publishes += 1; trace.prevSummaries = summaryById; }
     if (trace.prevDownloads !== downloadTasks) { trace.downloads += 1; trace.prevDownloads = downloadTasks; }
     // Renders caused by the table's own props changing (the workspace rendering), as against its hooks.
-    const props = [total, loading, layout, fitWidth, selectedId, selectedIds, shortcutActive, visible, sort, order, sort2, order2, onSelect, onSort];
+    const props = [total, loading, fitWidth, selectedId, selectedIds, shortcutActive, visible, sort, order, sort2, order2, onSelect, onSort];
     if (trace.prevProps.some((value, index) => value !== props[index])) trace.props += 1;
     trace.prevProps = props;
   }
@@ -1113,6 +1086,8 @@ export const TrackTable = memo(function TrackTable({
   const backendPlatform = useAppStore((state) => state.health?.platform ?? "");
   const trashSupported = backendPlatform !== "android" && backendPlatform !== "ios";
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number; track: TrackSummary } | null>(null);
+  // 导出可视化 is greyed with the reason where this system cannot encode the video.
+  const visualizerExportBlocked = useVisualizerExportBlocked();
   const [menuShareResolution, setMenuShareResolution] = useState<{
     cacheKey: string;
     link: string | null;
@@ -1291,7 +1266,7 @@ export const TrackTable = memo(function TrackTable({
     let dragging = false;
     let ghost: PointerDragGhost | null = null;
     let unlockScroll: (settleMs?: number) => void = () => undefined;
-    // A place of the app's own that takes the rows (the editor), told when the pointer leaves it.
+    // A place of the app's own that takes the rows (a drawer's title row), told when the pointer leaves it.
     let place: PointerTrackDrop | null = null;
 
     try {
@@ -1306,24 +1281,16 @@ export const TrackTable = memo(function TrackTable({
 
     const clearTargets = () => {
       document
-        .querySelectorAll<HTMLElement>("[data-kd-pointer-track-over], [data-kd-pointer-ai-over]")
-        .forEach((node) => {
-          node.removeAttribute("data-kd-pointer-track-over");
-          node.removeAttribute("data-kd-pointer-ai-over");
-        });
+        .querySelectorAll<HTMLElement>("[data-kd-pointer-track-over]")
+        .forEach((node) => node.removeAttribute("data-kd-pointer-track-over"));
     };
     const hitAt = (x: number, y: number) => document.elementFromPoint(x, y) as HTMLElement | null;
     const paintTarget = (x: number, y: number) => {
       clearTargets();
-      const ai = aiDropElementAt(x, y);
-      ghost?.hint(ai ? "交给 AI" : null);
-      const under = ai ? null : pointerTrackDropAt(x, y);
+      ghost?.hint(null);
+      const under = pointerTrackDropAt(x, y);
       if (place !== under) place?.leave();
       place = under;
-      if (ai) {
-        ai.setAttribute("data-kd-pointer-ai-over", "");
-        return;
-      }
       if (place) {
         ghost?.hint(place.over(ids, x, y));
         return;
@@ -1501,22 +1468,13 @@ export const TrackTable = memo(function TrackTable({
       const trash = hit?.closest<HTMLElement>("[data-kd-track-trash-target]");
       const cover = hit?.closest<HTMLElement>(`[${TRACK_COVER_DROP_TARGET_ATTR}]`);
       const coverTrackId = cover ? Number(cover.dataset.kdTrackId) : NaN;
-      const ai = aiDropElementAt(up.clientX, up.clientY);
-      const taker = ai ? null : pointerTrackDropAt(up.clientX, up.clientY);
+      const taker = pointerTrackDropAt(up.clientX, up.clientY);
       cleanup();
       if (!dragging) return;
       up.preventDefault();
       if (taker) {
         finishTrackDrop();
         taker.drop(ids, up.clientX, up.clientY);
-        return;
-      }
-      // The `/pi` field: the songs become cards that go to the AI with the request.
-      if (ai) {
-        finishTrackDrop();
-        void libraryStore.getState().resolveSummaries(ids)
-          .then(tracks => useAiStore.getState().attach(fromLocalTracks(tracks)))
-          .catch(() => undefined);
         return;
       }
       if (hit?.closest("[data-kd-visualizer-export-drop]")) {
@@ -2131,7 +2089,7 @@ export const TrackTable = memo(function TrackTable({
     const theme = new MutationObserver(measure);
     theme.observe(document.documentElement, { attributes: true, attributeFilter: ["style", "data-theme", "class"] });
     return () => { observer.disconnect(); theme.disconnect(); };
-  }, [total > 0, layout, colPrefs.hidden, colPrefs.order, pendingDownloads.length > 0]);
+  }, [total > 0, colPrefs.hidden, colPrefs.order, pendingDownloads.length > 0]);
   // 行高变了（字号、主题）：每一行的位置都按新的行高算。
   useLayoutEffect(() => { virtualizer.measure(); }, [rowH, virtualizer]);
 
@@ -2320,31 +2278,19 @@ export const TrackTable = memo(function TrackTable({
         return;
       }
       if (selecting) {
-        // 双点会依次送 detail=1 / 2 两次 click。竖屏的单击就是播放，
-        // 第二下既不该重复起播，也不该把选择状态又翻回去。
-        if (playClick === "single" && event.detail > 1) return;
         // A plain click picks or drops the row; Shift picks the run up to it. Nothing plays.
         onSelect(track.id, event.shiftKey ? "range" : "toggle");
         return;
       }
-      // 同上：先让第一下立即播放，第二下只被吞掉；不要等双击超时，
-      // 否则移动端会感觉点歌迟钝。键盘触发的 detail=0 不受影响。
-      if (playClick === "single" && event.detail > 1) return;
       const mode = selectMode(event);
-      if (playClick === "double" && event.detail === 2 && mode === "replace") {
+      if (event.detail === 2 && mode === "replace") {
         // `click(detail=2)` precedes `dblclick`. Send the audio intent first so opening
         // TrackDetail cannot occupy the main thread before the native Load is queued.
         doubleClickPlaybackRef.current = { trackId: track.id, at: performance.now() };
         playFromTable(track);
       }
+      // 单击只负责选择，双击播放；详情入口留给播放条唱盘（见 PlayerBar.DETAIL_EVENT）。
       onSelect(track.id, mode, event.detail);
-      // 带修饰键的多选不算——那是在攒选区。
-      if (mode !== "replace") return;
-      // 单击播放按设置走；双击模式下单击只负责选择。
-      // 详情入口仍留给播放条唱盘（见 PlayerBar.DETAIL_EVENT）。
-      if (playClick === "single") {
-        playFromTable(track);
-      }
     },
     pointerDown(event, track) {
       if (htmlExternalLinkDrag) {
@@ -2360,9 +2306,7 @@ export const TrackTable = memo(function TrackTable({
     },
     cancelPress,
     doubleClick(track) {
-      // A project double-clicked plays and opens in the editor beside the list, whichever click plays.
-      if (mediaProductionAvailable() && !selecting && isProjectTrack(track.format)) void useLaneEditor.getState().openTrack(track);
-      if (selecting || playClick !== "double") return;
+      if (selecting) return;
       const submitted = doubleClickPlaybackRef.current;
       doubleClickPlaybackRef.current = null;
       if (
@@ -2426,7 +2370,6 @@ export const TrackTable = memo(function TrackTable({
         role="grid"
         aria-rowcount={count}
         data-kind="library"
-        data-layout={layout}
         data-fit-width={fitWidth || undefined}
         style={listStyle}
       >
@@ -2765,27 +2708,8 @@ export const TrackTable = memo(function TrackTable({
               编辑 Meta
             </button>
           )}
-          {mediaProductionAvailable() && isProjectTrack(rowMenu.track.format) && (
-            <button type="button" disabled={menuIds.length !== 1} onClick={() => {
-              const track = rowMenu.track;
-              setRowMenu(null);
-              exportProject(track);
-            }}><Download size={12} />导出 MP4</button>
-          )}
-          {mediaProductionAvailable() && menuIds.length === 1 && !isImageTrack(rowMenu.track.format) && (
-            <button type="button" onClick={() => {
-              const track = rowMenu.track;
-              setRowMenu(null);
-              // A project opens in the editor; a video is cut; a song is the base of a VJ.
-              if (isProjectTrack(track.format)) { void useLaneEditor.getState().openTrack(track); return; }
-              void api.track(track.id).then(full => isVideoTrack(full.format)
-                ? useLaneEditor.getState().startVideo(full)
-                : useLaneEditor.getState().startVj(full)).catch(() => undefined);
-            }}><Clapperboard size={12} />
-              {isProjectTrack(rowMenu.track.format) ? "编辑工程" : isVideoTrack(rowMenu.track.format) ? "剪辑这个视频" : "用这首歌做 VJ"}
-            </button>
-          )}
-          {visualizerExportAvailable() && <button type="button" disabled={menuIds.length !== 1 || !canVisualizeTrack(rowMenu.track)} onClick={event => {
+          {visualizerExportAvailable() && <button type="button" title={visualizerExportBlocked ?? undefined}
+            disabled={menuIds.length !== 1 || !canVisualizeTrack(rowMenu.track) || !!visualizerExportBlocked} onClick={event => {
             const track = rowMenu.track;
             const from = event.currentTarget.getBoundingClientRect();
             setRowMenu(null);

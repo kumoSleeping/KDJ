@@ -190,19 +190,20 @@ pub fn spawn(state: Arc<AppState>, ids: Vec<i64>, priority: bool, precise: bool)
                 if cancel.is_cancelled() {
                     anyhow::bail!("已取消");
                 }
+                // A video's beats are placed on its own clock: where its sound starts after its
+                // picture (an MP4's leading empty edits), and cut at the picture's end.
                 if matches!(
                     path.extension()
                         .and_then(|s| s.to_str())
                         .unwrap_or("")
                         .to_ascii_lowercase()
                         .as_str(),
-                    "mp4" | "m4v" | "mov" | "mkv" | "webm" | "avi"
+                    "mp4" | "m4v" | "mov"
                 ) {
-                    let probe = tokio::runtime::Handle::current()
-                        .block_on(crate::compositions::media::probe(path, &cancel))?;
-                    if let Some(video) = probe.video() {
-                        let shift = probe.audio_shift() as f64 / 1000.;
-                        let duration = probe.duration(video) as f64 / 1000.;
+                    let movie = kdj_media::mp4::read::Movie::open(path).ok();
+                    if let Some((video, audio)) = movie.as_ref().and_then(|m| Some((m.video()?, m.audio()?))) {
+                        let shift = audio.start_secs() - video.start_secs();
+                        let duration = video.start_secs() + video.duration_secs();
                         analysis.audio_offset_seconds = shift;
                         analysis.duration = duration;
                         for events in [&mut analysis.beats, &mut analysis.downbeats] {

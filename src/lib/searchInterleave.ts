@@ -17,9 +17,8 @@ function alternate<T>(lists: readonly (readonly T[])[]): T[] {
 /**
  * Several keywords, one per line (Shift + Enter), are searched together and shown as one list:
  * the answers interleaved — the first of each line, then the second of each — with a song found
- * by two lines listed once. The AI searches several ways at once through the same path
- * (docs/ai-dock.md). Lines that are links or anything other than a keyword search keep their own
- * packages, as before.
+ * by two lines listed once. Lines that are links or anything other than a keyword search keep
+ * their own packages, as before.
  */
 export function interleaveSearches(items: readonly IntakeItem[]): IntakeItem[] {
   if (items.length < 2 || !items.every(item => item.kind === "search")) return [...items];

@@ -12,25 +12,6 @@
 }
 .kd-task-page { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .kd-download-window .kd-download-task-list { overflow-y: auto; overscroll-behavior: contain; }
-.kd-task-tabs { display: inline-flex; align-items: center; gap: 8px; }
-.kd-task-window .kd-task-tabs > button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  min-height: 28px;
-  padding: 2px 4px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  box-shadow: none;
-  color: var(--kd-muted);
-  font: inherit;
-  font-size: var(--kd-size-sm);
-  cursor: pointer;
-}
-.kd-task-window .kd-task-tabs > button[aria-selected="true"] { color: var(--kd-theme); }
-.kd-task-window .kd-task-tabs > button:focus-visible { outline: 1px solid var(--kd-focus, var(--kd-text)); outline-offset: -1px; }
 .kd-task-window-entry { padding: 6px; font-size: var(--kd-size-xs); overflow-wrap: anywhere; }
 .kd-task-window-entry :is(.kd-task-cover, .kd-task-cover-stack) { --kd-task-cover-size: 1.5rem; border-radius: 3px; }
 .kd-task-window-line { display: flex; align-items: center; gap: 6px; min-width: 0; }

@@ -1,7 +1,6 @@
 .kd-panel-stack { display: contents; }
 .kd-panel-slot[hidden] { display: none !important; }
 .kd-panel-slot:empty { display: none; }
-.kd-sheet .kd-panel-slot + .kd-panel-slot { margin-top: 8px; }
 .kd-panel-index-item > span { flex: 1; }
 .kd-panel-index-item[aria-checked="true"] { color: var(--kd-theme); }
 .kd-panel-index-options { padding-left: 28px; }

@@ -26,4 +26,5 @@ permissions = [
   "allow-publish-video",
   "allow-start-file-drag",
   "allow-pick-library-folder",
+  "allow-install-update-apk",
 ]

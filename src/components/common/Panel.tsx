@@ -1,7 +1,6 @@
 import { useContext, useId, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { PanelTopClose } from "lucide-react";
-import { useLayoutSignals } from "../../lib/useLayoutMode";
 import { PanelCollapseContext, PanelDockedContext } from "./panelCollapse";
 import { CornerBadge, type BadgeTone } from "./CornerBadge";
 import { PanelMediaControlsContext } from "./panelMediaControls";
@@ -46,7 +45,6 @@ export function Panel({
 }: PanelProps) {
   const collapse = useContext(PanelCollapseContext);
   const docked = useContext(PanelDockedContext);
-  const { portrait } = useLayoutSignals();
   const themePack = useThemePack(state => state.active);
   const [mediaHost, setMediaHost] = useState<HTMLDivElement | null>(null);
   const headingId = useId();
@@ -69,9 +67,9 @@ export function Panel({
   const head = hasHead && <div className={floatingHead ? "kd-panel-float-tools" : "kd-panel-head"}
     data-over-media={headHost ? "true" : undefined} data-inline={inlineHeadHost ? "true" : undefined}>
     <span id={headingId} className="kd-panel-head-label kd-grow kd-truncate">{heading}</span>
-    {(actions !== undefined || (collapse && !portrait)) && <span className="kd-row">
+    {(actions !== undefined || collapse) && <span className="kd-row">
       {actions}
-      {collapse && !portrait && <button type="button" className="kd-manager-panel-action"
+      {collapse && <button type="button" className="kd-manager-panel-action"
         aria-label={`收起 ${collapse.label} 面板`} title={`收起 ${collapse.label} 面板`}
         onClick={collapse.collapse}>
         <PanelTopClose size={13} strokeWidth={2.25} aria-hidden="true" />

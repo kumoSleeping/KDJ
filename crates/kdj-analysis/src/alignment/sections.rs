@@ -1,5 +1,5 @@
 use super::*;
-use kdj_core::composition::CompositionVideoSection;
+use super::MatchedSection;
 
 const WIDTH: usize = 800;
 const STEP: usize = 400;
@@ -16,7 +16,7 @@ pub fn align_sections(
     audio: &[f32],
     video: &[f32],
     canceled: impl Fn() -> bool,
-) -> Result<(Alignment, Vec<CompositionVideoSection>)> {
+) -> Result<(Alignment, Vec<MatchedSection>)> {
     align_sections_prepared(
         &AudioFeatures::prepare(audio, &canceled)?,
         &AudioFeatures::prepare(video, &canceled)?,
@@ -28,7 +28,7 @@ pub fn align_sections_prepared(
     audio: &AudioFeatures,
     video: &AudioFeatures,
     canceled: impl Fn() -> bool,
-) -> Result<(Alignment, Vec<CompositionVideoSection>)> {
+) -> Result<(Alignment, Vec<MatchedSection>)> {
     let alignment = align_prepared(audio, video, &canceled, false)?;
     if !alignment.matched
         || audio.samples < video.samples.saturating_add(SAMPLE_RATE * 10)
@@ -162,7 +162,7 @@ pub fn align_sections_prepared(
         separated = false;
     }
     groups.retain(|group| group.len() >= 2);
-    let mut sections: Vec<CompositionVideoSection> = Vec::new();
+    let mut sections: Vec<MatchedSection> = Vec::new();
     for group in groups {
         let mut lags: Vec<_> = group.iter().map(|h| h.lag).collect();
         lags.sort();
@@ -185,7 +185,7 @@ pub fn align_sections_prepared(
         let start = (start as i64).max(-(lag as i64));
         let end = (end as i64).min(audio.samples as i64 / HOP as i64 - lag as i64);
         if end > start {
-            sections.push(CompositionVideoSection {
+            sections.push(MatchedSection {
                 video_start_ms: start * 10,
                 audio_start_ms: (start + lag as i64) * 10,
                 duration_ms: (end - start) * 10,

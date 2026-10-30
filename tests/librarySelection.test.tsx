@@ -42,7 +42,7 @@ test("the library table: picking rows opens no column, a plain click picks, the 
     const loading = useLibraryStore(state => state.loading);
     const selectedId = useLibraryStore(state => state.selectedId);
     const selectedIds = useLibraryStore(state => state.selectedIds);
-    return createElement(TrackTable, { total, loading, selectedId, selectedIds, layout: "wide", shortcutActive: true,
+    return createElement(TrackTable, { total, loading, selectedId, selectedIds, shortcutActive: true,
       sort: "file_created_at", order: "desc", sort2: null, order2: "asc",
       onSelect: useLibraryStore.getState().select, onSort() {} });
   }

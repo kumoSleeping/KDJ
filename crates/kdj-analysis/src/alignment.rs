@@ -4,6 +4,14 @@
 //! to place the whole video once; ordinary full-length matching still rejects ambiguity.
 use anyhow::{bail, Result};
 use rustfft::{num_complex::Complex32, FftPlanner};
+/// A matched span between a song and a video: where the video's sound plays under the song.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MatchedSection {
+    pub audio_start_ms: i64,
+    pub video_start_ms: i64,
+    pub duration_ms: i64,
+}
+
 mod features;
 pub use features::{AudioFeatures, AudioSummary, FEATURE_REVISION, FEATURE_BLOCK_SECONDS, FEATURE_GUARD_SECONDS, FEATURE_MEMORY_BUDGET};
 mod indexed;

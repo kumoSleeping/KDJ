@@ -4,7 +4,9 @@
 
 import {
   addOverlayMovedListener,
+  addUpdateProgressListener,
   checkOverlayPermission,
+  installUpdateApk,
   openLocalPath,
   pickLibraryFolder,
   requestOverlayPermission,
@@ -102,7 +104,7 @@ function normalizeInfo(raw: unknown): BridgeInfo {
 async function createTauriBridge(): Promise<KdjBridge> {
   const info = normalizeInfo(await tauriInvoke<unknown>("get_bridge_info"));
   const desktop = ["darwin", "win32", "linux"].includes(info.platform);
-  const cliSupported = ["darwin", "win32"].includes(info.platform);
+  const cliSupported = ["darwin", "win32", "linux"].includes(info.platform);
   // 只认 Rust 报的平台名。iOS 沙盒里不存在系统级浮层，那边这些命令没有实现，
   // 靠 UA 猜会在 iPhone 上调到不存在的插件命令。
   const android = info.platform === "android";
@@ -162,6 +164,7 @@ async function createTauriBridge(): Promise<KdjBridge> {
           }),
     openExternal: (url: string) => tauriInvoke<void>("open_external", { url }),
     readClipboardText: desktop ? () => tauriInvoke<string>("read_clipboard_text") : undefined,
+    webLogin: android ? (platform) => tauriInvoke<string | null>("web_login", { platform }) : undefined,
     // 检查也必须走 updater 本身，不能先问 GitHub releases/latest：Release 先建、
     // 三平台包后到的窗口里，后者会谎报"可更新"，真正安装时才发现 latest.json
     // 或当前 bundle 的签名包还不存在。
@@ -196,8 +199,18 @@ async function createTauriBridge(): Promise<KdjBridge> {
           }
         }
       : null,
-    installMediaTools: ["darwin", "win32"].includes(info.platform) ? action => tauriInvoke("install_media_tools", { action }) : undefined,
-    mediaToolsProgress: ["darwin", "win32"].includes(info.platform) ? () => tauriInvoke("media_tools_progress") : undefined,
+    installAndroidUpdate: android
+      ? async ({ url, version, askPermission, onProgress }) => {
+          const listener = await addUpdateProgressListener(({ downloaded, total }) =>
+            onProgress?.({ stage: "downloading", downloaded, total: total ?? null, message: "" }));
+          try {
+            const { installing } = await installUpdateApk({ url, version, askPermission });
+            return installing ? "installing" : "permission";
+          } finally {
+            void listener.unregister().catch(() => {});
+          }
+        }
+      : undefined,
     pickFolder: async (options) => {
       // 安卓 dialog 没有 folder picker；走系统 ACTION_OPEN_DOCUMENT_TREE。
       if (android) {

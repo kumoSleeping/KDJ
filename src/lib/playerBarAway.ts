@@ -33,12 +33,6 @@ export function readPlayerBarCollapsed(shape: PlayerBarShape = shapeOf(windowIsT
   return shape === "tall" ? stored !== "false" : stored === "true";
 }
 
-/** The collapse is the desktop's. A phone keeps its bar: there it is the whole of the transport. */
-export function playerBarCollapseOffered(): boolean {
-  const platform = typeof window === "undefined" ? undefined : window.kdj?.platform;
-  return platform !== "android" && platform !== "ios";
-}
-
 /**
  * Whether the bar is to be away. The listener always has a transport on screen, the bar or the
  * playing song's bubble: so the bar is only away while there is a song for that bubble to show
@@ -48,8 +42,8 @@ export function playerBarCollapseOffered(): boolean {
  * bar is then away as if it had been put away, for as long as that lasts; neither shape's
  * choice is read or written for it, so the bar is back where the listener left it afterwards.
  */
-export function playerBarAwayWanted(collapsed: boolean, song: boolean, offered = playerBarCollapseOffered(), taken = false): boolean {
-  return (collapsed || taken) && offered && song;
+export function playerBarAwayWanted(collapsed: boolean, song: boolean, taken = false): boolean {
+  return (collapsed || taken) && song;
 }
 
 /** Where a launch finds the bar, before anything is known about the deck. */

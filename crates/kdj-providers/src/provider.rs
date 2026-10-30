@@ -109,10 +109,6 @@ impl ProviderContext {
         self.live().youtube_enabled
     }
 
-    pub fn video_format(&self) -> String {
-        self.live().video_format.clone()
-    }
-
     /// 各平台登录态落盘目录。
     pub fn session_dir(&self) -> PathBuf {
         let dir = self.data_dir.join("sessions");
@@ -485,7 +481,7 @@ pub trait VideoProvider: Send + Sync {
 
     /// 下载前需要浏览器/原生挑战的来源，可通过这一入口消费刚生成的一次性媒体源。
     /// 普通视频平台沿用 `download_video`；受保护来源必须自行校验该地址，不能把它
-    /// 当成任意网络 URL 转交给 FFmpeg。
+    /// 当成任意网络 URL 去读。
     async fn download_video_prepared(
         &self,
         request: &VideoDownloadRequest,

@@ -140,7 +140,6 @@ function appStore(api: Record<string, unknown>) {
     "./libraryStore": { useLibraryStore: noStore },
     "./streamBrowseStore": { useStreamBrowseStore: noStore },
     "./sidebarVisibilityStore": { useSidebarVisibilityStore: noStore },
-    "./aiStore": { useAiStore: { getState: () => ({ handleEvent() {} }) } },
   };
   const exports: Record<string, any> = {};
   vm.runInNewContext(ts.transpileModule(readFileSync("src/stores/appStore.ts", "utf8"), {

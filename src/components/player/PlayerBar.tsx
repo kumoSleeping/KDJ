@@ -64,7 +64,6 @@ import {
   type AudioFocusDetail,
 } from "../../lib/audioFocus";
 import { formatDuration, isProjectTrack, isVideoTrack, thumbUrl } from "../../lib/format";
-import { needsRender } from "../../lib/kdjvPlay";
 import {
   MEDIA_SYNC_EVENT,
   broadcastMediaSync,
@@ -117,7 +116,6 @@ import {
   playTrack,
 } from "../../lib/playTrack";
 import { getPlayingTrack, setPlayingTrack } from "../../lib/playingTrack";
-import { playerBarCollapseOffered } from "../../lib/playerBarAway";
 import { usePlayerShortcuts } from "../../lib/usePlayerShortcuts";
 import {
   ARROW_KEY_LIST_STEP_EVENT,
@@ -778,10 +776,7 @@ export function PlayerBar() {
     () => getPlayingTrack() ?? readPublishedStreamTrack(),
   );
   const [restoredStreamPlayback] = useState(() => readPublishedStreamPlayback());
-  // A project playing is being made: nothing is mixed into it near its end, and it stops there
-  // (continueAfterEnded) instead of going on to the next song.
-  const projectPlaying = Boolean(track && isProjectTrack(track.format));
-  const djEnabled = autoAdvance && !mobileNative && !projectPlaying;
+  const djEnabled = autoAdvance && !mobileNative;
   const activeStreamTrackId = track && isStreamTrack(track) ? track.id : 0;
   const subscribeActiveStreamMeta = useCallback(
     (listener: () => void) => subscribeStreamMeta(activeStreamTrackId, listener),
@@ -1478,10 +1473,8 @@ export function PlayerBar() {
     (next: Track, from: Track): boolean => {
       // 移动端的播放 owner 是系统媒体服务，不让实时 DJ 再开第二条输出链。
       if (mobileNative) return false;
-      // A `.kdjv` row is not sound until playTrack has made its mix (kdjvPlay.ts); handed to a
-      // Deck as it is, it failed, fell back to a hard load and moved the video window onto it,
-      // over and over. The caller plays it instead, which comes back here with its sound.
-      if (isProjectTrack(next.format) && needsRender(next)) return false;
+      // A `.kdjv` row (an old video project) is not sound: the caller's playTrack refuses it.
+      if (isProjectTrack(next.format)) return false;
       const { enabled, transitions, effects, bars, vocalCut, applyInOutPoints, autoBeatSync } =
         useDjConfig.getState();
       if (!enabled) return false;
@@ -2749,7 +2742,7 @@ export function PlayerBar() {
         commitPlaying(otherStillPlaying);
         return;
       }
-      if (!autoAdvanceRef.current || (finished && isProjectTrack(finished.format))) {
+      if (!autoAdvanceRef.current) {
         commitPlaying(false);
         return;
       }
@@ -4231,8 +4224,7 @@ export function PlayerBar() {
       return;
     }
     if (predicted.id === track.id) return;
-    // A `.kdjv` project plays from its render, made when it is played (kdjvPlay.ts); the file
-    // itself is not sound, and prewarming it only fails.
+    // A `.kdjv` row (an old video project) is not sound, and prewarming it only fails.
     if (isProjectTrack(predicted.format)) return;
     const currentRate = nativePlayer.state().rate || 1;
     const effectiveFromBpm = track.bpm ? track.bpm * currentRate : null;
@@ -4521,7 +4513,6 @@ export function PlayerBar() {
       video: networkPreview ? {
         audioOnly: false,
         maxHeight: settings?.video_max_height ?? 1080,
-        transcode: settings?.video_transcode ?? false,
       } : undefined,
     })
       .catch((error: unknown) => {
@@ -4668,7 +4659,7 @@ export function PlayerBar() {
 
     resetPerformanceControlsForManagerLoad();
     const applyAutomaticCue = autoInOutCueRef.current === next.id;
-    // A position asked for with the play (the editor's ruler, a project played on from where it was).
+    // A position asked for with the play (the visualizer configuration's ruler).
     const asked = restoredPositionRef.current?.trackId === next.id ? restoredPositionRef.current.position : null;
     if (asked !== null) restoredPositionRef.current = null;
     const initialPosition = asked ??
@@ -5092,8 +5083,8 @@ export function PlayerBar() {
         {lyricsMenu && !video && lyricsMenu.trackId === (displayTrack?.id ?? null) ? (
           <LyricsButtonMenu {...lyricsMenu} track={displayTrack ?? null} onClose={() => setLyricsMenu(null)} />
         ) : null}
-        {/* Offered where the playing song's bubble can take over: on the desktop, with a song. */}
-        {track && playerBarCollapseOffered() ? <BarCollapseKey /> : null}
+        {/* Offered where the playing song's bubble can take over: with a song. */}
+        {track ? <BarCollapseKey /> : null}
       </div>
 
       <div className="kd-player-scrub">

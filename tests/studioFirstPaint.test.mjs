@@ -2,7 +2,7 @@ import { build } from "esbuild";
 import { createRequire, Module } from "node:module";
 const require = createRequire(import.meta.url);
 const stubs = {
-  api: `export class ApiError extends Error{}; export const aiApi={}; export const api={libraryLyrics:()=>globalThis.studioTest.lyrics,coverUrl:()=>"/cover"}; export const visualizerApi={cover:async()=>globalThis.studioTest.cover?new Blob(["cover"]):null,analyze:()=>{globalThis.studioTest.analyses++;return globalThis.studioTest.analysis}};`,
+  api: `export class ApiError extends Error{}; export const api={libraryLyrics:()=>globalThis.studioTest.lyrics,coverUrl:()=>"/cover"}; export const visualizerApi={cover:async()=>globalThis.studioTest.cover?new Blob(["cover"]):null,analyze:()=>{globalThis.studioTest.analyses++;return globalThis.studioTest.analysis}};`,
   visualizerStudioRenderer: `export const loadStudioImages=async()=>{globalThis.studioTest.imageLoads++;return [{}]}; export const prepareStudio=(project,images,timeline,width)=>{globalThis.studioTest.prepares++;return {project:{...project,scene:{...project.scene,canvas:{width,height:width*9/16}}},timeline}}; export const drawStudioFrame=(c,s,t)=>globalThis.studioTest.draws.push({timeline:s.timeline,time:t}); export const studioPictureSideAt=()=>"left";`,
   compositionPlayback: `export const getCompositionClock=()=>globalThis.studioTest.clock;`,
   playerSession: `export const getPlayerSession=()=>globalThis.studioTest.session; export const subscribePlayerSession=f=>{globalThis.studioTest.listeners.add(f);return()=>globalThis.studioTest.listeners.delete(f)}; export const requestPlayerCommand=command=>globalThis.studioTest.commands.push(command);`,

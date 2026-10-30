@@ -34,7 +34,7 @@ test("the result table: the same picking, and the download key in the first data
     seen.chosen = chosen; seen.mode = mode;
     const all = selectableGroups(items[0]).map(entry => selectionKey(0, entry.group_id));
     return createElement(ResultTable, {
-      items, video: null, loading: false, searched: true, layout: "wide",
+      items, video: null, loading: false, searched: true,
       selected: chosen, selectionMode: mode, onSelectionModeChange: setMode,
       expandedGroups: new Set<string>(), collapsedItems: new Set<number>(), sourceIndex: {},
       inspectedGroup: inspected, delivery: { id: 1, top: 0, left: 0 }, paneShown: true, collectionShown: 50, hasMoreRows: false, loadingMoreRows: false, onShowMoreRows() {},
@@ -182,7 +182,7 @@ test("the result table: the same picking, and the download key in the first data
     const toggledPackages: number[] = [];
     function BatchHost({ chosen, mode }: { chosen: string[]; mode: boolean }) {
       return createElement(ResultTable, {
-        items: batch, video: null, loading: false, searched: true, layout: "wide",
+        items: batch, video: null, loading: false, searched: true,
         selected: new Set(chosen), selectionMode: mode, onSelectionModeChange() {},
         expandedGroups: new Set<string>(), collapsedItems: new Set<number>(), sourceIndex: {},
         inspectedGroup: null, delivery: { id: 1, top: 0, left: 0 }, paneShown: true, collectionShown: 50, hasMoreRows: false, loadingMoreRows: false, onShowMoreRows() {},

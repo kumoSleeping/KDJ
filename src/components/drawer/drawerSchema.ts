@@ -71,20 +71,20 @@ export interface DrawerSpec {
   usePage?(): string;
   onPage?(id: string): void;
   /**
-   * Pages that can be closed (the editor's open projects): each word gets its own small ×, and
+   * Pages that can be closed (documents open in the app): each word gets its own small ×, and
    * a long word ends in an ellipsis. The app decides what is in view afterwards.
    */
   closePage?(id: string): void;
   /**
-   * Pages that can be renamed (the editor's projects): a double-click on the word, or F2, writes
+   * Pages that can be renamed (documents): a double-click on the word, or F2, writes
    * it in place; Enter or leaving the word keeps the new name, Esc the old one.
    */
   renamePage?(id: string, name: string): void;
   /** Compact actions at the right end of the title row, before the close button. */
   tools?: ReactNode;
   /**
-   * Library rows dragged onto the title row (the editor: a song dropped there starts another
-   * project, another page); the row is lit while they are over it.
+   * Library rows dragged onto the title row (a song dropped there opens another page); the row
+   * is lit while they are over it.
    */
   titleDrop?: TitleDrop;
   body: ReactNode;

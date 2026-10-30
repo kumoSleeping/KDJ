@@ -44,7 +44,7 @@ let handFocusTo: "bubble" | "collapse" | null = null;
  */
 export function usePlayerBarPhase(song: boolean): PlayerBarPhase {
   const taken = useWindowTaken(windowTaken);
-  const away = usePlayerBarAway(state => playerBarAwayWanted(state.collapsed, song, undefined, taken));
+  const away = usePlayerBarAway(state => playerBarAwayWanted(state.collapsed, song, taken));
   const phase = usePlayerBarAway(state => state.phase);
   const settled = useRef(false);
   useLayoutEffect(() => {

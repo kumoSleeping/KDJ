@@ -1,24 +1,22 @@
 import { studioDuration, validateVisualizerProject, type VisualizerDraft, type VisualizerProject } from "./visualizerStudio";
-import { drawStudioFrame, loadStudioImages, prepareStudio, studioCanvas, type PreparedStudio } from "./visualizerStudioRenderer";
+import { loadStudioImages, prepareStudio, type PreparedStudio } from "./visualizerStudioRenderer";
 import { getBridge } from "./bridge";
 import { studioChunkFrames, studioVideoBitrate, studioWorkerCount } from "./visualizerStudioFrames";
 import { visualizerApi, type VisualizerJobStatus } from "./api";
+import { NO_BACKGROUND_DRAWING, NO_VIDEO_ENCODER } from "./visualizerExportSupport";
+import type { StudioFrameTiming, StudioWorkerCommand, StudioWorkerReply, StudioWorkerRequest, StudioWorkerResult } from "./visualizerStudioExport.worker";
 import { captureDiagnostic } from "./diagnostics";
-import { onlyWebViewEncodes } from "./platformFeatures";
-import type { StudioWorkerCommand, StudioWorkerReply, StudioWorkerRequest, StudioWorkerResult } from "./visualizerStudioExport.worker";
 
-const onlyEditorEncodes = onlyWebViewEncodes();
 const terminal = (status: VisualizerJobStatus) => ["done", "failed", "canceled"].includes(status.phase);
 /** The encoder moved past this frame, a retry replaced its pass, or the job already
  * ended. The next snapshot says which; none of these is a renderer failure. */
 const superseded = (error: unknown) => /过期或重复的视频帧|导出任务已结束/.test(error instanceof Error ? error.message : String(error));
 
-/** Renders and uploads frames. `slots` uploads may be in flight at once. An `h264`
- * producer encodes too: its unit is a GOP of `chunkFrames` frames, not one frame. */
+/** Renders, encodes and uploads the video: its unit is a GOP of `chunkFrames` frames,
+ * drawn and encoded by one worker. `slots` uploads may be in flight at once. */
 interface FrameProducer {
   slots: number;
-  format: "rgba" | "yuv420p" | "h264";
-  chunkFrames?: number;
+  chunkFrames: number;
   upload(job: string, token: number, index: number): Promise<VisualizerJobStatus>;
   release(): void;
 }
@@ -41,32 +39,15 @@ export async function runStudioExport(draft: VisualizerDraft, outputPath: string
     ]);
     signal.throwIfAborted();
     const prepared = prepareStudio(draft.project, images, analysis.timeline);
-    // An export encoded by the editor's renderers can lose its encoder midway (a driver
-    // reset, a session taken away). It is then redone once with FFmpeg encoding.
+    // The window's own encoder is the only one: an export that loses it midway (a driver
+    // reset, a session taken away) fails and can be started again.
     const { width, height } = draft.project.scene.canvas, { fps, quality } = draft.project.output;
-    for (let encode = onlyEditorEncodes || draft.project.output.acceleration !== "software"; ; encode = false) {
-      producer = await createStudioFrameProducer(draft.project, prepared, images, signal, encode);
-      signal.throwIfAborted();
-      const editor = producer.format === "h264";
-      let status: VisualizerJobStatus | undefined, failure: unknown;
-      try {
-        job = await visualizerApi.start({ track_id: draft.project.track.id, signature: analysis.signature,
-          duration: studioDuration(analysis.timeline), width, height, fps, video_bitrate: studioVideoBitrate(width, height, fps, quality),
-          acceleration: draft.project.output.acceleration, output_path: outputPath, pixel_format: producer.format, audio_48k: draft.project.output.audio48k !== false,
-          ...(producer.chunkFrames ? { chunk_frames: producer.chunkFrames } : {}) });
-        status = await pumpFrames(job, producer, signal, onStatus);
-      } catch (error) {
-        if (!editor || signal.aborted || onlyEditorEncodes) throw error;
-        failure = error;
-      }
-      if (!editor || signal.aborted || onlyEditorEncodes || status && status.phase !== "failed") return status!;
-      // Respect the backend commit point: a completed file is the result.
-      const final = status ?? (job ? await visualizerApi.cancel(job.id) : undefined);
-      if (final?.phase === "done") return final;
-      captureDiagnostic("visualizer-export", "editor-encoder", failure ?? final?.error, "改由 FFmpeg 编码后重新导出", "warn");
-      job = null;
-      producer.release(); producer = undefined;
-    }
+    producer = await createStudioWorkerPool(draft.project, prepared, images, signal);
+    signal.throwIfAborted();
+    job = await visualizerApi.start({ track_id: draft.project.track.id, signature: analysis.signature,
+      duration: studioDuration(analysis.timeline), width, height, fps, video_bitrate: studioVideoBitrate(width, height, fps, quality),
+      output_path: outputPath, audio_48k: draft.project.output.audio48k !== false, chunk_frames: producer.chunkFrames });
+    return await pumpFrames(job, producer, signal, onStatus);
   } catch (error) {
     if (job) {
       // Respect the backend commit point: a completed file cannot be canceled.
@@ -112,7 +93,7 @@ async function pumpFrames(first: VisualizerJobStatus, producer: FrameProducer, s
         }
       }
       // A GOP takes a renderer seconds, and nothing else tells the server the editor is alive.
-      if ((!active || producer.format === "h264") && !polling) {
+      if (!polling) {
         polling = true;
         visualizerApi.poll(first.id, demand?.token ?? 0, signal)
           .then(accept, error => { failure ??= error; })
@@ -123,26 +104,6 @@ async function pumpFrames(first: VisualizerJobStatus, producer: FrameProducer, s
   } finally {
     signal.removeEventListener("abort", changed);
   }
-}
-
-/** Parallel workers when the WebView can draw off the editor thread; otherwise the
- * measured single-canvas path. Never change producers during encoding. */
-async function createStudioFrameProducer(project: VisualizerProject, prepared: PreparedStudio, images: HTMLImageElement[], signal: AbortSignal, encode: boolean): Promise<FrameProducer> {
-  if (typeof OffscreenCanvas !== "undefined" && typeof Worker !== "undefined") {
-    try {
-      return await createStudioWorkerPool(project, prepared, images, signal, encode);
-    } catch (error) {
-      signal.throwIfAborted();
-      console.warn("[visualizer export] worker renderers unavailable, drawing on the editor thread", error);
-    }
-  }
-  const frames = await createStudioExportFrames(prepared, signal);
-  return {
-    // Two slots: the next frame draws while the previous upload is in flight.
-    slots: 2, format: "rgba",
-    upload: async (job, token, index) => visualizerApi.frame(job, token, index, frames.read(index), signal),
-    release: frames.release,
-  };
 }
 
 const WORKER_SETUP_MS = 30_000;
@@ -183,12 +144,12 @@ class StudioWorker {
   terminate() { this.worker.terminate(); this.fail(new DOMException("可视化导出已结束", "AbortError")); }
 }
 
-/** The renderers that opened a hardware encoder writing the same parameter sets as the
- * first one that did. Drivers cap concurrent sessions, so some renderers may get none. */
-async function openStudioEncoders(workers: StudioWorker[], anyEncoder: boolean): Promise<{ encoders: StudioWorker[]; reason: string }> {
+/** The renderers that opened an encoder writing the same parameter sets as the first one that
+ * did. Drivers cap concurrent sessions, so some renderers may get none. */
+async function openStudioEncoders(workers: StudioWorker[]): Promise<{ encoders: StudioWorker[]; reason: string }> {
   let timer = 0;
   const late = new Promise<never>((_, reject) => { timer = window.setTimeout(() => reject(new Error("硬件编码器启动超时")), ENCODER_SETUP_MS); });
-  const probes = await Promise.allSettled(workers.map(worker => Promise.race([worker.call({ type: "encoder", anyEncoder }), late])));
+  const probes = await Promise.allSettled(workers.map(worker => Promise.race([worker.call({ type: "encoder" }), late])));
   window.clearTimeout(timer);
   const encoders: StudioWorker[] = [];
   let parameters: string | undefined, reason = "";
@@ -200,7 +161,10 @@ async function openStudioEncoders(workers: StudioWorker[], anyEncoder: boolean):
   return { encoders, reason };
 }
 
-async function createStudioWorkerPool(project: VisualizerProject, prepared: PreparedStudio, images: HTMLImageElement[], signal: AbortSignal, encode: boolean): Promise<FrameProducer> {
+/** Parallel workers that draw off the editor thread and encode what they draw. Never change
+ * producers during encoding. */
+async function createStudioWorkerPool(project: VisualizerProject, prepared: PreparedStudio, images: HTMLImageElement[], signal: AbortSignal): Promise<FrameProducer> {
+  if (typeof OffscreenCanvas === "undefined" || typeof Worker === "undefined") throw new Error(NO_BACKGROUND_DRAWING);
   const started = performance.now(), { width, height } = prepared.project.scene.canvas, fps = prepared.project.output.fps;
   const timeline = prepared.timeline, count = Math.ceil(studioDuration(timeline) * fps);
   const imagePixels = images.reduce((sum, image) => sum + image.naturalWidth * image.naturalHeight, 0);
@@ -234,47 +198,36 @@ async function createStudioWorkerPool(project: VisualizerProject, prepared: Prep
     signal.throwIfAborted();
     // The renderers are up: from here only the encoder probe is bounded, by its own limit.
     window.clearTimeout(timer);
-    const opened = encode ? await openStudioEncoders(workers, onlyEditorEncodes) : { encoders: [], reason: "" };
-    // Encoding in the renderers pays only while most of them still draw: with fewer
-    // sessions than that, every renderer uploading frames to FFmpeg is the faster pool.
-    // Without FFmpeg any session is the pool: phones cap their encoder sessions.
-    const encoders = onlyEditorEncodes || opened.encoders.length * 2 >= size ? opened.encoders : [];
-    if (onlyEditorEncodes && !encoders.length) throw new Error(opened.reason || "这台设备的 WebView 没有可用的视频编码器");
-    if (encode && !encoders.length) console.info("[visualizer export] renderers do not encode; FFmpeg will", { sessions: opened.encoders.length, workers: size, reason: opened.reason });
+    // Every renderer that got an encoder session is the pool: phones and some drivers cap them.
+    const { encoders, reason } = await openStudioEncoders(workers);
+    if (!encoders.length) throw new Error(reason || NO_VIDEO_ENCODER);
     signal.throwIfAborted();
     const calibrationMs = performance.now() - started;
     let frames = 0;
-    const log = (encoder: string, active: number) => console.info("[visualizer export]", { encoder, workers: active, frames, elapsedMs: performance.now() - started, calibrationMs,
-      willReadFrequently: hint, calibrationFramesPerSecond: Object.fromEntries([...rates].map(([key, rate]) => [String(key), rate * 1000])) });
+    const timings = new Map<StudioWorker, StudioFrameTiming>();
+    const log = (encoder: string, active: number) => {
+      const summary = { encoder, workers: active, frames, elapsedMs: Math.round(performance.now() - started), calibrationMs: Math.round(calibrationMs),
+        willReadFrequently: hint, calibrationFramesPerSecond: Object.fromEntries([...rates].map(([key, rate]) => [String(key), rate * 1000])),
+        ...(timings.size ? { perFrameMs: perFrame([...timings.values()]) } : {}) };
+      console.info("[visualizer export]", summary);
+      // Where a phone spends its time is only known on the phone: the report carries it.
+      if (timings.size) captureDiagnostic("visualizer-export", "timing", JSON.stringify(summary), `width=${width} height=${height} fps=${fps}`, "info");
+    };
     const idle = (pool: StudioWorker[]) => pool.reduce((a, b) => b.pending < a.pending ? b : a);
-    if (encoders.length) {
-      for (const worker of workers) if (!encoders.includes(worker)) worker.terminate();
-      const chunkFrames = studioChunkFrames(fps);
-      return {
-        // One per renderer: a GOP occupies its encoder from the first frame to the flush.
-        slots: encoders.length, format: "h264", chunkFrames,
-        upload: async (job, token, index) => {
-          const { status } = await idle(encoders).call({ type: "encode", job, token, index });
-          frames += Math.min(chunkFrames, count - index * chunkFrames);
-          return status!;
-        },
-        release() {
-          for (const worker of encoders) worker.terminate();
-          log("webview", encoders.length);
-        },
-      };
-    }
+    for (const worker of workers) if (!encoders.includes(worker)) worker.terminate();
+    const chunkFrames = studioChunkFrames(fps);
     return {
-      // Two per worker: one frame draws while the previous one uploads.
-      slots: size * 2, format: "yuv420p",
+      // One per renderer: a GOP occupies its encoder from the first frame to the flush.
+      slots: encoders.length, chunkFrames,
       upload: async (job, token, index) => {
-        const { status } = await idle(workers).call({ type: "upload", job, token, index });
-        frames++;
+        const worker = idle(encoders), { status, timing } = await worker.call({ type: "encode", job, token, index });
+        if (timing) timings.set(worker, timing);
+        frames += Math.min(chunkFrames, count - index * chunkFrames);
         return status!;
       },
       release() {
-        for (const worker of workers) worker.terminate();
-        log("ffmpeg", size);
+        for (const worker of encoders) worker.terminate();
+        log("webview", encoders.length);
       },
     };
   } catch (error) {
@@ -286,56 +239,9 @@ async function createStudioWorkerPool(project: VisualizerProject, prepared: Prep
   }
 }
 
-/** Measure the complete draw + readback path in the actual WebView. WebKit and
- * WebView2 need not make the same choice; the hint is not a GPU capability flag.
- * Never change contexts during encoding, including a hardware-encoder retry. */
-export async function createStudioExportFrames(prepared: PreparedStudio, signal: AbortSignal) {
-  const started = performance.now();
-  const candidates = [true, false].map(hint => ({ hint, pair: studioCanvas(prepared, hint), samples: [] as number[] }));
-  let selected: typeof candidates[number];
-  try {
-    // Alternate ordering to reduce warm-cache bias. First two reads warm each
-    // context before timing four consecutive frames of this exact composition.
-    for (let pass = 0; pass < 6; pass++) {
-      for (const index of pass % 2 ? [1, 0] : [0, 1]) {
-        await new Promise<void>(resolve => window.setTimeout(resolve, 0));
-        signal.throwIfAborted();
-        const candidate = candidates[index], [canvas, context] = candidate.pair, before = performance.now();
-        drawStudioFrame(context, prepared, pass / prepared.project.output.fps);
-        context.getImageData(0, 0, canvas.width, canvas.height);
-        if (pass >= 2) candidate.samples.push(performance.now() - before);
-      }
-    }
-    const median = (values: number[]) => { const sorted = [...values].sort((a, b) => a - b); return (sorted[1] + sorted[2]) / 2; };
-    // Retain the stable readback default when the difference is only noise.
-    selected = median(candidates[1].samples) < median(candidates[0].samples) * .85 ? candidates[1] : candidates[0];
-  } catch (error) {
-    for (const candidate of candidates) candidate.pair[0].width = candidate.pair[0].height = 1;
-    throw error;
-  }
-  for (const candidate of candidates) if (candidate !== selected) candidate.pair[0].width = candidate.pair[0].height = 1;
-  const [canvas, context] = selected.pair, fps = prepared.project.output.fps;
-  const count = Math.ceil(studioDuration(prepared.timeline) * fps);
-  let frames = 0, drawMs = 0, readMs = 0, released = false;
-  const calibrationMs = performance.now() - started;
-  return {
-    read(index: number): ArrayBuffer {
-      signal.throwIfAborted();
-      if (released || !Number.isSafeInteger(index) || index < 0 || index >= count) throw new Error("无效的视频帧请求");
-      const before = performance.now();
-      drawStudioFrame(context, prepared, index / fps);
-      const drawn = performance.now(), pixels = context.getImageData(0, 0, canvas.width, canvas.height);
-      drawMs += drawn - before; readMs += performance.now() - drawn; frames++;
-      return pixels.data.buffer as ArrayBuffer;
-    },
-    release() {
-      if (released) return;
-      released = true; canvas.width = canvas.height = 1;
-      console.info("[visualizer export]", {
-        frames, drawMs, readMs, elapsedMs: performance.now() - started, calibrationMs,
-        willReadFrequently: selected.hint,
-        calibration: candidates.map(({ hint, samples }) => ({ willReadFrequently: hint, drawAndReadMs: samples })),
-      });
-    },
-  };
+/** Each step's milliseconds per frame within one renderer, averaged over the renderers. */
+function perFrame(timings: StudioFrameTiming[]): Record<string, number> {
+  const frames = timings.reduce((sum, t) => sum + t.frames, 0) || 1;
+  const step = (key: keyof StudioFrameTiming) => +(timings.reduce((sum, t) => sum + t[key], 0) / frames).toFixed(2);
+  return { draw: step("drawMs"), read: step("readMs"), convert: step("convertMs"), encode: step("encodeMs"), send: step("sendMs") };
 }

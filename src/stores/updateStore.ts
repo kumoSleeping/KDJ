@@ -13,6 +13,14 @@ import { useAppStore } from "./appStore";
 
 const AUTO_KEY = "kd-auto-update-check";
 const INTERVAL_MS = 5 * 60 * 1000;
+/** 安卓自动弹过安装页的版本：每个版本只自动弹一次，之后由顶栏和设置里的键来装。 */
+const ANDROID_OFFERED_KEY = "kd-android-update-offered";
+
+/** 不按流量计费的网络（Wi‑Fi / 有线）。WebView 说不清时按计费算，不自动下载。 */
+function unmeteredNetwork(): boolean {
+  const connection = (navigator as Navigator & { connection?: { type?: string; saveData?: boolean } }).connection;
+  return !!connection && !connection.saveData && (connection.type === "wifi" || connection.type === "ethernet");
+}
 
 function readAutoCheck(): boolean {
   const raw = readLocalStorage(AUTO_KEY);
@@ -74,7 +82,8 @@ interface UpdateStore {
   setAutoCheck(on: boolean): void;
   /** silent：失败/无更新都不打扰；手动才写 manualError。 */
   check(opts?: { silent?: boolean }): Promise<UpdateInfo | null>;
-  apply(onProgress?: (p: UpdateProgress) => void): Promise<void>;
+  /** auto：安卓后台检查发现新版本后自己下载、弹安装页；不打开授权页，失败不报。 */
+  apply(onProgress?: (p: UpdateProgress) => void, opts?: { auto?: boolean }): Promise<void>;
   clearManualError(): void;
   /** 打开设置并滚到软件更新。 */
   openUpdateSection(): void;
@@ -106,6 +115,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       const info = await fetchUpdateInfo();
       if (seq !== checkSeq) return info;
       set({ info, checking: false });
+      if (silent) offerAndroidUpdate(info);
       return info;
     } catch (error) {
       if (seq !== checkSeq) return null;
@@ -118,13 +128,38 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
     }
   },
 
-  async apply(onProgress) {
+  async apply(onProgress, opts) {
     const info = get().info;
     if (!info?.newer) return;
     const bridge = getBridge();
     const canSelfUpdate = typeof bridge.applyUpdate === "function";
     const updateStarted = performance.now();
+    const auto = opts?.auto ?? false;
     set({ applying: true, manualError: "", progress: null });
+    // 安卓：Release 里有签名 APK 时在应用里下载，下完打开系统安装页。
+    if (bridge.installAndroidUpdate && info.url.endsWith(".apk")) {
+      try {
+        set({ progress: { stage: "downloading", downloaded: 0, total: null, message: "" } });
+        const result = await bridge.installAndroidUpdate({
+          url: info.url,
+          version: info.latest,
+          askPermission: !auto,
+          onProgress: (p) => {
+            set({ progress: p });
+            onProgress?.(p);
+          },
+        });
+        if (auto) writeLocalStorageNow(ANDROID_OFFERED_KEY, info.latest);
+        set({
+          applying: false,
+          progress: null,
+          manualError: result === "permission" && !auto ? "请在系统设置里允许 KDJ 安装应用，回来后再点一次" : "",
+        });
+      } catch (error) {
+        set({ applying: false, progress: null, manualError: auto ? "" : `更新失败：${errorText(error)}` });
+      }
+      return;
+    }
     try {
       if (!canSelfUpdate) {
         await bridge.openExternal?.(info.url);
@@ -202,3 +237,11 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
     };
   },
 }));
+
+/** 安卓：后台检查在 Wi‑Fi 下发现新版本，自己下好并弹出系统安装页，每个版本一次。 */
+export function offerAndroidUpdate(info: UpdateInfo): void {
+  const store = useUpdateStore.getState();
+  if (!info.newer || !getBridge().installAndroidUpdate || store.applying || !unmeteredNetwork()
+    || readLocalStorage(ANDROID_OFFERED_KEY) === info.latest) return;
+  void store.apply(undefined, { auto: true });
+}

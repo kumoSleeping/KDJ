@@ -85,10 +85,8 @@
   /* Overlay 顶栏：桌面拖拽垫 / 移动端安全区；具体值由 data-* 覆盖 */
   --kd-chrome-top: 36px;
   --kd-traffic-pad: 0px;
-  --kd-sheet-w: 70%;
   /* 曲库/搜索工作条与右栏眉目同高，并排时齐平 */
   --kd-work-rail-h: 1.9rem;
-  --kd-sheet-head-h: var(--kd-work-rail-h);
   /* Durations and curves of everything that comes and goes live in motion.css. */
 }
 
@@ -627,19 +625,8 @@ textarea {
   /* 内容落在状态栏下方的 28px 带里；绝对定位的历史键也要避开。 */
   align-items: center;
 }
-.kd-app[data-mobile="true"] .kd-sheet-head {
-  box-sizing: border-box;
-  padding-top: var(--kd-safe-top);
-  height: calc(var(--kd-sheet-head-h) + var(--kd-safe-top));
-  min-height: calc(var(--kd-sheet-head-h) + var(--kd-safe-top));
-}
 .kd-app[data-mobile="true"] .kd-player {
   padding-bottom: var(--kd-safe-bottom);
-}
-/* 竖屏：历史键并入右侧，尺寸对齐原来的设置/下载，后者不放大。 */
-.kd-app[data-portrait="true"] .kd-app-chrome[data-history-end="true"] .kd-app-chrome-actions {
-  gap: 0.15rem;
-  margin-bottom: 0.05rem;
 }
 
 .kd-body {
@@ -669,7 +656,7 @@ textarea {
   --kd-left: 15rem;
   --kd-right: 25rem;
 }
-/* 顶栏下方的舞台：列表 + 窄屏 Sheet。Sheet 绝对铺满这里，不盖顶栏/底栏。 */
+/* 顶栏下方的舞台：列表和它上方的抽屉。 */
 .kd-stage {
   position: relative;
   flex: 1;
@@ -682,22 +669,6 @@ textarea {
 .kd-stage > .kd-split {
   flex: 1;
   min-height: 0;
-}
-/* 三档布局的网格。把手和两侧栏由 JS 按档位摘掉，这里只负责列的构成。
-   档位定义见 src/lib/useLayoutMode.ts。 */
-.kd-split[data-layout="narrow"] {
-  display: flex;
-  gap: 0;
-}
-
-.kd-split[data-layout="narrow"] > .kd-main-slot {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.kd-split[data-layout="narrow"] > .kd-tree-slot {
-  flex: 0 0 var(--kd-left, 11rem);
-  width: var(--kd-left, 11rem);
-  min-width: var(--kd-left, 11rem) !important;
 }
 .kd-split[data-compact-tree="closed"] > .kd-tree-slot {
   flex-basis: 3.65rem;
@@ -713,19 +684,11 @@ textarea {
   min-height: 0;
   flex: 1;
 }
-.kd-split[data-layout="wide"][data-compact-tree="closed"] {
+.kd-split[data-compact-tree="closed"] {
   grid-template-columns: 3.65rem 1px minmax(0, 1fr);
 }
-.kd-split[data-layout="wide"][data-compact-tree="closed"] > .kd-main-slot {
+.kd-split[data-compact-tree="closed"] > .kd-main-slot {
   grid-column: 3;
-}
-.kd-app[data-portrait="true"] .kd-tree-slot > .kd-narrow-folder-panel,
-.kd-app[data-portrait="true"] .kd-tree-slot > .kd-narrow-folder-rail {
-  width: 100%;
-  height: 100%;
-}
-.kd-split[data-layout="narrow"] > .kd-split-handle {
-  flex: 0 0 1px;
 }
 .kd-split-handle {
   cursor: col-resize;
@@ -1472,8 +1435,7 @@ textarea {
   scrollbar-width: none;
 }
 .kd-detail-restore-tools::-webkit-scrollbar { display: none; }
-.kd-aside-head-close,
-.kd-sheet-close {
+.kd-aside-head-close {
   flex: none;
   display: inline-grid;
   place-items: center;
@@ -1487,8 +1449,7 @@ textarea {
   cursor: pointer;
   -webkit-app-region: no-drag;
 }
-.kd-aside-head-close:hover,
-.kd-sheet-close:hover {
+.kd-aside-head-close:hover {
   color: var(--kd-text);
   background: var(--kd-hover);
 }
@@ -1903,6 +1864,14 @@ textarea {
   object-fit: cover;
   display: block;
   border-radius: 3px;
+}
+/* A video no frame could be decoded from: the video mark on the cover's own tone. */
+.kd-thumb-video {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: var(--kd-muted);
 }
 /* 无封面歌曲共用的小黑胶唱盘。唱片自己就是轮廓，不再套一层方形封面框。 */
 .kd-thumb:has(> .kd-vinyl-placeholder),
@@ -2697,19 +2666,19 @@ body[data-kd-search-pointer-dragging="true"] * {
 /* A notice whose words may wrap is one run of text: the mark begins its first line, the words
    wrap across the whole width at their own breaks, and the keys follow the last word. Nothing
    holds a column beside the words. */
-.kd-notice:is(.kd-account-notice, .kd-ffmpeg-error) { display: block; }
-.kd-notice:is(.kd-account-notice, .kd-ffmpeg-error) > .kd-chip {
+.kd-notice.kd-account-notice { display: block; }
+.kd-notice.kd-account-notice > .kd-chip {
   display: inline;
   margin-right: 0.4rem;
   padding: 0;
 }
-.kd-notice:is(.kd-account-notice, .kd-ffmpeg-error) > .kd-notice-text {
+.kd-notice.kd-account-notice > .kd-notice-text {
   display: inline;
   overflow: visible;
   white-space: normal;
   overflow-wrap: break-word;
 }
-.kd-notice:is(.kd-account-notice, .kd-ffmpeg-error) > .kd-btn {
+.kd-notice.kd-account-notice > .kd-btn {
   vertical-align: middle;
   margin-left: 0.2rem;
 }
@@ -2725,7 +2694,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   position: relative;
   /* 曲目表是滚动层且带虚拟行；播放器必须建立自己的堆叠上下文。否则 WKWebView
      在底栏波形的部分区域会把鼠标按下交给表格，既选错歌又让 seek 看起来偏移。
-     z-index 高于 Sheet(50)：抽屉只盖中间区，底栏播放永远可点。 */
+     抽屉只盖列表区，底栏播放永远可点。 */
   z-index: 60;
   isolation: isolate;
   display: grid;
@@ -2736,7 +2705,7 @@ body[data-kd-search-pointer-dragging="true"] * {
      换面时别的都不动。 */
   --kd-player-side-w: clamp(14rem, 42vw, 26.5rem);
   /* 行列结构由应用统一控制，主题只负责外观，不能用独立断点把桌面底栏拆成三行。
-     中间控制组按内容取宽，两侧均分余量，但右列不小于上面那个数；只有统一的竖屏布局在下方改成三行。 */
+     中间控制组按内容取宽，两侧均分余量，但右列不小于上面那个数；只有竖长窗口在下方改成三行。 */
   grid-template-columns: minmax(0, 1fr) auto minmax(var(--kd-player-side-w), 1fr) !important;
   grid-template-rows: auto auto !important;
   grid-template-areas:
@@ -2896,7 +2865,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   opacity: 0.68;
   transition: opacity 0.12s;
 }
-/* 桌面宽唱盘：状态和曲名同一行，艺人留在第二行；窄屏布局在下方覆盖。 */
+/* 桌面宽唱盘：状态和曲名同一行，艺人留在第二行；竖长窗口在下方覆盖。 */
 .kd-app:not([data-tall="true"]) .kd-player-deck-copy {
   display: flex;
   flex-wrap: wrap;
@@ -3242,7 +3211,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   z-index: 1;
   opacity: 1;
 }
-/* A .kdjv project drawn live (KdjvLivePicture): its canvas contain-fitted over the video's place,
+/* A WebCodecs video picture (KdjvCodecPicture): its canvas contain-fitted over the video's place,
    each clip a layer of its own, placed in percent of the canvas. */
 .kd-kdjv-live {
   position: absolute;
@@ -3428,6 +3397,47 @@ body[data-kd-search-pointer-dragging="true"] * {
   font-size: var(--kd-size-xs);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
+/* What KDJ cannot do with a library video (SystemPlayerNotice): over a picture it cannot show,
+   centred on the picture's own black; while the picture plays without sound, a line at its
+   top. Ink on the picture, with the key that hands the file to the system's player. */
+.kd-video-fallback {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.6rem;
+  color: rgb(255 255 255 / 86%);
+  font-size: var(--kd-size-xs);
+  text-shadow: 0 1px 2px rgb(0 0 0 / 60%);
+  pointer-events: none;
+}
+.kd-video-fallback[data-kind="picture"] {
+  inset: 0;
+  flex-direction: column;
+  background: #000;
+}
+.kd-video-fallback[data-kind="sound"] {
+  top: 0.45rem;
+  left: 0.45rem;
+  right: 0.45rem;
+}
+.kd-video-fallback-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid rgb(255 255 255 / 40%);
+  border-radius: 999px;
+  background: rgb(0 0 0 / 45%);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.kd-video-fallback-key:hover { background: rgb(0 0 0 / 65%); border-color: rgb(255 255 255 / 70%); }
+.kd-video-fallback-key:focus-visible { outline: 2px solid var(--kd-focus, #fff); outline-offset: 1px; }
 /* 四边 + 四角拖边缩放：热区常在，视觉只在悬停小窗时略显 */
 .kd-pip-resize {
   position: absolute;
@@ -5399,7 +5409,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   font-size: var(--kd-size-xs);
 }
 /* 侧栏收起：只留主栏 */
-.kd-split[data-layout="wide"][data-tree="closed"] {
+.kd-split[data-tree="closed"] {
   grid-template-columns: minmax(0, 1fr);
 }
 
@@ -5531,7 +5541,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   margin-right: 0.3rem;
   color: var(--kd-muted);
 }
-/* A KDJ video project (docs/kdjv.md): the word 工程 on a tone of the panel, as small as the
+/* A KDJ video project an older version left in the library (.kdjv, no longer played): the word 工程 on a tone of the panel, as small as the
    icons beside other rows. Ink only. */
 .kd-project-mark {
   flex: none;
@@ -5645,95 +5655,12 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   padding: 0 0.4rem;
 }
 
-/* ============================================================
- * 竖屏 / 窄屏（≤940px）
- *
- * 设计取向：**列表是脊柱**。找歌、搜歌、看结果全在它上面，
- * 左边的文件夹和右边的详情都是"针对当前这一首/这一次搜索"的补充。
- * 所以窄屏下把三栏压成一栏，两侧的内容收进侧方抽屉，右下角两颗悬浮键
- * 按需拉出来——而不是自动弹：自动弹会在滚列表时不停打断。
- *
- * 阈值 940px 是量出来的：13rem + 22rem 两栏 = 560px，中间的表再留 380px
- * 才够放下标题+BPM+KEY+时长。这一档同时覆盖竖着的平板和横着的手机。
- * ========================================================== */
-.kd-app[data-portrait="true"] .kd-toolbar {
-  row-gap: 0.4rem;
-}
+/* 竖长桌面窗口：播放条里的时间读数让给波形。 */
 .kd-app[data-tall="true"] .kd-player-scrub > .kd-nowrap {
   display: none;
 }
 .kd-app[data-tall="true"] .kd-player-leading {
   min-width: 0;
-}
-
-/* —— 侧方抽屉（账号 / 队列 / 接播 / 详情 / 文件夹共用尺度） ——
-   挂在 .kd-stage 内，inset 铺满中间区；顶栏与底栏播放始终露出。 */
-.kd-sheet-scrim {
-  position: absolute;
-  inset: 0;
-  z-index: 50;
-  /* 轻透明遮罩：能看见底下列表，不是死灰蒙层。 */
-  background: color-mix(in srgb, var(--kd-bg) 32%, transparent);
-  display: flex;
-  justify-content: flex-end;
-  align-items: stretch;
-  /* 避免入场时整层合成导致中间区跟着抖。 */
-  contain: paint;
-  transform: translateZ(0);
-}
-.kd-sheet {
-  /* 占七成中间区宽，左侧三成留给透明遮罩，点遮罩即可关掉。 */
-  width: var(--kd-sheet-w);
-  max-width: 100%;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  background: var(--kd-panel);
-  border-left: 1px solid var(--kd-line);
-  box-shadow: var(--kd-shadow-float);
-  contain: layout paint;
-}
-.kd-sheet-head {
-  flex: none;
-  height: var(--kd-sheet-head-h);
-  min-height: var(--kd-sheet-head-h);
-  padding: 0 0.45rem 0 0.75rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: grab;
-  touch-action: none;
-  border-bottom: 1px solid var(--kd-line);
-}
-.kd-sheet-head:active {
-  cursor: grabbing;
-}
-.kd-sheet-title {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  font-size: var(--kd-size-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: left;
-}
-.kd-sheet-body {
-  flex: 1;
-  min-height: 0;
-}
-
-/* 窄屏下 Sheet 占满左侧文件夹栏以外的全部中间区，
-   左侧文件夹栏保持可点、不被半透明遮罩盖住。 */
-.kd-section-body[data-compact-tree="open"] .kd-sheet-scrim {
-  left: var(--kd-left, 11rem);
-  right: 0;
-}
-.kd-section-body[data-compact-tree="closed"] .kd-sheet-scrim {
-  left: 3.65rem;
-  right: 0;
-}
-.kd-section-body .kd-sheet {
-  width: 100%;
 }
 
 /* ============================================================
@@ -5909,10 +5836,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   background: var(--kd-hover);
 }
 
-/* ============================================================
- * 竖屏（单栏）专属收尾
- * ========================================================== */
-
 /* KEY 色块统一宽度。Camelot 的颜色是有意义的（同色系＝能接），所以留着，
    但一排宽窄不一的色块本身就是噪声——等宽之后它们在列里连成一条，
    颜色才回到"信息"的位置上。 */
@@ -5923,63 +5846,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   min-width: 2rem;
 }
 
-.kd-app[data-portrait="true"] .kd-section > form.kd-toolbar {
-  flex-wrap: nowrap;
-  gap: 0.35rem;
-  padding: 0.5rem 0.6rem;
-}
-.kd-app[data-chrome="stacked"] .kd-plats {
-  flex: none;
-  max-width: 18rem;
-  overflow: visible;
-  transition: max-width 0.24s cubic-bezier(0.2, 0.9, 0.3, 1), gap 0.24s ease;
-}
-.kd-app[data-chrome="stacked"] .kd-plat {
-  width: 1.65rem;
-  height: 1.65rem;
-  margin-left: 0;
-  transition:
-    margin-left 0.24s cubic-bezier(0.2, 0.9, 0.3, 1),
-    color 0.12s,
-    background 0.12s;
-}
-/* 手机搜索条收起时只摘要已选来源：最多两枚透明字形并排，更多的收成 +N。
-   第一次点来源组只展开；展开后列回全部来源，可照常勾选和拖动排序。 */
-.kd-app[data-chrome="stacked"] .kd-plats[data-collapsed="true"] {
-  gap: 0;
-  max-width: 3.3rem;
-  cursor: pointer;
-}
-.kd-app[data-chrome="stacked"] .kd-plats[data-collapsed="true"] .kd-plat {
-  position: relative;
-  flex: none;
-  /* 按钮底和图标镂空都保持透明，收起态只呈现品牌字形。 */
-  background: transparent;
-  box-shadow: none;
-  cursor: pointer;
-}
-.kd-app[data-chrome="stacked"] .kd-plats[data-collapsed="true"] .kd-plat + .kd-plat {
-  /* 最多只展示两枚：按钮略微收拢即可，品牌字形之间保留清楚的呼吸空间。 */
-  margin-left: -0.25rem;
-}
-.kd-app[data-chrome="stacked"] .kd-plats[data-collapsed="true"] .kd-plat-more {
-  position: relative;
-  z-index: 4;
-  flex: none;
-  align-self: center;
-  margin-left: -0.35rem;
-  color: var(--kd-muted);
-  font: 750 0.58rem/1 var(--kd-font);
-  font-variant-numeric: tabular-nums;
-  pointer-events: none;
-}
-.kd-app[data-chrome="stacked"] .kd-plats[data-collapsed="true"] .kd-plat:nth-child(1) { z-index: 9; }
-.kd-app[data-chrome="stacked"] .kd-plats[data-collapsed="true"] .kd-plat:nth-child(2) { z-index: 8; }
-.kd-app[data-chrome="stacked"] .kd-plats[data-collapsed="true"] .kd-plat:nth-child(3) { z-index: 7; }
-.kd-app[data-chrome="stacked"] .kd-plats[data-collapsed="true"] .kd-plat:nth-child(4) { z-index: 6; }
-.kd-app[data-chrome="stacked"] .kd-plats[data-collapsed="true"] .kd-plat:nth-child(5) { z-index: 5; }
-.kd-app[data-chrome="stacked"] .kd-plats[data-collapsed="true"] .kd-plat:nth-child(6) { z-index: 4; }
-.kd-app[data-chrome="stacked"] .kd-plats[data-collapsed="true"] .kd-plat:nth-child(7) { z-index: 3; }
 
 /* —— 竖长窗口的播放条分层：控制 / 正在播放 + EQ / 波形。中间的走带组不变 —— */
 .kd-app[data-tall="true"] .kd-player {
@@ -5995,10 +5861,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   min-height: 0;
   height: auto;
   padding: 0.45rem 0.7rem calc(0.45rem + 4px + env(safe-area-inset-bottom, 0));
-}
-.kd-app[data-mobile="true"][data-tall="true"] .kd-player {
-  /* 与竖屏桌面同结构，底只加一点点手势条避让，不再叠 1rem+28px。 */
-  padding: 0.45rem 0.7rem calc(0.45rem + var(--kd-safe-bottom));
 }
 .kd-app[data-tall="true"] .kd-player-transport {
   grid-area: controls;
@@ -6020,7 +5882,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   column-gap: 0.45rem;
   align-items: center;
 }
-/* 桌面唱盘 disc 跨两行给波形留空；竖屏只有一行，再写 1 / 3 会撑出隐式行，
+/* 桌面唱盘 disc 跨两行给波形留空；竖长窗口只有一行，再写 1 / 3 会撑出隐式行，
    三行字（状态 / 标题 / 艺人）就被裁成一团。 */
 .kd-app[data-tall="true"] .kd-player-deck[data-side="left"] .kd-player-disc,
 .kd-app[data-tall="true"] .kd-player-deck[data-side="left"] .kd-player-deck-copy {
@@ -6034,7 +5896,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   column-gap: 0.4rem;
   row-gap: 0.08rem;
 }
-/* 竖屏：状态单独一行；曲名 + 艺人同一行，不再上下拆开。 */
+/* 竖长窗口：状态单独一行；曲名 + 艺人同一行，不再上下拆开。 */
 .kd-app[data-tall="true"] .kd-player-deck-state {
   flex: 1 0 100%;
   margin-bottom: 0;
@@ -6062,7 +5924,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-app[data-tall="true"] .kd-player-trailing { grid-area: next; }
 .kd-app[data-tall="true"] .kd-player-scrub {
   grid-area: wave;
-  /* 竖屏不保留双唱盘的绝对区，波形应重新吃满可用宽度。 */
+  /* 竖长窗口不保留双唱盘的绝对区，波形应重新吃满可用宽度。 */
   margin-left: 0;
   margin-right: 0;
 }
@@ -6717,26 +6579,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   display: flex;
   justify-content: flex-start;
 }
-.kd-ffmpeg-actions,
-.kd-ffmpeg-command {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-}
-.kd-ffmpeg-actions > .kd-ai-prompt-copy:first-child {
-  margin-right: auto;
-}
-.kd-ffmpeg-guide {
-  display: grid;
-  gap: 0.55rem;
-}
-.kd-ffmpeg-command code {
-  flex: 1 1 10rem;
-  min-width: 0;
-  overflow-wrap: anywhere;
-  font-size: var(--kd-size-xs);
-}
 .kd-djp-font-stepper {
   display: flex;
   align-items: center;
@@ -6835,11 +6677,11 @@ button.kd-camelot-grid-key { cursor: pointer; }
 .kd-split-aside {
   position: relative;
 }
-.kd-split[data-layout="wide"] > .kd-main-slot > .kd-table-wrap {
+.kd-split > .kd-main-slot > .kd-table-wrap {
   padding-top: 0;
 }
 /* 右栏眉目贴顶；换位把手叠在眉目上沿，不再额外垫高整栏。 */
-.kd-split[data-layout="wide"] > .kd-split-aside {
+.kd-split > .kd-split-aside {
   padding-top: 0;
 }
 /* 正在拖的那一栏压暗，落点那栏亮一条左边线 */
@@ -7624,9 +7466,6 @@ button.kd-camelot-grid-key { cursor: pointer; }
 .kd-pip-float-chrome button { background: transparent; }
 .kd-pip-float-chrome button:hover { background: transparent; color: #ddd; }
 
-/* Shared popup surfaces keep the same restrained spacing and typography. */
-.kd-sheet-title { font-weight: 600; }
-.kd-sheet .kd-panel-slot + .kd-panel-slot { margin-top: 8px; }
 
 /* A folder temporarily occupies the same secondary slot as online results. */
 .kd-temporary-folder-drop {
@@ -7651,22 +7490,6 @@ button.kd-camelot-grid-key { cursor: pointer; }
 
 [data-vj-drop-over] { outline: 1px dashed var(--kd-accent); outline-offset: -2px; }
 
-.kd-media-tools-dialog {
-  width: min(620px, calc(100vw - 32px));
-  max-height: calc(100vh - 48px);
-  overflow: auto;
-  color: var(--kd-text);
-}
-.kd-media-tools-dialog::backdrop { background: rgb(0 0 0 / 25%); }
-.kd-media-tools-dialog:not([open]) { display: none; }
-.kd-ffmpeg-actions progress { width: 120px; height: 4px; accent-color: var(--kd-theme); }
-.kd-ffmpeg-settings,
-.kd-ffmpeg-guide { grid-template-columns: minmax(0, 1fr); }
-.kd-ffmpeg-error { align-items: flex-start; }
-.kd-notice.kd-ffmpeg-error > .kd-notice-text {
-  white-space: pre-wrap;
-  user-select: text;
-}
 
 .kd-overlay-scroll-host .kd-selection-bar { z-index: 7; }
 
@@ -7677,16 +7500,6 @@ html:root[data-theme-pack="sakulaptop98"] {
   --kd-wave-high:#83bacf;
 }
 
-.kd-section-body .kd-sheet-scrim[data-placement="bottom"] {
-  left: 0;
-  align-items: flex-end;
-}
-.kd-sheet-scrim[data-placement="bottom"] > .kd-sheet {
-  width: 100%;
-  height: min(70%, 32rem);
-  border-left: none;
-  border-top: 1px solid var(--kd-line);
-}
 
 /* ============================================================
  * 行列表（components/common/RowList.css 管布局，这里管外观）

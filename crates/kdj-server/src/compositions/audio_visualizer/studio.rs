@@ -1,27 +1,20 @@
-//! Authenticated editor transport. A bounded window of uploaded frames supplies the
-//! export; no frame sequence is retained on disk. The editor uploads H.264 it encoded
-//! itself (closed GOPs in Annex B), which `kdj-media` puts into an MP4 with the song's
-//! AAC (copied, or encoded by the system encoder) without FFmpeg, on every platform.
-//! Without a hardware encoder in the WebView it uploads raw RGBA or I420 frames for
-//! FFmpeg to encode instead; only that path needs FFmpeg.
+//! Authenticated editor transport. A bounded window of uploaded GOPs supplies the export; no
+//! frame sequence is retained on disk. The window's renderers encode H.264 themselves (closed
+//! GOPs in Annex B, WebCodecs), which `kdj-media` puts into an MP4 with the song's AAC (copied,
+//! or encoded by the system encoder). Nothing here runs FFmpeg.
 use super::{check, destination, source, Stage};
 use crate::{error::{ApiError, ApiResult}, state::AppState};
-use crate::compositions::{acceleration, frame_pipe::{self, FrameSource, FramePixels}, media};
 use anyhow::{Context, Result, ensure, bail};
 use axum::{Router, Extension, Json, body::Bytes, extract::{State, Path, Query, DefaultBodyLimit}, routing::{get, post}, http::HeaderMap};
-use kdj_core::{audio_visualizer::{Scene, Spectrum}, composition::EncodingAcceleration, work_scheduler::{work_scheduler, WorkClass, WorkRequest}};
+use kdj_core::{audio_visualizer::{Scene, Spectrum}, work_scheduler::{work_scheduler, WorkClass, WorkRequest}};
 use serde::{Deserialize, Serialize};
 use std::{collections::{BTreeMap, HashMap}, path::PathBuf, sync::{Arc, Mutex, Condvar}, time::{Duration, Instant}};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-const MAX_FRAME: usize = 2560 * 1440 * 4;
 const MAX_DURATION_MS: i64 = 30 * 60 * 1000;
-/// Uploaded frames the encoder has not taken yet. Parallel editor renderers fill this
-/// window while FFmpeg is busy; the byte budget bounds it on large canvases.
-/// 1080p: 12 frames (100 MB); 1440p: 8 (118 MB). Wider than the editor's renderer
-/// count, so one slow frame does not idle every other renderer.
-const WINDOW_BYTES: usize = 128 * 1024 * 1024;
+/// Uploaded GOPs the muxer has not taken yet: wider than the window's renderer count, so one
+/// slow GOP does not idle every other renderer.
 const MAX_WINDOW: u64 = 12;
 /// One editor-encoded GOP. A second of the largest canvas at 60 fps stays well below.
 const MAX_CHUNK: usize = 32 * 1024 * 1024;
@@ -29,7 +22,7 @@ fn api_check(condition: bool, detail: &str) -> ApiResult<()> {
     if condition { Ok(()) } else { Err(ApiError::bad_request(detail)) }
 }
 
-/// Frames `index..end` may be uploaded with any token from `attempt` to `token`.
+/// GOPs `index..end` may be uploaded with any token from `attempt` to `token`.
 /// `token` grows whenever the window moves; `attempt` changes when an encoder
 /// retry replays the sequence, which invalidates uploads for the previous pass.
 #[derive(Clone, Serialize)]
@@ -100,20 +93,18 @@ fn inspect_h264(bytes: &[u8]) -> Result<(u64, Vec<u8>)> {
 }
 struct Job {
     inner: Mutex<Exchange>, changed: Notify, ready: Condvar,
-    cancel: CancellationToken, count: u64, bytes: usize, window: u64, created: Instant,
+    cancel: CancellationToken, count: u64, window: u64, created: Instant,
     last_seen: Mutex<Instant>,
-    chunks: Option<Chunks>,
+    chunks: Chunks,
 }
 impl Job {
-    fn new(id: String, count: u64, bytes: usize) -> Self {
-        Self { inner: Mutex::new(Exchange { snapshot: Snapshot { id, phase: "queued".into(), status: "等待编码资源".into(), progress: 0., demand: None, output_path: String::new(), error: String::new(), version: 0 }, token: 0, attempt: 0, next: 0, pending: BTreeMap::new() }), changed: Notify::new(), ready: Condvar::new(), cancel: CancellationToken::new(), count, bytes, window: (WINDOW_BYTES / bytes.max(1)).clamp(2, MAX_WINDOW as usize) as u64, created: Instant::now(), last_seen: Mutex::new(Instant::now()), chunks: None }
-    }
     /// `frames` in GOPs of `per`. Compressed GOPs are small: the window is as wide as it gets.
-    fn chunked(id: String, frames: u64, per: u64) -> Self {
-        Self { window: MAX_WINDOW, chunks: Some(Chunks { frames, per, parameters: Mutex::new(None) }), ..Self::new(id, frames.div_ceil(per), MAX_CHUNK) }
+    fn new(id: String, frames: u64, per: u64) -> Self {
+        Self { inner: Mutex::new(Exchange { snapshot: Snapshot { id, phase: "queued".into(), status: "等待编码资源".into(), progress: 0., demand: None, output_path: String::new(), error: String::new(), version: 0 }, token: 0, attempt: 0, next: 0, pending: BTreeMap::new() }), changed: Notify::new(), ready: Condvar::new(), cancel: CancellationToken::new(), count: frames.div_ceil(per), window: MAX_WINDOW, created: Instant::now(), last_seen: Mutex::new(Instant::now()), chunks: Chunks { frames, per, parameters: Mutex::new(None) } }
     }
-    /// A GOP is a second of video drawn and encoded by one renderer, not one frame.
-    fn patience(&self) -> Duration { Duration::from_secs(if self.chunks.is_some() { 120 } else { 40 }) }
+    /// A GOP is a second of video drawn and encoded by one renderer. One that does not come for
+    /// this long means a renderer is stuck: the export stops instead of waiting for ever.
+    fn patience(&self) -> Duration { Duration::from_secs(120) }
     fn touch(&self) { *self.last_seen.lock().unwrap() = Instant::now(); }
     fn editor_idle(&self) -> bool { self.last_seen.lock().unwrap().elapsed() > Duration::from_secs(45) }
     fn snapshot(&self) -> Snapshot { self.inner.lock().unwrap().snapshot.clone() }
@@ -134,10 +125,8 @@ impl Job {
         self.publish(g);
     }
     fn submit(&self, token: u64, index: u64, pixels: Bytes) -> Result<()> {
-        match &self.chunks {
-            Some(chunks) => { ensure!(index < self.count && (1..=self.bytes).contains(&pixels.len()), "视频分段长度或序号无效"); chunks.check(index, &pixels)?; }
-            None => ensure!(pixels.len() == self.bytes, "RGBA 帧长度不匹配"),
-        }
+        ensure!(index < self.count && (1..=MAX_CHUNK).contains(&pixels.len()), "视频分段长度或序号无效");
+        self.chunks.check(index, &pixels)?;
         let mut g = self.inner.lock().unwrap();
         ensure!(!self.cancel.is_cancelled() && !g.snapshot.terminal(), "导出任务已结束");
         let open = g.snapshot.demand.as_ref().is_some_and(|d| (d.attempt..=d.token).contains(&token) && (d.index..d.end).contains(&index));
@@ -152,7 +141,7 @@ impl Job {
         self.ready.notify_all(); self.publish(&mut g);
     }
     fn receive_frame(&self, index: u64, attempt: &CancellationToken) -> Result<Bytes> {
-        ensure!(index < self.count, "帧索引无效");
+        ensure!(index < self.count, "视频分段序号无效");
         let mut g = self.inner.lock().unwrap();
         ensure!(!self.cancel.is_cancelled() && !attempt.is_cancelled(), "可视化导出已取消");
         if g.snapshot.demand.is_none() || index != g.next {
@@ -168,27 +157,14 @@ impl Job {
             ensure!(g.attempt == pass, "本次编码尝试已被替代");
             if let Some(pixels) = g.pending.remove(&index) {
                 g.next = index + 1;
-                // A stream copy reports no output time: the GOPs handed to the muxer are the progress.
-                if self.chunks.is_some() { g.snapshot.progress = g.snapshot.progress.max(g.next as f64 / self.count as f64 * 0.96); }
+                // The GOPs handed to the muxer are the progress.
+                g.snapshot.progress = g.snapshot.progress.max(g.next as f64 / self.count as f64 * 0.96);
                 self.advertise(&mut g);
                 return Ok(pixels);
             }
             if started.elapsed() > self.patience() { self.cancel.cancel(); bail!("编辑器超过 {} 秒未提供画面，已终止导出", self.patience().as_secs()); }
             g = self.ready.wait_timeout(g, Duration::from_millis(200)).unwrap().0;
         }
-    }
-}
-impl FrameSource for Job {
-    fn frame_count(&self) -> u64 { self.count }
-    fn frame_bytes(&self) -> usize { self.bytes }
-    fn variable(&self) -> bool { self.chunks.is_some() }
-    fn draw(&self, index: u64, rgba: &mut [u8]) -> Result<()> {
-        ensure!(rgba.len() == self.bytes, "RGBA 帧长度不匹配");
-        rgba.copy_from_slice(&self.receive_frame(index, &self.cancel)?);
-        Ok(())
-    }
-    fn pixels(&self, index: u64, _buffer: Vec<u8>, attempt: &CancellationToken) -> Result<FramePixels> {
-        Ok(FramePixels::Uploaded(self.receive_frame(index, attempt)?))
     }
 }
 #[derive(Default)]
@@ -215,11 +191,11 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/visualizer/render/{id}/done", post(finish_cover_render))
         .route("/api/visualizer/jobs/{id}", get(poll))
         .route("/api/visualizer/jobs/{id}/cancel", post(cancel))
-        .route("/api/visualizer/jobs/{id}/frames", post(frame).layer(DefaultBodyLimit::max(MAX_FRAME.max(MAX_CHUNK))))
+        .route("/api/visualizer/jobs/{id}/frames", post(frame).layer(DefaultBodyLimit::max(MAX_CHUNK)))
         .layer(Extension(Arc::new(Jobs::default())))
 }
 fn fingerprint(path: &std::path::Path) -> Result<String> {
-    let s = media::signature(path)?;
+    let s = super::signature(path)?;
     // Opaque string: nanosecond mtimes and u64 hashes must not round through JS Number.
     Ok(format!("{}:{}:{}", s.size, s.modified_ns, s.edge_hash))
 }
@@ -227,10 +203,9 @@ fn track_audio(state: &AppState, id: i64) -> Result<PathBuf> {
     let track = state.library.get(id)?.context("曲目不存在")?;
     source(&track.path).context("请先把完整歌曲下载到本地曲库，不能使用流媒体占位或在线试听地址")
 }
-/// A visualizer for the AI's `kdj visualizer render`: the song's own cover in the studio's
-/// default project, rendered and encoded by an open KDJ window exactly as the editor exports
-/// (WebCodecs, no FFmpeg). Only when no window takes it does the server draw the base layout
-/// with FFmpeg's filter graph (`graph.rs`), where FFmpeg is installed.
+/// `kdj visualizer render`: the song's own cover in the studio's default project, rendered and
+/// encoded by a KDJ window exactly as the studio exports (WebCodecs). The main window takes it
+/// also while it is hidden (`--no-gui`); no window, no render.
 #[derive(Deserialize)]
 struct CoverRender { track_id: i64, output_path: String, #[serde(default)] width: Option<u32>, #[serde(default)] height: Option<u32> }
 
@@ -240,10 +215,10 @@ fn window_renders() -> &'static Mutex<HashMap<String, WindowRender>> {
     static RENDERS: std::sync::OnceLock<Mutex<HashMap<String, WindowRender>>> = std::sync::OnceLock::new();
     RENDERS.get_or_init(Default::default)
 }
-/// How long an open window has to take the render before the server's own path runs.
-const WINDOW_CLAIM: Duration = Duration::from_secs(8);
+/// How long a window has to take the render.
+const WINDOW_CLAIM: Duration = Duration::from_secs(30);
 
-async fn render_in_window(state: &AppState, p: &CoverRender) -> ApiResult<Option<serde_json::Value>> {
+async fn render_in_window(state: &AppState, p: &CoverRender) -> ApiResult<serde_json::Value> {
     let id = format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>());
     let (claim, claimed) = tokio::sync::oneshot::channel();
     let (done, finished) = tokio::sync::oneshot::channel();
@@ -252,9 +227,11 @@ async fn render_in_window(state: &AppState, p: &CoverRender) -> ApiResult<Option
     impl Drop for Forget { fn drop(&mut self) { window_renders().lock().unwrap().remove(&self.0); } }
     let _forget = Forget(id.clone());
     state.hub.publish("visualizer.render.requested", &serde_json::json!({ "id": id, "track_id": p.track_id, "output_path": p.output_path, "width": p.width, "height": p.height }));
-    if !matches!(tokio::time::timeout(WINDOW_CLAIM, claimed).await, Ok(Ok(()))) { return Ok(None); }
+    if !matches!(tokio::time::timeout(WINDOW_CLAIM, claimed).await, Ok(Ok(()))) {
+        return Err(ApiError::new(axum::http::StatusCode::SERVICE_UNAVAILABLE, "没有 KDJ 窗口接手渲染可视化：请打开 KDJ 后重试"));
+    }
     match finished.await {
-        Ok(Ok(report)) => Ok(Some(report)),
+        Ok(Ok(report)) => Ok(report),
         Ok(Err(error)) => Err(ApiError::new(axum::http::StatusCode::UNPROCESSABLE_ENTITY, error)),
         Err(_) => Err(ApiError::new(axum::http::StatusCode::UNPROCESSABLE_ENTITY, "渲染可视化的窗口已关闭")),
     }
@@ -277,41 +254,9 @@ async fn finish_cover_render(Path(id): Path<String>, Json(result): Json<WindowRe
 
 async fn cover_render(State(state): State<Arc<AppState>>, Json(p): Json<CoverRender>) -> ApiResult<Json<serde_json::Value>> {
     let audio = track_audio(&state, p.track_id)?;
-    let output = PathBuf::from(&p.output_path);
-    api_check(output.is_absolute(), "输出路径要是绝对路径")?;
-    let folder = output.parent().context("输出路径没有文件夹")?.to_path_buf();
-    let (bytes, mime) = kdj_providers::tags::read_cover(&audio).context("这首歌没有内嵌封面，可视化需要一张图片")?;
-    if let Some(report) = render_in_window(&state, &p).await? {
-        return Ok(Json(report));
-    }
-    api_check(kdj_providers::ffmpeg::available(), "没有打开的 KDJ 窗口来渲染可视化，这台设备上也没有 FFmpeg")?;
-    let extension = if mime.contains("png") { "png" } else { "jpg" };
-    let cover = folder.join(format!(".kdj-visualizer-cover-{:016x}.{extension}", rand::random::<u64>()));
-    std::fs::write(&cover, &bytes).context("封面写不出来")?;
-    let mut scene = Scene::with_image(cover.to_string_lossy().into_owned());
-    scene.right.mirror_x = true;
-    scene.right.zoom = 1.35;
-    scene.canvas.width = p.width.unwrap_or(scene.canvas.width);
-    scene.canvas.height = p.height.unwrap_or(scene.canvas.height);
-    let request = super::ExportRequest {
-        scene,
-        audio_path: audio.to_string_lossy().into_owned(),
-        output_path: p.output_path.clone(),
-        acceleration: EncodingAcceleration::Auto,
-    };
-    // Dropping the request (the CLI interrupted) cancels the render.
-    let cancel = CancellationToken::new();
-    let _lifetime = cancel.clone().drop_guard();
-    let report = super::export(&request, &cancel, |_| {}, |_| {}).await;
-    let _ = std::fs::remove_file(&cover);
-    let report = report?;
-    Ok(Json(serde_json::json!({
-        "path": report.output_path,
-        "duration": report.duration_ms as f64 / 1000.0,
-        "width": report.width,
-        "height": report.height,
-        "fps": report.fps,
-    })))
+    api_check(std::path::Path::new(&p.output_path).is_absolute(), "输出路径要是绝对路径")?;
+    kdj_providers::tags::read_cover(&audio).context("这首歌没有内嵌封面，可视化需要一张图片")?;
+    Ok(Json(render_in_window(&state, &p).await?))
 }
 
 #[derive(Deserialize)]
@@ -384,22 +329,14 @@ async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> 
     cache.lock().unwrap_or_else(|e| e.into_inner()).insert(key, bytes.clone());
     Ok(analysis_response(bytes))
 }
-/// Editor renderers convert to I420 themselves when they can: the WebView's loopback
-/// upload, not drawing or encoding, caps raw RGBA at about 48 frames/s at 1080p.
-/// With a system hardware encoder in the WebView they encode as well and upload H.264.
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum PixelFormat { #[default] Rgba, Yuv420p, H264 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Export {
     track_id: i64, signature: String, duration: f64, output_path: String,
     width: u32, height: u32, fps: u32,
-    #[serde(default)] acceleration: EncodingAcceleration,
-    #[serde(default)] pixel_format: PixelFormat,
-    /// Frames in each uploaded GOP; H.264 only.
-    #[serde(default)] chunk_frames: u32,
-    /// What a hardware encoder is held to, from the project's quality; 0 leaves it to the canvas.
+    /// Frames in each uploaded GOP.
+    chunk_frames: u32,
+    /// What the encoder is held to, from the project's quality; 0 leaves it to the canvas.
     #[serde(default)] video_bitrate: u64,
     /// Video sites offer their high-quality audio tiers only for 48 kHz uploads.
     /// Off keeps the song's own rate.
@@ -407,26 +344,10 @@ struct Export {
 }
 fn yes() -> bool { true }
 impl Export {
-    /// Output audio options, placed before `-t`.
-    fn audio(&self) -> Vec<String> {
-        let mut args: Vec<String> = ["-c:a", "aac", "-b:a", "256k"].into_iter().map(str::to_string).collect();
-        if self.audio_48k { args.extend(["-ar".into(), "48000".into()]); }
-        args
-    }
     fn frames(&self) -> u64 { (self.duration * self.fps as f64).ceil() as u64 }
-    fn frame_bytes(&self) -> usize {
-        let pixels = self.width as usize * self.height as usize;
-        match self.pixel_format { PixelFormat::Rgba => pixels * 4, PixelFormat::Yuv420p => pixels * 3 / 2, PixelFormat::H264 => MAX_CHUNK }
-    }
-    fn job(&self, id: String) -> Job {
-        match self.pixel_format {
-            PixelFormat::H264 => Job::chunked(id, self.frames(), self.chunk_frames as u64),
-            _ => Job::new(id, self.frames(), self.frame_bytes()),
-        }
-    }
+    fn job(&self, id: String) -> Job { Job::new(id, self.frames(), self.chunk_frames as u64) }
     fn validate(&self) -> Result<()> {
-        let chunked = if self.pixel_format == PixelFormat::H264 { (1..=600).contains(&self.chunk_frames) } else { self.chunk_frames == 0 };
-        ensure!(chunked, "视频分段长度无效");
+        ensure!((1..=600).contains(&self.chunk_frames), "视频分段长度无效");
         ensure!(self.video_bitrate == 0 || (1_000_000..=80_000_000).contains(&self.video_bitrate), "视频码率无效");
         ensure!(self.width >= 320 && self.width <= 2560 && self.height >= 180 && self.height <= 1440 && self.width % 2 == 0 && self.height % 2 == 0 && [30, 60].contains(&self.fps), "输出画布或帧率无效");
         ensure!(self.duration.is_finite() && self.duration > 0. && self.duration <= MAX_DURATION_MS as f64 / 1000., "输出时长无效");
@@ -435,10 +356,11 @@ impl Export {
 }
 async fn start(State(state): State<Arc<AppState>>, Extension(jobs): Extension<Arc<Jobs>>, Json(p): Json<Export>) -> ApiResult<Json<Snapshot>> {
     p.validate()?;
-    // Editor-encoded video needs nothing else; raw frames need FFmpeg to encode them.
-    api_check(p.pixel_format == PixelFormat::H264 || kdj_providers::ffmpeg::available(), "这个 WebView 没有可用的硬件视频编码器，软件编码需要 FFmpeg")?;
     let audio = track_audio(&state, p.track_id)?;
     api_check(fingerprint(&audio)? == p.signature, "歌曲已变化，请重新分析后导出")?;
+    // Known before any frame is drawn: where the sound comes from, or why there is none.
+    let sound = editor_sound(&p, &audio).await?
+        .ok_or_else(|| ApiError::bad_request(NO_SOUND))?;
     let output = destination(&p.output_path)?;
     let job = Arc::new(p.job(format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>())));
     jobs.insert(job.clone())?;
@@ -457,7 +379,7 @@ async fn start(State(state): State<Arc<AppState>>, Extension(jobs): Extension<Ar
         // Tear down pending producers after, not before, classifying the result;
         // otherwise every encoder failure would be mislabeled as user cancel.
         let _lifetime = job.cancel.clone().drop_guard();
-        let result = render(&p, &audio, &output, job.clone()).await;
+        let result = render(&p, sound, &audio, &output, job.clone()).await;
         let mut g = job.inner.lock().unwrap(); g.pending.clear(); g.snapshot.demand = None;
         if let Err(error) = result {
             if !job.cancel.is_cancelled() { tracing::error!(error = %format!("{error:#}"), phase = %g.snapshot.phase, "可视化合成导出失败"); }
@@ -494,35 +416,7 @@ async fn cancel(Extension(jobs): Extension<Arc<Jobs>>, Path(id): Path<String>) -
     let job = jobs.get(&id)?; job.stop(); Ok(Json(job.snapshot()))
 }
 
-/// Stream copy of the editor's H.264. Its frames were converted to BT.709 limited range
-/// before encoding, whatever the encoder wrote into its own headers.
-fn mux_args(p: &Export, audio: &std::path::Path, stage: &std::path::Path) -> Vec<String> {
-    let mut args: Vec<String> = ["-v", "error", "-nostdin", "-n", "-progress", "pipe:1", "-f", "h264", "-framerate"].into_iter().map(str::to_string).collect();
-    args.extend([p.fps.to_string(), "-i".into(), "pipe:0".into(), "-i".into(), audio.to_string_lossy().into_owned(), "-filter_complex".into(), format!("[1:a:0]asetpts=PTS-STARTPTS,atrim=duration={:.9}[aout]", p.duration)]);
-    // The bare bitstream carries no timestamps and FFmpeg derives them in microseconds
-    // (30 fps becomes 1000000/33333): number the packets at the exact frame rate instead.
-    let stream = format!("h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0,setts=ts=N/({fps}*TB):duration=1/({fps}*TB)", fps = p.fps);
-    args.extend(["-map", "0:v:0", "-map", "[aout]", "-map_metadata", "-1", "-map_chapters", "-1", "-c:v:0", "copy", "-bsf:v:0", &stream].into_iter().map(str::to_string));
-    args.extend(p.audio()); args.push("-t".into());
-    args.extend([format!("{:.9}", p.duration), "-movflags".into(), "+faststart".into(), stage.join("render.mp4").to_string_lossy().into_owned()]); args
-}
-fn render_args(p: &Export, audio: &std::path::Path, stage: &std::path::Path) -> Vec<String> {
-    // I420 frames arrive already in BT.709 limited range; only RGBA needs swscale.
-    // Editor-encoded H.264 never reaches this graph: see `mux_args`.
-    let (format, convert) = match p.pixel_format {
-        PixelFormat::Rgba => ("rgba", "scale=in_range=full:out_range=tv:out_color_matrix=bt709,format=yuv420p,"),
-        PixelFormat::Yuv420p | PixelFormat::H264 => ("yuv420p", ""),
-    };
-    let mut args: Vec<String> = ["-v", "error", "-nostdin", "-n", "-progress", "pipe:1", "-filter_complex_threads", "2", "-f", "rawvideo", "-pixel_format", format, "-video_size"].into_iter().map(str::to_string).collect();
-    args.extend([format!("{}x{}", p.width, p.height), "-framerate".into(), p.fps.to_string(), "-i".into(), "pipe:0".into(), "-i".into(), audio.to_string_lossy().into_owned(), "-filter_complex".into(), format!("[0:v]setpts=PTS-STARTPTS,{convert}setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout];[1:a:0]asetpts=PTS-STARTPTS,atrim=duration={:.9}[aout]", p.duration)]);
-    // Parallel editor renderers keep the software encoder busy: two x264 threads ran
-    // flat out at about 86 frames/s at 1080p. Hardware encoders ignore this option.
-    let threads = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 8)).to_string();
-    args.extend(["-map", "[vout]", "-map", "[aout]", "-map_metadata", "-1", "-map_chapters", "-1", "-c:v:0", "libx264", "-preset", "veryfast", "-crf", "19", "-threads:v:0", &threads, "-pix_fmt:v:0", "yuv420p"].into_iter().map(str::to_string));
-    args.extend(p.audio()); args.push("-t".into());
-    args.extend([format!("{:.9}", p.duration), "-movflags".into(), "+faststart".into(), stage.join("render.mp4").to_string_lossy().into_owned()]); args
-}
-async fn render(p: &Export, audio: &std::path::Path, output: &std::path::Path, job: Arc<Job>) -> Result<()> {
+async fn render(p: &Export, sound: Sound, audio: &std::path::Path, output: &std::path::Path, job: Arc<Job>) -> Result<()> {
     let token = job.cancel.clone();
     let _work = tokio::task::spawn_blocking(move || work_scheduler().acquire(WorkRequest::new(WorkClass::MediaComposition), || token.is_cancelled()).map_err(|_| anyhow::anyhow!("可视化导出已取消"))).await??;
     check(&job.cancel)?;
@@ -531,29 +425,14 @@ async fn render(p: &Export, audio: &std::path::Path, output: &std::path::Path, j
     ensure!(fingerprint(audio)? == p.signature, "音频已变化，未开始编码");
     let stage = Stage::new(output.parent().context("输出目录无效")?)?;
     job.update(|s| { s.phase = "encoding".into(); s.status = "绘制与编码".into(); });
-    let duration = (p.duration * 1000.).round() as i64;
-    if p.pixel_format == PixelFormat::H264 {
-        // Nothing left to encode but the audio, and no other encoder to retry on.
-        job.update(|s| s.status = "系统硬件编码".into());
-        match editor_sound(p, audio).await? {
-            Some(sound) => mux_editor_video(p, sound, audio, &stage.0, job.clone()).await?,
-            // Neither an AAC song to copy nor a system AAC encoder (Linux): FFmpeg encodes the audio.
-            None => frame_pipe::render(&kdj_providers::ffmpeg::binary().context("这台设备没有系统 AAC 编码器，导出音轨需要 FFmpeg")?, &mux_args(p, audio, &stage.0), duration, &job.cancel, job.clone(),
-                |v| job.update(|s| s.progress = s.progress.max(v * 0.96))).await?,
-        }
-    } else {
-        let bitrate = if p.video_bitrate > 0 { p.video_bitrate } else { acceleration::bitrate(p.width, p.height, p.fps as f64) };
-        acceleration::render_frames(&render_args(p, audio, &stage.0), duration, &job.cancel, p.acceleration,
-            |v| job.update(|s| s.progress = s.progress.max(v * 0.96)),
-            |message| job.update(|s| s.status = message.to_owned()), job.clone(), bitrate).await?;
-    }
+    mux_editor_video(p, sound, audio, &stage.0, job.clone()).await?;
     check(&job.cancel)?;
     job.update(|s| { s.phase = "validating".into(); s.status = "校验画面、音轨和文件版本".into(); s.progress = 0.97; s.demand = None; });
     let temporary = stage.0.join("render.mp4");
     let checked = { let path = temporary.clone(); tokio::task::spawn_blocking(move || kdj_media::export::check(&path)).await?? };
     validate_output(p, &checked)?;
     ensure!(fingerprint(audio)? == p.signature, "导出期间音频已变化，未提交成品");
-    // Windows FlushFileBuffers requires GENERIC_WRITE, even after FFmpeg exits.
+    // Windows FlushFileBuffers requires GENERIC_WRITE.
     std::fs::File::options().write(true).open(&temporary)
         .with_context(|| format!("无法打开成品进行落盘同步：{}", temporary.display()))?
         .sync_all().context("成品落盘同步失败")?;
@@ -566,7 +445,7 @@ async fn render(p: &Export, audio: &std::path::Path, output: &std::path::Path, j
 }
 
 /// The read-back export against the request: picture size, every frame, both tracks
-/// as long as the song within a frame and a bit (the tolerance FFmpeg's path had).
+/// as long as the song within a frame and a bit.
 fn validate_output(p: &Export, checked: &kdj_media::export::Checked) -> Result<()> {
     let expected = p.duration * 1000.;
     let tolerance = (2000. / p.fps as f64).ceil() + 60.;
@@ -586,6 +465,9 @@ enum Sound {
     /// The system encoder makes it, alongside the video.
     Encode { rate: u32, frames: u64 },
 }
+
+/// Why an export has no sound: neither an AAC song to copy nor a system AAC encoder (Linux).
+const NO_SOUND: &str = "这台设备没有系统 AAC 编码器，只能导出原曲是 AAC（M4A）的歌";
 
 /// `None` where neither is possible (no AAC song, no system encoder: Linux).
 async fn editor_sound(p: &Export, audio: &std::path::Path) -> Result<Option<Sound>> {
@@ -622,7 +504,7 @@ async fn mux_editor_video(p: &Export, sound: Sound, audio: &std::path::Path, sta
         };
         let video = (|| {
             let mut video = kdj_media::export::VideoTrack::create(&samples, 0, p.width, p.height, p.fps)?;
-            for index in 0..job.frame_count() {
+            for index in 0..job.count {
                 let gop = job.receive_frame(index, &job.cancel)?;
                 video.push_gop(&gop).with_context(|| format!("第 {index} 段视频无法封装"))?;
             }
@@ -676,106 +558,6 @@ mod tests {
         assert!(cache.0.len() <= 4);
     }
 
-    #[test]
-    fn studio_editor_heartbeat_and_terminal_cancel() {
-        let job = Job::new("heartbeat".into(), 1, 4);
-        *job.last_seen.lock().unwrap() = Instant::now() - Duration::from_secs(46);
-        assert!(job.editor_idle()); job.touch(); assert!(!job.editor_idle());
-        job.update(|s| s.phase = "done".into()); job.stop();
-        assert_eq!(job.snapshot().phase, "done"); assert!(!job.cancel.is_cancelled());
-    }
-    #[test]
-    fn studio_canvas_limits() {
-        let mut p = Export { track_id: 1, signature: String::new(), duration: 3., output_path: String::new(), width: 1920, height: 840, fps: 60, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::default(), chunk_frames: 0, video_bitrate: 0, audio_48k: true };
-        assert!(p.validate().is_ok()); p.width = 1921; assert!(p.validate().is_err()); p.width = 1920;
-        p.video_bitrate = 8_000_000; assert!(p.validate().is_ok()); p.video_bitrate = 900_000; assert!(p.validate().is_err(), "a bitrate no encoder holds a picture at"); p.video_bitrate = 0;
-        p.duration = f64::NAN; assert!(p.validate().is_err());
-    }
-    #[test]
-    fn studio_transport_is_bounded_and_replayable() {
-        let job = Arc::new(Job::new("test".into(), 2, 16));
-        for index in [0, 1, 0] {
-            let source = job.clone(); let draw = std::thread::spawn(move || { let mut rgba = [0; 16]; source.draw(index, &mut rgba).unwrap(); rgba });
-            let demand = loop { if let Some(d) = job.snapshot().demand { break d; } std::thread::sleep(Duration::from_millis(1)); };
-            assert!(job.submit(demand.token + 1, index, Bytes::from(vec![3; 16])).is_err());
-            assert!(job.submit(demand.token, index, Bytes::from(vec![3; 15])).is_err());
-            job.submit(demand.token, index, Bytes::from(vec![3; 16])).unwrap();
-            assert_eq!(draw.join().unwrap(), [3; 16]);
-        }
-        job.stop(); assert!(job.draw(0, &mut [0; 16]).is_err());
-    }
-    #[test]
-    fn studio_window_accepts_out_of_order_uploads_once() {
-        let job = Arc::new(Job::new("window".into(), 5, 16));
-        assert_eq!(job.window, MAX_WINDOW);
-        let source = job.clone();
-        let encoder = std::thread::spawn(move || (0..5).map(|i| { let mut rgba = [0; 16]; source.draw(i, &mut rgba).unwrap(); rgba[0] }).collect::<Vec<_>>());
-        let demand = loop { if let Some(d) = job.snapshot().demand { break d; } std::thread::sleep(Duration::from_millis(1)); };
-        assert_eq!((demand.index, demand.end, demand.attempt), (0, 5, demand.token));
-        // Renderers finish in any order; the encoder still takes frames in sequence.
-        for index in [3, 1, 4, 2, 0] { job.submit(demand.token, index, Bytes::from(vec![index as u8; 16])).unwrap(); }
-        assert_eq!(encoder.join().unwrap(), [0, 1, 2, 3, 4]);
-        let done = job.snapshot();
-        assert!(done.demand.is_none() && done.version > demand.token);
-        assert!(job.submit(demand.token, 4, Bytes::from(vec![0; 16])).is_err(), "consumed frame accepted twice");
-    }
-    #[test]
-    fn studio_window_is_bounded_and_rejects_duplicates() {
-        let job = Arc::new(Job::new("bounded".into(), 100, MAX_FRAME));
-        assert_eq!(job.window, (WINDOW_BYTES / MAX_FRAME) as u64);
-        let source = job.clone();
-        let encoder = std::thread::spawn(move || { let mut rgba = vec![0; MAX_FRAME]; source.draw(0, &mut rgba) });
-        let demand = loop { if let Some(d) = job.snapshot().demand { break d; } std::thread::sleep(Duration::from_millis(1)); };
-        let frame = Bytes::from(vec![0; MAX_FRAME]);
-        assert!(job.submit(demand.token, demand.end, frame.clone()).is_err(), "frame beyond the window accepted");
-        job.submit(demand.token, demand.end - 1, frame.clone()).unwrap();
-        assert!(job.submit(demand.token, demand.end - 1, frame.clone()).is_err(), "duplicate frame accepted");
-        job.submit(demand.token, 0, frame).unwrap();
-        encoder.join().unwrap().unwrap();
-        let moved = job.snapshot().demand.unwrap();
-        assert_eq!((moved.index, moved.end, moved.attempt), (1, demand.end + 1, demand.attempt));
-        assert!(moved.token > demand.token);
-        job.stop();
-    }
-    #[test]
-    fn studio_retry_discards_the_previous_pass() {
-        let job = Arc::new(Job::new("retry".into(), 3, 16));
-        let source = job.clone();
-        let first = std::thread::spawn(move || { let mut rgba = [0; 16]; source.draw(0, &mut rgba) });
-        let old = loop { if let Some(d) = job.snapshot().demand { break d; } std::thread::sleep(Duration::from_millis(1)); };
-        job.submit(old.token, 0, Bytes::from(vec![1; 16])).unwrap();
-        job.submit(old.token, 2, Bytes::from(vec![1; 16])).unwrap();
-        first.join().unwrap().unwrap();
-        // A hardware failure makes the software attempt replay from frame 0.
-        let source = job.clone();
-        let retry = std::thread::spawn(move || { let mut rgba = [0; 16]; source.draw(0, &mut rgba).map(|_| rgba[0]) });
-        let new = loop { match job.snapshot().demand { Some(d) if d.attempt > old.attempt => break d, _ => std::thread::sleep(Duration::from_millis(1)) } };
-        assert_eq!((new.index, new.end), (0, 3));
-        assert!(job.submit(old.token, 1, Bytes::from(vec![1; 16])).is_err(), "upload for the old pass accepted");
-        job.submit(new.token, 0, Bytes::from(vec![2; 16])).unwrap();
-        assert_eq!(retry.join().unwrap().unwrap(), 2);
-        assert!(job.inner.lock().unwrap().pending.is_empty(), "frame 2 of the old pass survived the retry");
-        job.stop();
-    }
-    #[test]
-    fn studio_graph_uses_only_argv_paths_and_no_overwrite() {
-        let p = Export { track_id: 1, signature: String::new(), duration: 2., output_path: String::new(), width: 320, height: 180, fps: 30, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::default(), chunk_frames: 0, video_bitrate: 0, audio_48k: true };
-        let args = render_args(&p, std::path::Path::new("odd ' [audio].wav"), std::path::Path::new("stage"));
-        assert!(!args.contains(&"-y".into())); assert_eq!(args.windows(2).filter(|a| a[0] == "-i" && a[1] == "pipe:0").count(), 1);
-        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1]; assert!(!graph.contains("odd"));
-    }
-    #[test]
-    fn studio_i420_frames_skip_the_rgb_conversion() {
-        let request: Export = serde_json::from_value(serde_json::json!({ "track_id": 1, "signature": "s", "duration": 2.0, "output_path": "/o.mp4", "width": 1920, "height": 1080, "fps": 30 })).unwrap();
-        assert_eq!((request.pixel_format, request.frame_bytes()), (PixelFormat::Rgba, 1920 * 1080 * 4), "older editors upload RGBA");
-        let p = Export { pixel_format: PixelFormat::Yuv420p, ..request };
-        assert_eq!(p.frame_bytes(), 1920 * 1080 * 3 / 2);
-        let args = render_args(&p, std::path::Path::new("audio.wav"), std::path::Path::new("stage"));
-        assert_eq!(args[args.iter().position(|a| a == "-pixel_format").unwrap() + 1], "yuv420p");
-        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
-        assert!(!graph.contains("scale=") && graph.contains("setparams=range=tv:color_primaries=bt709"), "{graph}");
-        assert!(serde_json::from_value::<Export>(serde_json::json!({ "track_id": 1, "signature": "s", "duration": 2.0, "output_path": "/o.mp4", "width": 1920, "height": 1080, "fps": 30, "pixel_format": "nv12" })).is_err());
-    }
     /// Parameter sets, a key picture, then delta pictures of two slices each.
     fn gop(frames: u64, sps: u8) -> Vec<u8> {
         let mut bytes = vec![0, 0, 0, 1, 0x67, 0x64, sps, 0, 0, 0, 1, 0x68, 0xee, 0, 0, 1, 0x65, 0x88, 0x84];
@@ -783,7 +565,110 @@ mod tests {
         bytes
     }
     fn h264(duration: f64, chunk_frames: u32) -> Export {
-        Export { track_id: 1, signature: String::new(), duration, output_path: String::new(), width: 1920, height: 1080, fps: 30, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::H264, chunk_frames, video_bitrate: 0, audio_48k: true }
+        Export { track_id: 1, signature: String::new(), duration, output_path: String::new(), width: 1920, height: 1080, fps: 30, chunk_frames, video_bitrate: 0, audio_48k: true }
+    }
+    /// The GOP of one frame, told apart by a trailing SEI byte the inspection ignores.
+    fn tagged(tag: u8) -> Bytes {
+        let mut bytes = gop(1, 0x1f);
+        bytes.extend([0, 0, 1, 0x06, tag]);
+        Bytes::from(bytes)
+    }
+    fn tag(bytes: &Bytes) -> u8 { *bytes.last().unwrap() }
+    fn demand(job: &Job) -> Demand { loop { if let Some(d) = job.snapshot().demand { break d; } std::thread::sleep(Duration::from_millis(1)); } }
+
+    #[test]
+    fn studio_editor_heartbeat_and_terminal_cancel() {
+        let job = Job::new("heartbeat".into(), 1, 1);
+        *job.last_seen.lock().unwrap() = Instant::now() - Duration::from_secs(46);
+        assert!(job.editor_idle()); job.touch(); assert!(!job.editor_idle());
+        job.update(|s| s.phase = "done".into()); job.stop();
+        assert_eq!(job.snapshot().phase, "done"); assert!(!job.cancel.is_cancelled());
+    }
+    #[test]
+    fn studio_canvas_limits() {
+        let mut p = Export { track_id: 1, signature: String::new(), duration: 3., output_path: String::new(), width: 1920, height: 840, fps: 60, chunk_frames: 60, video_bitrate: 0, audio_48k: true };
+        assert!(p.validate().is_ok()); p.width = 1921; assert!(p.validate().is_err()); p.width = 1920;
+        p.video_bitrate = 8_000_000; assert!(p.validate().is_ok()); p.video_bitrate = 900_000; assert!(p.validate().is_err(), "a bitrate no encoder holds a picture at"); p.video_bitrate = 0;
+        p.chunk_frames = 0; assert!(p.validate().is_err(), "every export uploads GOPs"); p.chunk_frames = 60;
+        p.duration = f64::NAN; assert!(p.validate().is_err());
+    }
+    #[test]
+    fn studio_takes_only_window_encoded_gops() {
+        let request = serde_json::json!({ "track_id": 1, "signature": "s", "duration": 2.0, "output_path": "/o.mp4", "width": 1920, "height": 1080, "fps": 30, "chunk_frames": 30 });
+        let p: Export = serde_json::from_value(request.clone()).unwrap();
+        assert_eq!((p.frames(), p.job("id".into()).count), (60, 2));
+        // Raw frames for a server-side encoder are gone with it: such a request is refused.
+        for (key, value) in [("pixel_format", "rgba"), ("acceleration", "software")] {
+            let mut raw = request.clone(); raw[key] = value.into();
+            assert!(serde_json::from_value::<Export>(raw).is_err(), "{key}");
+        }
+        let mut no_chunks = request; no_chunks.as_object_mut().unwrap().remove("chunk_frames");
+        assert!(serde_json::from_value::<Export>(no_chunks).is_err());
+    }
+    #[test]
+    fn studio_transport_is_bounded_and_replayable() {
+        let job = Arc::new(Job::new("test".into(), 2, 1));
+        for index in [0, 1, 0] {
+            let source = job.clone(); let take = std::thread::spawn(move || source.receive_frame(index, &source.cancel).map(|b| tag(&b)));
+            let demand = demand(&job);
+            assert!(job.submit(demand.token + 1, index, tagged(3)).is_err());
+            assert!(job.submit(demand.token, index, Bytes::from(gop(2, 0x1f))).is_err(), "a GOP of the wrong length");
+            job.submit(demand.token, index, tagged(3)).unwrap();
+            assert_eq!(take.join().unwrap().unwrap(), 3);
+        }
+        job.stop(); assert!(job.receive_frame(0, &job.cancel).is_err());
+    }
+    #[test]
+    fn studio_window_accepts_out_of_order_uploads_once() {
+        let job = Arc::new(Job::new("window".into(), 5, 1));
+        assert_eq!(job.window, MAX_WINDOW);
+        let source = job.clone();
+        let muxer = std::thread::spawn(move || (0..5).map(|i| tag(&source.receive_frame(i, &source.cancel).unwrap())).collect::<Vec<_>>());
+        let demand = demand(&job);
+        assert_eq!((demand.index, demand.end, demand.attempt), (0, 5, demand.token));
+        // Renderers finish in any order; the muxer still takes GOPs in sequence.
+        for index in [3, 1, 4, 2, 0] { job.submit(demand.token, index, tagged(index as u8)).unwrap(); }
+        assert_eq!(muxer.join().unwrap(), [0, 1, 2, 3, 4]);
+        let done = job.snapshot();
+        assert!(done.demand.is_none() && done.version > demand.token);
+        assert!(job.submit(demand.token, 4, tagged(0)).is_err(), "consumed GOP accepted twice");
+    }
+    #[test]
+    fn studio_window_is_bounded_and_rejects_duplicates() {
+        let job = Arc::new(Job::new("bounded".into(), 100, 1));
+        let source = job.clone();
+        let muxer = std::thread::spawn(move || source.receive_frame(0, &source.cancel).map(|_| ()));
+        let demand = demand(&job);
+        assert_eq!(demand.end - demand.index, MAX_WINDOW);
+        assert!(job.submit(demand.token, demand.end, tagged(0)).is_err(), "GOP beyond the window accepted");
+        job.submit(demand.token, demand.end - 1, tagged(0)).unwrap();
+        assert!(job.submit(demand.token, demand.end - 1, tagged(0)).is_err(), "duplicate GOP accepted");
+        job.submit(demand.token, 0, tagged(0)).unwrap();
+        muxer.join().unwrap().unwrap();
+        let moved = job.snapshot().demand.unwrap();
+        assert_eq!((moved.index, moved.end, moved.attempt), (1, demand.end + 1, demand.attempt));
+        assert!(moved.token > demand.token);
+        job.stop();
+    }
+    #[test]
+    fn studio_retry_discards_the_previous_pass() {
+        let job = Arc::new(Job::new("retry".into(), 3, 1));
+        let source = job.clone();
+        let first = std::thread::spawn(move || source.receive_frame(0, &source.cancel).map(|_| ()));
+        let old = demand(&job);
+        job.submit(old.token, 0, tagged(1)).unwrap();
+        job.submit(old.token, 2, tagged(1)).unwrap();
+        first.join().unwrap().unwrap();
+        // Asking for GOP 0 again replays the sequence: uploads of the old pass are void.
+        let source = job.clone();
+        let retry = std::thread::spawn(move || source.receive_frame(0, &source.cancel).map(|b| tag(&b)));
+        let new = loop { match job.snapshot().demand { Some(d) if d.attempt > old.attempt => break d, _ => std::thread::sleep(Duration::from_millis(1)) } };
+        assert_eq!((new.index, new.end), (0, 3));
+        assert!(job.submit(old.token, 1, tagged(1)).is_err(), "upload for the old pass accepted");
+        job.submit(new.token, 0, tagged(2)).unwrap();
+        assert_eq!(retry.join().unwrap().unwrap(), 2);
+        assert!(job.inner.lock().unwrap().pending.is_empty(), "GOP 2 of the old pass survived the retry");
+        job.stop();
     }
     #[test]
     fn studio_h264_gops_are_counted_and_must_open_with_their_parameter_sets() {
@@ -808,39 +693,17 @@ mod tests {
     fn studio_h264_job_moves_whole_gops_of_any_length() {
         let p = h264(2.5, 30);
         p.validate().unwrap();
-        assert!(h264(2.5, 0).validate().is_err() && Export { pixel_format: PixelFormat::Yuv420p, ..h264(2.5, 30) }.validate().is_err());
+        assert!(h264(2.5, 0).validate().is_err());
         let job = Arc::new(p.job("gops".into()));
-        assert_eq!((job.count, job.window, job.variable(), job.patience()), (3, MAX_WINDOW, true, Duration::from_secs(120)));
+        assert_eq!((job.count, job.window, job.patience()), (3, MAX_WINDOW, Duration::from_secs(120)));
         let source = job.clone();
-        let muxer = std::thread::spawn(move || (0..3).map(|i| match source.pixels(i, Vec::new(), &source.cancel).unwrap() { FramePixels::Uploaded(bytes) => bytes.len(), FramePixels::Raster(_) => 0 }).collect::<Vec<_>>());
-        let demand = loop { if let Some(d) = job.snapshot().demand { break d; } std::thread::sleep(Duration::from_millis(1)); };
+        let muxer = std::thread::spawn(move || (0..3).map(|i| source.receive_frame(i, &source.cancel).unwrap().len()).collect::<Vec<_>>());
+        let demand = demand(&job);
         assert_eq!((demand.index, demand.end), (0, 3));
         assert!(job.submit(demand.token, 2, Bytes::from(gop(30, 0x1f))).is_err(), "a full GOP accepted as the 15-frame tail");
         assert!(job.submit(demand.token, 3, Bytes::from(gop(30, 0x1f))).is_err() && job.submit(demand.token, 0, Bytes::new()).is_err());
         for (index, frames) in [(2, 15), (0, 30), (1, 30)] { job.submit(demand.token, index, Bytes::from(gop(frames, 0x1f))).unwrap(); }
         assert_eq!(muxer.join().unwrap(), [gop(30, 0x1f).len(), gop(30, 0x1f).len(), gop(15, 0x1f).len()]);
         assert!((job.snapshot().progress - 0.96).abs() < 1e-9, "the GOPs handed to the muxer are the progress");
-    }
-    #[test]
-    fn studio_h264_is_copied_not_encoded_again() {
-        let request: Export = serde_json::from_value(serde_json::json!({ "track_id": 1, "signature": "s", "duration": 2.0, "output_path": "/o.mp4", "width": 1920, "height": 1080, "fps": 30, "pixel_format": "h264", "chunk_frames": 30 })).unwrap();
-        assert_eq!((request.pixel_format, request.chunk_frames, request.frames(), request.job("id".into()).count), (PixelFormat::H264, 30, 60, 2));
-        let args = mux_args(&request, std::path::Path::new("odd ' [audio].wav"), std::path::Path::new("stage"));
-        assert!(args.windows(2).any(|a| a[0] == "-c:v:0" && a[1] == "copy") && args.windows(2).any(|a| a[0] == "-framerate" && a[1] == "30"));
-        assert!(!args.contains(&"libx264".into()) && !args.contains(&"-y".into()) && args.contains(&"-n".into()));
-        assert_eq!(args.windows(2).filter(|a| a[0] == "-i" && a[1] == "pipe:0").count(), 1);
-        assert!(args.iter().any(|a| a.contains("matrix_coefficients=1") && a.contains("video_full_range_flag=0")), "the copied stream must be tagged BT.709 limited range");
-        assert!(args.iter().any(|a| a.ends_with("setts=ts=N/(30*TB):duration=1/(30*TB)")), "packets must be timed at exactly the frame rate");
-        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1]; assert!(!graph.contains("odd"));
-    }
-    #[test]
-    fn studio_audio_is_48k_unless_turned_off() {
-        let request: Export = serde_json::from_value(serde_json::json!({ "track_id": 1, "signature": "s", "duration": 2.0, "output_path": "/o.mp4", "width": 1920, "height": 1080, "fps": 30 })).unwrap();
-        let rate = |args: Vec<String>| args.windows(2).find(|a| a[0] == "-ar").map(|a| a[1].clone());
-        let (audio, stage) = (std::path::Path::new("audio.wav"), std::path::Path::new("stage"));
-        assert_eq!(rate(render_args(&request, audio, stage)).as_deref(), Some("48000"), "older editors get 48 kHz");
-        assert_eq!(rate(mux_args(&request, audio, stage)).as_deref(), Some("48000"));
-        let off = Export { audio_48k: false, ..request };
-        assert_eq!((rate(render_args(&off, audio, stage)), rate(mux_args(&off, audio, stage))), (None, None));
     }
 }

@@ -164,13 +164,13 @@
 /* A tall window's page already ends that gap above a bubble that is kept across it
    (TaskBubbles.css): a panel that comes all the way down there keeps no second gap of its own,
    so the drawer at its longest and the block above end on the same line. */
-.kd-app[data-tall="true"]:not([data-mobile="true"]) .kd-drawer {
+.kd-app[data-tall="true"] .kd-drawer {
   --kd-drawer-room: calc(100% - max(0px, var(--kd-drawer-gap) - var(--kd-window-floor, 0px)));
 }
 /* Such a panel's shadow falls into that gap. Where the frame of the panels is cut off at the
    list's bottom edge, the cut is taken to the far side of the gap in a tall window: nothing
    but the bubble's own strip lies beyond it. */
-.kd-app[data-tall="true"]:not([data-mobile="true"]) .kd-drawer-sheets {
+.kd-app[data-tall="true"] .kd-drawer-sheets {
   clip-path: inset(-100vmax -100vmax calc(-1 * min(12px, var(--kd-window-floor, 0px))) -100vmax);
 }
 .kd-drawer-sheets .kd-drawer[data-takes-window] {

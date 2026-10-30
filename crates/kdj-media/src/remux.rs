@@ -1,9 +1,10 @@
-//! Download finishing without FFmpeg: DASH / adaptive video and audio streams into one
-//! MP4, an audio track out into M4A, and the calibrated start offset.
+//! Download finishing: DASH / adaptive video and audio streams into one MP4, an audio track
+//! out into M4A, and the calibrated start offset.
 //!
-//! The offset is held to the sample, as FFmpeg's re-encode was: audio is decoded, cut or
-//! padded and encoded again; video is copied and its edit list starts it at the same
-//! instant (whole GOPs before the cut are dropped, a negative offset is an empty edit).
+//! The offset is held to the sample: audio is decoded, cut or padded and encoded again with
+//! the system AAC encoder; video is copied and its edit list starts it at the same instant
+//! (whole GOPs before the cut are dropped, a negative offset is an empty edit). Audio that is
+//! not AAC (MP3, FLAC) is re-encoded the same way when it has to go into M4A.
 
 use crate::audio::{self, Shape};
 use crate::mp4::read::{Movie, Track};
@@ -11,7 +12,7 @@ use crate::mp4::write::{self, Brand, Edit, OutSample, OutTrack};
 use anyhow::{bail, ensure, Context, Result};
 use std::path::{Path, PathBuf};
 
-/// AAC bitrate for re-encoded download audio (FFmpeg used 192k for video, 128k for audio).
+/// AAC bitrate for re-encoded download audio.
 const VIDEO_AUDIO_BITRATE: u32 = 192_000;
 const AUDIO_BITRATE: u32 = 192_000;
 
@@ -73,8 +74,12 @@ fn temp(job: &Job, name: &str) -> PathBuf {
 }
 
 /// The audio track of `path`, re-encoded with the offset applied. The source's own edit
-/// (encoder priming, end padding) is honoured first, as players and FFmpeg honour it.
+/// (encoder priming, end padding) is honoured first, as players honour it.
 fn shifted_audio(path: &Path, track: &Track, scratch: &Path, source: usize, offset_ms: i64, bitrate: u32, cancelled: &dyn Fn() -> bool) -> Result<OutTrack> {
+    if crate::pcm::inspect(path).is_err() {
+        bail!("这个音轨的编码解不了（例如杜比 E-AC-3），不能加 Offset，也不能转成 AAC");
+    }
+    ensure!(crate::aac::available(), "这台设备没有系统 AAC 编码器，不能加 Offset，也不能把音轨转成 AAC");
     let rate = track.aac().map_or(track.timescale, |a| a.sample_rate).max(1) as i64;
     let start = track.edit_media_time.unwrap_or(0).max(0) * rate / track.timescale.max(1) as i64;
     let length = (track.duration_secs() * rate as f64).round() as i64;
@@ -138,12 +143,12 @@ pub fn mux(video: Option<&Path>, audio: Option<&Path>, job: &Job) -> Result<()> 
     result
 }
 
-/// The AAC audio track of `source` alone, as M4A. Errors when it is not AAC in MP4.
+/// The audio track of `source` alone, as M4A: AAC copied, anything else symphonia decodes
+/// (MP3, FLAC) re-encoded to AAC.
 pub fn extract_audio(source: &Path, job: &Job) -> Result<()> {
     let movie = Movie::open(source)?;
     let track = movie.audio().context("文件里没有音轨")?;
-    ensure!(track.aac().is_some(), "音轨不是 AAC，不能直接装进 M4A");
-    if job.offset_ms == 0 {
+    if job.offset_ms == 0 && track.aac().is_some() {
         return mux(None, Some(source), job);
     }
     let file = temp(job, "audio");

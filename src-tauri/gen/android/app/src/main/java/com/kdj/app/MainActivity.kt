@@ -1,5 +1,6 @@
 package com.kdj.app
 
+import app.tauri.nativeaudio.ExportForeground
 import app.tauri.nativeaudio.NativeAudioRuntime
 import android.Manifest
 import android.app.PictureInPictureParams
@@ -15,6 +16,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.Lifecycle
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : TauriActivity() {
@@ -95,8 +97,16 @@ class MainActivity : TauriActivity() {
 
   override fun onPause() {
     super.onPause()
-    // Wry pauses its WebView with the Activity; PiP is still visible and must keep decoding.
-    if (isInPictureInPictureMode || NativeAudioRuntime.needsForeground()) videoView?.onResume()
+    // Wry pauses its WebView with the Activity; PiP is still visible and must keep decoding,
+    // and an export draws and encodes its frames in the WebView.
+    if (isInPictureInPictureMode || NativeAudioRuntime.needsForeground() || ExportForeground.active) videoView?.onResume()
+  }
+
+  override fun onDestroy() {
+    // The WebView that drew the export goes with the Activity; nothing will report its end.
+    if (isFinishing) ExportForeground.idle(this)
+    ExportForeground.onIdle = null
+    super.onDestroy()
   }
 
   private external fun initNdkContext(activity: MainActivity): Boolean
@@ -108,6 +118,12 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
     videoView = webView
+    // The export ended while the app was away: let the WebView rest as wry meant it to.
+    ExportForeground.onIdle = {
+      runOnUiThread {
+        if (!isDestroyed && !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) && !isInPictureInPictureMode && !NativeAudioRuntime.needsForeground()) videoView?.onPause()
+      }
+    }
     webView.addJavascriptInterface(object {
       @JavascriptInterface
       fun canVideoPip(): Boolean = pipAvailable()
@@ -120,6 +136,18 @@ class MainActivity : TauriActivity() {
       }
       @JavascriptInterface
       fun enterVideoPip() = runOnUiThread { this@MainActivity.enterVideoPip() }
+      /** 返回键没有可收起的层时（src/lib/androidBack.ts）：像系统默认的返回一样退到后台。 */
+      @JavascriptInterface
+      fun leaveToBackground() = runOnUiThread { this@MainActivity.moveTaskToBack(true) }
+      /** 可视化导出的进度、单个任务的结果、队列空了：见 [ExportForeground]。 */
+      @JavascriptInterface
+      fun exportProgress(title: String, fraction: Double, status: String) =
+        ExportForeground.progress(this@MainActivity, title, fraction, status)
+      @JavascriptInterface
+      fun exportFinished(title: String, ok: Boolean, message: String, uri: String) =
+        ExportForeground.finished(this@MainActivity, title, ok, message, uri)
+      @JavascriptInterface
+      fun exportIdle() = ExportForeground.idle(this@MainActivity)
       @JavascriptInterface
       fun setSystemBarsLight(light: Boolean) = runOnUiThread {
         WindowCompat.getInsetsController(window, window.decorView).apply {

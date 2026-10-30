@@ -25,6 +25,7 @@ import kotlin.math.max
 
 private const val EVENT_STATE = "native_audio_state"
 private const val EVENT_OVERLAY_MOVED = "native_lyrics_overlay_moved"
+private const val EVENT_UPDATE_PROGRESS = "native_update_progress"
 private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 9512
 
 data class NativeAudioState(
@@ -184,9 +185,26 @@ class PublishVideoArgs {
 }
 
 @InvokeArg
+class InstallUpdateApkArgs {
+    var url: String? = null
+    var version: String? = null
+    /** 没有「安装未知应用」授权时是否打开授权页；后台自动下载时为 false。 */
+    var askPermission: Boolean = true
+}
+
+@InvokeArg
 class YoutubeProofArgs {
     var operation: String = ""
     var javascript: String = ""
+}
+
+@InvokeArg
+class WebLoginArgs {
+    var url: String = ""
+    var doneCookies: Array<String> = arrayOf()
+    var cookieUrls: Array<String> = arrayOf()
+    var userAgent: String? = null
+    var thirdPartyCookies: Boolean = true
 }
 
 @InvokeArg
@@ -256,6 +274,45 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
     fun youtubeProof(invoke: Invoke) {
         val args = invoke.parseArgs(YoutubeProofArgs::class.java)
         YoutubeProofClient.execute(activity.applicationContext, args.operation, args.javascript, invoke)
+    }
+
+    /**
+     * A platform's login page (WebLoginActivity); resolves with the cookies of each address in
+     * `cookieUrls` once one of `doneCookies` is set, or `cancelled`. Internal transport only:
+     * called from Rust, deliberately absent from native-audio:default permissions.
+     */
+    @Command
+    fun webLogin(invoke: Invoke) {
+        val args = invoke.parseArgs(WebLoginArgs::class.java)
+        try {
+            val intent = Intent(activity, WebLoginActivity::class.java).apply {
+                putExtra(WebLoginActivity.EXTRA_URL, args.url)
+                putExtra(WebLoginActivity.EXTRA_DONE, args.doneCookies)
+                putExtra(WebLoginActivity.EXTRA_COOKIE_URLS, args.cookieUrls)
+                putExtra(WebLoginActivity.EXTRA_USER_AGENT, args.userAgent)
+                putExtra(WebLoginActivity.EXTRA_THIRD_PARTY, args.thirdPartyCookies)
+            }
+            startActivityForResult(invoke, intent, "webLoginResult")
+        } catch (error: Exception) {
+            invoke.reject(error.message ?: "无法打开登录页")
+        }
+    }
+
+    @ActivityCallback
+    fun webLoginResult(invoke: Invoke, result: ActivityResult) {
+        val data = result.data
+        if (result.resultCode != Activity.RESULT_OK) {
+            val error = data?.getStringExtra(WebLoginActivity.EXTRA_ERROR)
+            if (error != null) invoke.reject(error)
+            else invoke.resolve(JSObject().apply { put("cancelled", true) })
+            return
+        }
+        val cookies = app.tauri.plugin.JSArray()
+        data?.getStringArrayListExtra(WebLoginActivity.EXTRA_COOKIES)?.forEach { cookies.put(it) }
+        invoke.resolve(JSObject().apply {
+            put("cancelled", false)
+            put("cookies", cookies)
+        })
     }
 
     @Command
@@ -674,6 +731,31 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
         }.onFailure {
             invoke.reject(it.message ?: "openLocalPath failed")
         }
+    }
+
+    /** 应用内更新：下载 Release 的 APK（进度走 [EVENT_UPDATE_PROGRESS]），再打开系统安装页。 */
+    @Command
+    fun installUpdateApk(invoke: Invoke) {
+        val args = invoke.parseArgs(InstallUpdateApkArgs::class.java)
+        Thread {
+            runCatching {
+                UpdateInstaller.download(activity, args.url?.trim().orEmpty(), args.version?.trim().orEmpty()) { done, total ->
+                    val payload = JSObject().apply {
+                        put("downloaded", done)
+                        if (total != null) put("total", total)
+                    }
+                    activity.runOnUiThread { trigger(EVENT_UPDATE_PROGRESS, payload) }
+                }
+            }.onSuccess { apk ->
+                activity.runOnUiThread {
+                    runCatching { UpdateInstaller.install(activity, apk, args.askPermission) }
+                        .onSuccess { installing -> invoke.resolve(JSObject().apply { put("installing", installing) }) }
+                        .onFailure { invoke.reject(it.message ?: "打开安装页失败") }
+                }
+            }.onFailure {
+                invoke.reject(it.message ?: "下载更新失败")
+            }
+        }.start()
     }
 
     /** 长按曲目封面后，把真实媒体文件交给 Android 的跨窗口拖放会话。 */

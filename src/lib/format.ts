@@ -155,13 +155,12 @@ export function folderName(path: string): string {
 const VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "mov", "webm", "mkv"]);
 
 export function isVideoTrack(format: string): boolean {
-  const ext = format.trim().toLowerCase();
-  return VIDEO_EXTENSIONS.has(ext) || ext === PROJECT_EXTENSION;
+  return VIDEO_EXTENSIONS.has(format.trim().toLowerCase());
 }
 
 /**
- * KDJ's own video project (docs/kdjv.md, `tags.rs::PROJECT_EXTENSION`): a list of local files
- * that plays as a video once rendered. It counts as a video everywhere; its row is marked 工程.
+ * A `.kdjv` video project an older version put in the library. Editing left KDJ after 1.1.0-rc19:
+ * its row is marked 工程 and refused when played; the file stays where it is.
  */
 const PROJECT_EXTENSION = "kdjv";
 

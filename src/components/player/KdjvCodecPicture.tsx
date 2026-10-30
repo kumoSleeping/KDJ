@@ -1,7 +1,7 @@
 /**
- * A `.kdjv` project's picture decoded with WebCodecs and drawn on one canvas in the page
- * (codecClip.ts; KdjvLivePicture is the WebView `<video>` one, kept for a WebView without
- * WebCodecs). A local video is drawn the same way, as a project of one clip (codecVideo.ts).
+ * A local video's picture decoded with WebCodecs and drawn on one canvas in the page
+ * (codecClip.ts), as a project of one clip (codecVideo.ts). The name and the clip arithmetic are
+ * those of the `.kdjv` projects it was first written for; editing left KDJ after 1.1.0-rc19.
  *
  * Each video clip on screen or about to be (kdjvLive.ts `preparedClips`) has its own decoder. A
  * clip waits before its cut with its first frames decoded and comes in moving; while shown it
@@ -14,7 +14,6 @@
  * Still images stay HTML over the canvas.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api } from "../../lib/api";
 import { CodecClip } from "../../lib/codecClip";
 import { MEDIA_SYNC_EVENT, type MediaSyncDetail } from "../../lib/mediaSync";
 import { SEEK_EVENT, type SeekDetail } from "../library/Waveform";
@@ -64,8 +63,8 @@ export function KdjvCodecPicture({ trackId, project, onTransport, sourceUrl }: {
   trackId: number;
   project: KdjvLive;
   onTransport?: (transport: LiveTransport) => void;
-  /** Where a source is read from, when it is not a project's (a local video: codecVideo.ts). */
-  sourceUrl?: (source: number) => string;
+  /** Where a source is read from (a local video: codecVideo.ts). */
+  sourceUrl: (source: number) => string;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -140,8 +139,7 @@ export function KdjvCodecPicture({ trackId, project, onTransport, sourceUrl }: {
         const c = project.clips[n];
         const source = c && project.sources[c.source];
         if (source?.kind !== "video") return;
-        const url = sourceUrlRef.current ? sourceUrlRef.current(c.source)
-          : source.proxy ? api.kdjvProxyUrl(trackId, c.source) : api.kdjvSourceUrl(trackId, c.source);
+        const url = sourceUrlRef.current(c.source);
         const id = `${n}|${url}|${source.file ?? ""}`;
         wanted.add(id);
         let decoder = decoders.current.get(id);
@@ -251,7 +249,7 @@ export function KdjvCodecPicture({ trackId, project, onTransport, sourceUrl }: {
           return <img key={`${n}:${source?.file ?? ""}`} ref={node => {
             if (node) images.current.set(n, node);
             else images.current.delete(n);
-          }} className="kd-kdjv-live-clip" alt="" draggable={false} src={api.kdjvSourceUrl(trackId, c.source)}
+          }} className="kd-kdjv-live-clip" alt="" draggable={false} src={sourceUrl(c.source)}
             style={{
               left: `${at.left}%`, top: `${at.top}%`, width: `${at.width}%`, height: `${at.height}%`, clipPath: at.clip,
               zIndex: (tracks - c.track) * 10_000 + n, opacity: 0,

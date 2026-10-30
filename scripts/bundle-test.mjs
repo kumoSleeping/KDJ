@@ -5,6 +5,8 @@ import { createRequire, Module } from "node:module";
 import { pathToFileURL } from "node:url";
 const require = createRequire(import.meta.url);
 const source = process.argv[2];
+// Tests that give the page a bridge of their own (window.kdj) instead of the desktop stub below.
+const OWN_BRIDGE = ["tests/youtube-login-ui.test.ts", "tests/androidUpdate.test.ts"];
 if (!source) throw new Error("usage: node scripts/bundle-test.mjs tests/<name>.test.ts[x]");
 const entry = new Module(`${process.cwd()}/${source.replace(/\.tsx?$/, ".cjs")}`);
 entry.filename = entry.id;
@@ -17,7 +19,7 @@ entry._compile((await build({
   logOverride: { "empty-import-meta": "silent" }, write: false,
   plugins: [{ name: "library-test-bridge", setup(build) {
     build.onResolve({ filter: /(^|\/)bridge$/ }, () => ({ path: "bridge", namespace: "library-test" }));
-    build.onLoad({ filter: /.*/, namespace: "library-test" }, () => ({ contents: source === "tests/youtube-login-ui.test.ts"
+    build.onLoad({ filter: /.*/, namespace: "library-test" }, () => ({ contents: OWN_BRIDGE.includes(source)
       ? "export const getBridge = () => window.kdj;" : `
       export const getBridge = () => ({
         baseUrl: "http://localhost", authToken: "library-test", mediaToken: "library-test", platform: "darwin",

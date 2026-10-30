@@ -5,7 +5,6 @@
 //! 播放器也要靠 Range 请求才能拖进度条。
 
 pub mod activity_log;
-pub mod ai;
 mod account_upkeep;
 mod browser_login;
 pub mod diagnostics;
@@ -149,14 +148,9 @@ fn media_path_allowed(path: &str) -> bool {
         segments.as_slice(),
         ["api", "video", "youtube", "hls", ticket] if !ticket.is_empty()
     ) || matches!(
-        // A project's live preview: only the files that project names (kdjv.rs `source`), or
-        // their preview proxies (proxy.rs).
+        // The local file a `kdj peek` reads, while that peek is open (cli_media.rs).
         segments.as_slice(),
-        ["api", "kdjv", "source" | "proxy", id, n] if !id.is_empty() && !n.is_empty()
-    ) || matches!(
-        // The editor's frames of those same files (routes.rs `kdjv_frame`).
-        segments.as_slice(),
-        ["api", "kdjv", "frame"]
+        ["api", "cli", "peek", id, "source"] if !id.is_empty()
     )
 }
 
@@ -417,13 +411,8 @@ pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) ->
         control: control.clone(),
         media: media.clone(),
     };
-    // The visualizer (analysis, export) is on every platform; the editor's workshop is desktop only.
+    // The visualizer (analysis, export) is on every platform.
     let router = routes::router(ctx).merge(compositions::audio_visualizer::studio::router());
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let router = {
-        let workshop = compositions::workshop::Workshop::new(state.clone())?;
-        router.merge(compositions::workshop::routes::router(workshop))
-    };
     let router = router.merge(themes::router())
         .merge(diagnostics::router())
         .route("/ws", axum::routing::get(ws::handler))
@@ -543,22 +532,6 @@ mod auth_tests {
                 "/api/library/audio/1?kdj_media_token=media-token",
                 None
             ),
-            &auth
-        ));
-        assert!(request_authorized(
-            &request(Method::GET, "/api/kdjv/source/7/0?kdj_media_token=media-token", None),
-            &auth
-        ));
-        assert!(request_authorized(
-            &request(Method::GET, "/api/kdjv/proxy/7/0?kdj_media_token=media-token", None),
-            &auth
-        ));
-        assert!(request_authorized(
-            &request(Method::GET, "/api/kdjv/frame?track_id=7&src=a.mp4&t=1.0&h=72&kdj_media_token=media-token", None),
-            &auth
-        ));
-        assert!(!request_authorized(
-            &request(Method::POST, "/api/kdjv/preview?kdj_media_token=media-token", None),
             &auth
         ));
         assert!(request_authorized(

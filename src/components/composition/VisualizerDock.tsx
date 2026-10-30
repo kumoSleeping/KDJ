@@ -8,9 +8,8 @@ import "./VisualizerDock.css";
 const VisualizerStudioPanel = lazy(() => import("./VisualizerStudioPanel"));
 
 /**
- * The visualizer configuration as the body of a drawer (or of the phone's sheet, where it also
- * draws its own head): either the whole editor or, while the floating picture is the editor,
- * its controls.
+ * The visualizer configuration as the body of a drawer: either the whole editor or, while the
+ * floating picture is the editor, its controls.
  */
 export function VisualizerDock() {
   const openTrack = useVisualizerStudioStore(state => state.track);

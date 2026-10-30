@@ -10,23 +10,29 @@ Kept: music search/download, local library, BPM/key/loudness analysis, waveforms
 song colours/themes, tempo/EQ, Android MediaSession, audio focus and overlay lyrics.
 File access still requires media permission and a readable local filesystem directory. SAF
 cloud/virtual documents are not a Rust filesystem; selecting one is not support for streaming
-that document. Android deletion is not the desktop recycle bin. Account login offers QR and
-pasted headers, not desktop browser-profile extraction.
+that document. Android deletion is not the desktop recycle bin. Account login opens the desktop's ways in
+place under the account's row, except reading another browser's profile: the QR code (shown
+and saved to the album, since a phone cannot scan its own screen), a Cookie-Editor export
+pasted from a mobile browser, and pasted request headers. Before them, NetEase, QQ Music,
+Bilibili and SoundCloud offer 网页登录: the site's own login page opened in the app
+(`WebLoginActivity`, its own process and WebView profile, emptied before and after); once the
+site's login cookie is set its cookies, HttpOnly included, go to the same `/login/cookies` entry as a
+Cookie-Editor export (`src-tauri/src/web_login.rs` holds the pages). Links to another app
+(`wtloginmqq://`, `weixin://`) are not followed. YouTube has none: Google refuses a WebView.
 
-Omitted: visualization production/preview/export, editing, `.kdjv` playback, FFmpeg/ffprobe,
-local pi/Node AI and the desktop CLI API. Existing project files, export databases and settings
+Omitted: visualization production/preview/export, editing, `.kdjv` playback
+and the desktop CLI API. Existing project files, export databases and settings
 are not removed or rewritten to implement this boundary. Shared palette extraction remains.
 
 `platformFeatures.ts` gates actions and export-store initialization. The mobile Vite graph
-omits production panels and the export worker. The Rust mobile router does not register AI,
-CLI, workshop, visualizer, FFmpeg status or video-calibration routes; the provider's FFmpeg
-binary boundary rejects mobile calls as well. A stale UI or direct request cannot start those
+omits production panels and the export worker. The Rust mobile router does not register
+CLI, workshop, visualizer or video-calibration routes. A stale UI or direct request cannot start those
 jobs. Desktop routes and panels are unchanged.
 
 Local video uses the system WebView for pictures and Rust for audio: supported formats are
 still their intersection, not a bundled universal decoder. There is no compatibility transcode.
 Bilibili can download complete single streams; separated-track mux, extraction and Offset are
-not offered. YouTube's HLS remux/download remains pure Rust, without FFmpeg.
+not offered. YouTube's HLS remux/download remains pure Rust. KDJ has no FFmpeg on any platform.
 
 ## Native audio and background work
 
@@ -68,6 +74,22 @@ These are implementation guarantees, not a claim that YouTube accepts every devi
 Proof failures retain their existing error path. Background SABR is subject to the ownership
 and suspension limits above.
 
+## Layout
+
+A phone uses the desktop's one layout: the sidebar, the top bar with the aggregate search, the
+list, and the drawer over the list for settings, lyrics, downloads/exports, the visualizer
+configuration and the Meta editor. There is no portrait layout, single column or full-page
+sheet. `android-postinit.sh` locks MainActivity to `sensorLandscape` after Tauri init, and
+`useLayoutMode.ts` never reports a phone as a tall window, so the tall desktop window's
+rearrangements (the layered player bar, the two-row search) do not apply either. A click
+selects a row and a double click plays it, as on the desktop.
+
+The back key closes the topmost layer (a drawer, a menu, a floating window), one per press,
+by handing the page an Escape (`src/lib/androidBack.ts`, through Tauri's `back-button` event;
+`core:app` listener permissions in `capabilities/mobile-player.json`). When nothing takes it,
+`MainActivity.leaveToBackground()` moves the task to the background, as the system's own back
+does; the Activity is not finished.
+
 ## System video PiP
 
 The shared floating video host still owns loading, seeking, swapping and clocks. Android PiP
@@ -76,6 +98,17 @@ the aspect ratio and automatic entry (API 31+) or enters on leaving the Activity
 Its PiP callback presents only the video surface and keeps WebView decoding resumed. This is
 separate from both in-app floating windows and overlay lyrics. Device support is checked before
 the control is offered. `android-postinit.sh` restores the manifest capability after Tauri init.
+
+## Updates
+
+The update check is the shared GitHub Release check; on Android its URL is the signed APK of the
+device's ABI. 下载并安装 downloads that APK inside the app (`UpdateInstaller.kt`, only from this
+repository's Release, only a package with KDJ's application ID) into the app's cache and opens
+the system installer: installation, signature checking and the upgrade remain the system's. The
+first time, Android asks to allow KDJ to install apps (`REQUEST_INSTALL_PACKAGES`). When the
+background check finds a newer version on Wi‑Fi/Ethernet, the APK is downloaded and the installer
+page opened by itself, once per version; on a metered or unknown network nothing is downloaded
+until the key is pressed. There is no silent install.
 
 ## Packaging and acceptance
 
@@ -93,6 +126,7 @@ Local narrow checks:
 
 ```sh
 node --import tsx --test tests/androidLite.test.ts tests/youtubeSabrUpload.test.ts
+node --conditions=import scripts/test-dom-ui.mjs androidUpdate
 TAURI_ENV_PLATFORM=androideabi npm run tauri:web:build
 ```
 

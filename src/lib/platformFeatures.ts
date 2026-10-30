@@ -5,15 +5,12 @@ export function mediaProductionAvailable(platform = currentPlatform()): boolean 
 
 /**
  * Exporting a song's visualizer as a video; its picture and configuration are on every platform.
- * Android encodes with the WebView's hardware H.264 and the system's AAC (MediaCodec), no FFmpeg.
+ * Every platform encodes the same way: the WebView's own H.264 encoder (WebCodecs) and the
+ * song's AAC or the system's AAC encoder. Whether this system has them is asked at run time
+ * (visualizerExportSupport.ts); a system without them keeps the keys, greyed with the reason.
  */
 export function visualizerExportAvailable(platform = currentPlatform()): boolean {
   return mediaProductionAvailable(platform) || platform === "android";
-}
-
-/** No FFmpeg to fall back on: the WebView's own encoder, hardware or not, is the only one. */
-export function onlyWebViewEncodes(platform = currentPlatform()): boolean {
-  return platform === "android";
 }
 
 /**

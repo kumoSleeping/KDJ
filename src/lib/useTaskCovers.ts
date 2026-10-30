@@ -67,12 +67,6 @@ export function useVisualizerExportCovers(task: Pick<VisualizerExportTask, "id" 
   return { urls, pending: !poster };
 }
 
-/** A project export (剪辑, VJ) shows the cover of its project's library row. */
-export function useProjectExportCovers(trackId: number): string[] {
-  const revision = useTrackRevisions([trackId]);
-  return useMemo(() => visualizerExportCovers({ trackId }, appCoverAddresses), [trackId, revision]);
-}
-
 /** The pictures of library tracks as a stack, in their order: a set, a playlist, a selection. */
 export function useTrackCoverStack(trackIds: readonly number[], max = 3): TaskCoverStackView {
   const key = trackIds.join(",");

@@ -27,18 +27,15 @@ export function normalizeLyricsExtent(value: unknown): LyricsExtent {
 
 /** What the window is. */
 export interface LyricsExtentShape {
-  /** A tall window (useLayoutMode.ts): there the playing song's bubble spans the bottom. */
+  /** A tall desktop window (useLayoutMode.ts): there the playing song's bubble spans the bottom. A phone never is one. */
   tall: boolean;
-  /** A phone or a tablet. Upright it shows the lyrics in a sheet, which is as long as it can be. */
-  mobile: boolean;
 }
 
 /**
  * The choices this window offers, in the order of the menu. Full screen is a tall desktop
- * window's: the lyrics above the spanning bubble. An upright phone has no drawer to size.
+ * window's: the lyrics above the spanning bubble.
  */
 export function lyricsExtentChoices(shape: LyricsExtentShape): readonly LyricsExtent[] {
-  if (shape.mobile) return shape.tall ? [] : ["standard", "longer"];
   return shape.tall ? ["standard", "longer", "full"] : ["standard", "longer"];
 }
 
@@ -53,8 +50,7 @@ export function shownLyricsExtent(stored: LyricsExtent, shape: LyricsExtentShape
 /** The shape of this window, for the two functions above. */
 export function useLyricsExtentShape(): LyricsExtentShape {
   const { tall } = useLayoutSignals();
-  const platform = typeof window === "undefined" ? undefined : window.kdj?.platform;
-  return { tall, mobile: platform === "android" || platform === "ios" };
+  return { tall };
 }
 
 /** The listener's choice, remembered across runs. */

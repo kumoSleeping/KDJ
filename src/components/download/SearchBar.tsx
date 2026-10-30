@@ -1,8 +1,6 @@
 import {
   memo,
-  useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -10,18 +8,7 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { History, Music, Sparkles, Video, X } from "lucide-react";
-import { AI_DROP_ATTR, fromLocalTracks, fromPastedImage, fromSearchDrag, timeLabel } from "../../lib/aiAttachments";
-import { activeSearchDrag, finishSearchDrop, readSearchDrop } from "../../lib/searchDrag";
-import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
-import { useLibraryStore } from "../../stores/libraryStore";
-import { aiApi } from "../../lib/api";
-import { showTask } from "../tasks/taskBubbleStore";
-import type { AiThinking } from "../../types/ai";
 import type { Platform, SearchKind, TrackSummary } from "../../types";
-import { aiBlocker, aiOffered, useAiStore } from "../../stores/aiStore";
-import { isPiText, PI_PREFIX, piRequestText, withoutPiPrefix } from "../../lib/piPrefix";
-import { openAiSettings } from "../../lib/aiSettings";
 import { useSearchPresets } from "./useSearchPresets";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import {
@@ -46,26 +33,6 @@ import {
 } from "./searchMotion";
 import "./SearchBar.css";
 
-/** pi's reasoning efforts in the order the key steps through them. */
-const THINKING_ORDER: AiThinking[] = ["low", "medium", "high", "xhigh"];
-const THINKING_LABEL: Record<AiThinking, string> = { low: "低", medium: "中", high: "高", xhigh: "极高" };
-const nextThinking = (level: AiThinking) => THINKING_ORDER[(THINKING_ORDER.indexOf(level) + 1) % THINKING_ORDER.length];
-
-/** One step of the reasoning key: shown at once, kept by kdj-server and given to pi. */
-async function cycleThinking(): Promise<void> {
-  const ai = useAiStore.getState();
-  const status = ai.status;
-  if (!status) return;
-  const level = nextThinking(status.thinking ?? "high");
-  ai.setStatus({ ...status, thinking: level });
-  try {
-    ai.setStatus(await aiApi.setThinking(level));
-  } catch (error) {
-    ai.setStatus(status);
-    showTask({ id: "ai-thinking", kind: "notice", title: "推理强度没能切换", detail: error instanceof Error ? error.message : String(error), tone: "error", placement: "top" });
-  }
-}
-
 export {
   DEFAULT_PRIORITY,
   DEFAULT_SEARCH_PLATFORMS,
@@ -78,9 +45,6 @@ export interface SearchPlatformProps {
   platforms: Platform[];
   onTogglePlatform(platform: Platform): void;
   /** 顺序与启用都读写 settings.platform_priority：拖动排序就是下载来源的优先级。 */
-  /** 手机顶栏的重叠预览；第一次点只展开，不误切来源。 */
-  collapsed?: boolean;
-  onExpand?: () => void;
   /** A search in flight or just landed: the selected marks wait, then settle on what came back. */
   searchPhase?: SearchPhase | null;
   searchOutcome?: SearchOutcome | null;
@@ -100,8 +64,6 @@ export interface SearchBarProps extends SearchPlatformProps {
   onSubmit(): void;
   tipsOpen: boolean;
   onTips(): void;
-  /** 竖屏/极窄：输入与平台拆成两段。 */
-  stacked?: boolean;
   /** A search started outside the field (同名搜索 fills and submits); a new value launches the motion. */
   burstNonce?: number;
 }
@@ -310,7 +272,6 @@ export function SearchBar({
   onSubmit,
   tipsOpen,
   onTips,
-  stacked = false,
   burstNonce = 0,
   ...platformProps
 }: SearchBarProps) {
@@ -319,53 +280,7 @@ export function SearchBar({
   // Some third-party dictation IMEs report Enter before React's isComposing
   // flag settles. Keep our own composition state and also honor keyCode 229.
   const composingRef = useRef(false);
-  // `/pi` at the start of the field (docs/ai-dock.md, piPrefix.ts): what follows is a request for
-  // the AI. The row stays the search row; the words are the store's while they start with the
-  // prefix, and the search's own words wait underneath and come back when it is taken out.
-  const offered = aiOffered();
-  const draft = useAiStore(state => state.draft);
-  const aiMode = offered && draft !== null;
-  const request = draft ?? "";
-  const asked = piRequestText(request);
-  const attachments = useAiStore(state => state.attachments);
-  const resume = useAiStore(state => state.resume);
-  const thinking = useAiStore(state => state.status?.thinking ?? "high");
-  const blocker = useAiStore(state => (state.statusError ? null : aiBlocker(state.status)));
-  // The prefix coming or going, or a request written in from elsewhere (a tip's example, 继续),
-  // puts the caret at the end of the field; arriving on screen does not.
-  const focusAsk = useAiStore(state => state.focus);
-  const caretWas = useRef({ aiMode, focusAsk });
-  useEffect(() => {
-    const was = caretWas.current;
-    caretWas.current = { aiMode, focusAsk };
-    if (was.aiMode === aiMode && was.focusAsk === focusAsk) return;
-    const element = inputRef.current;
-    if (!element) return;
-    element.focus();
-    element.setSelectionRange(element.value.length, element.value.length);
-  }, [aiMode, focusAsk]);
-  /** The AI key: writes `/pi` in front of the field's words, or takes it out again. */
-  const toggleAi = () => {
-    const ai = useAiStore.getState();
-    if (ai.draft === null) {
-      ai.openDraft(query);
-      return;
-    }
-    // What was written after the prefix goes back to the search; an empty request leaves the
-    // search's own words as they were.
-    const rest = withoutPiPrefix(ai.draft);
-    if (rest.trim()) onQueryChange(rest.replace(/^\s+/, ""));
-    ai.setDraft(null);
-  };
-  const sendRequest = () => {
-    if (!asked) return;
-    // Sent, the request leaves the field for its task at the bottom right; the prefix stays, so
-    // the next task can be written straight away.
-    useAiStore.getState().setDraft(PI_PREFIX);
-    void useAiStore.getState().send(asked);
-  };
   const [inputFocused, setInputFocused] = useState(false);
-  const [platformsExpanded, setPlatformsExpanded] = useState(false);
   const [wavePhase, setWavePhase] = useState<SearchPhase | null>(null);
   /** Counts launches, so each search gets a fresh waveform, and how far its text reaches (em). */
   const [launch, setLaunch] = useState({ seq: 0, textEm: 0 });
@@ -378,40 +293,7 @@ export function SearchBar({
   const waveSawBusyRef = useRef(false);
   const lastNonceRef = useRef(burstNonce);
   const canSubmit = query.trim().length > 0 && !busy;
-  // A `/pi` request grows with its lines like a batch of keywords does: the lines it breaks
-  // (Shift + Enter) and the ones a long sentence wraps into, measured from the field itself.
-  const shown = aiMode ? request : query;
-  const [wrapRows, setWrapRows] = useState(1);
-  useLayoutEffect(() => {
-    const element = inputRef.current;
-    if (!aiMode || !element) {
-      setWrapRows(1);
-      return;
-    }
-    const measure = () => {
-      const style = getComputedStyle(element);
-      const leading = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.4;
-      const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
-      // Collapsed for the measure, the field's scroll height is what its text needs. The height's
-      // transition is held off meanwhile: under it the collapse still reads the old height, and a
-      // field that grew never came back to one line once its sentence was sent.
-      const { height, transition } = element.style;
-      element.style.transition = "none";
-      element.style.height = "0px";
-      const lines = request ? Math.max(1, Math.round((element.scrollHeight - padding) / leading)) : 1;
-      element.style.height = height;
-      void element.offsetHeight;
-      element.style.transition = transition;
-      setWrapRows(current => (current === lines ? current : lines));
-    };
-    measure();
-    // A narrower or wider row wraps the sentence again.
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [aiMode, request]);
-  const inputRows = aiMode ? Math.min(5, Math.max(1, request.split("\n").length, wrapRows))
-    : batch ? Math.min(5, Math.max(2, query.split("\n").length)) : 1;
+  const inputRows = batch ? Math.min(5, Math.max(2, query.split("\n").length)) : 1;
   const currentKindIndex = searchKinds.indexOf(searchKind);
   const nextSearchKind = searchKinds.length
     ? searchKinds[(Math.max(-1, currentKindIndex) + 1) % searchKinds.length]
@@ -426,7 +308,6 @@ export function SearchBar({
     const tones = searchTones(normalizePriority(markOrder), selectedPlatforms);
     return tones.length ? ({ "--kd-search-tones": tones.join(", ") } as CSSProperties) : undefined;
   }, [markOrder, selectedPlatforms]);
-  const expandPlatforms = useCallback(() => setPlatformsExpanded(true), []);
 
   const startWave = () => {
     wavePendingRef.current = true;
@@ -476,10 +357,6 @@ export function SearchBar({
     if (burstNonce > 0) startWave();
   }, [burstNonce]);
 
-  useEffect(() => {
-    if (!stacked) setPlatformsExpanded(false);
-  }, [stacked]);
-
   const fireSubmit = () => {
     if (!canSubmit) return;
     startWave();
@@ -489,50 +366,16 @@ export function SearchBar({
   return (
     <form
       className="kd-search-command"
-      data-stacked={stacked || undefined}
       aria-busy={wavePhase === "run" || undefined}
       onSubmit={(event) => {
         event.preventDefault();
-        if (aiMode) sendRequest();
-        else fireSubmit();
+        fireSubmit();
       }}
     >
       <div
         className="kd-searchbar kd-grow"
-        data-ai={aiMode || undefined}
-        data-has-ai={offered || undefined}
-        data-batch={batch && !aiMode || undefined}
-        data-stacked={stacked || undefined}
-        data-platforms-expanded={stacked && platformsExpanded ? "true" : undefined}
+        data-batch={batch || undefined}
         data-searching={wavePhase ?? undefined}
-        data-attached={aiMode && (attachments.length > 0 || resume) || undefined}
-        {...(offered ? { [AI_DROP_ATTR]: "" } : {})}
-        // Most drags are pointer drags that find this row themselves (TrackTable, searchDrag); a
-        // system drag of library rows or search results arrives here.
-        onDragOver={offered ? (event) => {
-          if (!isTrackDrag(event) && !activeSearchDrag()) return;
-          event.preventDefault();
-          event.dataTransfer.dropEffect = "copy";
-          event.currentTarget.setAttribute("data-kd-pointer-ai-over", "");
-        } : undefined}
-        onDragLeave={offered ? (event) => event.currentTarget.removeAttribute("data-kd-pointer-ai-over") : undefined}
-        onDrop={offered ? (event) => {
-          event.currentTarget.removeAttribute("data-kd-pointer-ai-over");
-          const ids = isTrackDrag(event) ? readTrackDragIds(event.dataTransfer) : [];
-          const search = ids.length ? null : readSearchDrop(event.dataTransfer);
-          if (!ids.length && !search) return;
-          event.preventDefault();
-          event.stopPropagation();
-          if (search) {
-            finishSearchDrop();
-            useAiStore.getState().attach(fromSearchDrag(search));
-            return;
-          }
-          finishTrackDrop();
-          void useLibraryStore.getState().resolveSummaries(ids)
-            .then(tracks => useAiStore.getState().attach(fromLocalTracks(tracks)))
-            .catch(() => undefined);
-        } : undefined}
         style={barStyle}
         onClick={(event) => {
           if ((event.target as HTMLElement).closest("button, select, input, textarea")) return;
@@ -554,19 +397,14 @@ export function SearchBar({
           )}
           <SearchPlatforms
             {...platformProps}
-            collapsed={stacked && !platformsExpanded}
-            onExpand={expandPlatforms}
             searchPhase={wavePhase}
             searchOutcome={searchOutcome}
           />
         </div>
         <div
           className="kd-searchbar-copy"
-          data-empty={!shown || undefined}
+          data-empty={!query || undefined}
           data-input-focused={inputFocused ? "true" : undefined}
-          onPointerDown={() => {
-            if (stacked && platformsExpanded) setPlatformsExpanded(false);
-          }}
         >
           {/* The waveform of a search: the field's first layer, under the text. Keyed by the launch,
               not the phase, so an answer that comes back early lets it rise before it settles. */}
@@ -591,7 +429,7 @@ export function SearchBar({
               </span>
             </span>
           ) : null}
-          {!query && !aiMode && (
+          {!query && (
             <SearchTipCarousel
               inputFocused={inputFocused}
               tipsOpen={tipsOpen}
@@ -603,23 +441,23 @@ export function SearchBar({
             className="kd-searchbar-input"
             rows={inputRows}
             style={{ "--kd-search-rows": inputRows } as CSSProperties}
-            value={aiMode ? request : query}
+            value={query}
             placeholder=""
             // Titles and links are not prose: no spelling marks under them.
             spellCheck={false}
             autoCorrect="off"
             autoCapitalize="off"
-            aria-label={aiMode ? "交给 AI 的事（/pi 开头）" : "关键词、单曲链接或歌单链接，支持多行，@ 选择歌曲名；/pi 开头交给 AI"}
+            aria-label="关键词、单曲链接或歌单链接，支持多行，@ 选择歌曲名"
             role="combobox"
-            {...(aiMode ? {} : presets.aria)}
-            title={aiMode ? "交给 pi（Enter；Shift + Enter 换行；删掉 /pi 回到搜索）" : "搜索（Enter；Shift + Enter 换行；@ 歌曲名；/pi 交给 AI）"}
+            {...presets.aria}
+            title="搜索（Enter；Shift + Enter 换行；@ 歌曲名）"
             onFocus={() => setInputFocused(true)}
             onBlur={event => {
               setInputFocused(false);
-              if (!aiMode) presets.onBlur(event.relatedTarget);
+              presets.onBlur(event.relatedTarget);
             }}
             // Only a query with an @ in it has suggestions to place; plain typing does not track the caret.
-            onSelect={!aiMode && query.includes("@") ? presets.syncCaret : undefined}
+            onSelect={query.includes("@") ? presets.syncCaret : undefined}
             onCompositionStart={() => {
               composingRef.current = true;
             }}
@@ -629,129 +467,22 @@ export function SearchBar({
             onKeyDown={(event) => {
               const nativeEvent = event.nativeEvent;
               const composing = composingRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229;
-              if (!aiMode && !composing && presets.onKeyDown(event)) return;
+              if (!composing && presets.onKeyDown(event)) return;
               // 普通 Enter 永远不换行：搜索中或空框时也不能把 "\n" 写进去，否则会被当成批量搜索。
               if (event.key === "Enter" && !event.shiftKey && !composing) {
                 event.preventDefault();
-                if (aiMode) sendRequest();
-                else fireSubmit();
-              }
-            }}
-            onPaste={(event) => {
-              // A picture pasted here goes to the AI: a card under the field, and `/pi` in it (aiAttachments.ts).
-              if (!offered) return;
-              const images = Array.from(event.clipboardData?.items ?? [])
-                .filter(item => item.kind === "file" && item.type.startsWith("image/"))
-                .map(item => item.getAsFile())
-                .filter((file): file is File => file !== null);
-              if (!images.length) return;
-              event.preventDefault();
-              for (const image of images) {
-                const preview = URL.createObjectURL(image);
-                aiApi.paste(image)
-                  .then(({ path }) => useAiStore.getState().attach([fromPastedImage(path, preview)]))
-                  .catch(error => {
-                    URL.revokeObjectURL(preview);
-                    showTask({ id: "ai-paste", kind: "notice", title: "图片没能粘贴", detail: error instanceof Error ? error.message : String(error), tone: "error", placement: "top" });
-                  });
+                fireSubmit();
               }
             }}
             onChange={(event) => {
               const value = event.target.value;
-              if (aiMode) {
-                // Taking the prefix out gives the words back to the search.
-                if (isPiText(value)) useAiStore.getState().setDraft(value);
-                else {
-                  useAiStore.getState().setDraft(null);
-                  onQueryChange(value);
-                }
-                return;
-              }
-              // `/pi` typed at the start: what follows is for the AI from now on.
-              if (offered && isPiText(value)) {
-                useAiStore.getState().setDraft(value);
-                onQueryChange(withoutPiPrefix(value).trim());
-                return;
-              }
               onQueryChange(value);
               if (event.target.value.includes("@")) presets.syncCaret();
             }}
           />
-          {/* Right after a bare `/pi`, in the faint ink of a hint: what the field is for now, or,
-              while no model is set up (no pi, no key), where to set it up first. The prefix
-              itself is laid out unseen in front of it, so the words start where the caret is. */}
-          {aiMode && !asked && !request.includes("\n") && (
-            <span className="kd-search-pi-hint" data-blocked={blocker ? "" : undefined}>
-              <span className="kd-search-pi-hint-lead" aria-hidden="true">{request}</span>
-              {blocker
-                ? <>
-                    <span>{blocker === "AI 未设置模型" ? "还没有配置模型，先去" : `${blocker}，先去`}</span>
-                    <button type="button" className="kd-search-pi-hint-key" onClick={openAiSettings}>设置 → AI</button>
-                    <span>配置</span>
-                  </>
-                : <span aria-hidden="true">在这里向 AI 提出你的需求</span>}
-            </span>
-          )}
         </div>
-        {/* What was dragged onto the row: a card each, sent with the request (aiAttachments.ts).
-            First, the earlier session the next request goes on in (历史 → 继续); × lets it go. */}
-        {aiMode && (attachments.length > 0 || resume) && (
-          <div className="kd-ai-chips" role="list" aria-label="附带给 AI">
-            {resume && (
-              <span className="kd-ai-chip" role="listitem" data-kd-turn="in" data-resume="" title={`下一句话接着这个会话：${resume.title}`}>
-                <span className="kd-ai-chip-cover" aria-hidden="true"><History size={12} /></span>
-                <span className="kd-ai-chip-time">接着</span>
-                <span className="kd-ai-chip-title">{resume.title}</span>
-                <button type="button" className="kd-ai-chip-remove" aria-label="不接着这个会话"
-                  onClick={() => void useAiStore.getState().dropResume()}>
-                  <X size={11} aria-hidden="true" />
-                </button>
-              </span>
-            )}
-            {attachments.map(item => {
-              const time = timeLabel(item);
-              return (
-                <span key={item.key} className="kd-ai-chip" role="listitem" data-kd-turn="in" title={item.path ?? item.url ?? item.title}>
-                  {item.cover
-                    ? <img className="kd-ai-chip-cover" src={item.cover} alt="" draggable={false} />
-                    : <span className="kd-ai-chip-cover" aria-hidden="true">{item.video ? <Video size={12} /> : <Music size={12} />}</span>}
-                  <span className="kd-ai-chip-title">{item.title}</span>
-                  {time && <span className="kd-ai-chip-time">{time}</span>}
-                  <button type="button" className="kd-ai-chip-remove" aria-label={`移除 ${item.title}`}
-                    onClick={() => useAiStore.getState().detach(item.key)}>
-                    <X size={11} aria-hidden="true" />
-                  </button>
-                </span>
-              );
-            })}
-          </div>
-        )}
-        {/* The keys at the end of the row: while the field starts with `/pi`, first how hard the
-            model thinks (a click steps through 低 中 高 极高); then the AI key, which writes `/pi`
-            in front of the field's words or takes it out. Stopping a task is its own bubble's key.
-            Something dragged onto the row is attached, with `/pi` in the field. */}
-        {offered && <span className="kd-search-ai-keys">
-          {aiMode && <button
-            type="button"
-            className="kd-search-thinking"
-            title={`推理强度：${THINKING_LABEL[thinking]} · 点击切换`}
-            aria-label={`推理强度${THINKING_LABEL[thinking]}，点击切换为${THINKING_LABEL[nextThinking(thinking)]}`}
-            onClick={() => void cycleThinking()}
-          >{THINKING_LABEL[thinking]}</button>}
-          <button
-            type="button"
-            className="kd-search-ai"
-            {...{ [AI_DROP_ATTR]: "" }}
-            aria-pressed={aiMode}
-            aria-label={aiMode ? "去掉 /pi，回到搜索" : "用 pi 辅助：在前面加 /pi"}
-            title={aiMode ? "去掉 /pi，回到搜索" : "用 pi 辅助（/pi）"}
-            onClick={toggleAi}
-          >
-            <Sparkles size={16} aria-hidden="true" />
-          </button>
-        </span>}
       </div>
-      {!aiMode && presets.menu}
+      {presets.menu}
     </form>
   );
 }
@@ -764,8 +495,6 @@ export function SearchBar({
 export const SearchPlatforms = memo(function SearchPlatforms({
   platforms,
   onTogglePlatform,
-  collapsed = false,
-  onExpand,
   searchPhase = null,
   searchOutcome = null,
 }: SearchPlatformProps) {
@@ -791,12 +520,7 @@ export const SearchPlatforms = memo(function SearchPlatforms({
     .map((id) => SEARCH_PLATFORMS.find((item) => item.id === id))
     .filter((item): item is (typeof SEARCH_PLATFORMS)[number] => Boolean(item))
     .filter((item) => isPlatformEnabled(settings, item.id));
-  // 收起态只摘要真正参与本次搜索的来源；把所有未选中的灰图标叠在一起既占位，
-  // 也无法辨认。没有勾选来源时保留首项作为展开入口。
-  const selectedOrdered = ordered.filter((item) => platforms.includes(item.id));
-  const collapsedOrdered = (selectedOrdered.length ? selectedOrdered : ordered.slice(0, 1)).slice(0, 2);
-  const collapsedOverflow = Math.max(0, selectedOrdered.length - collapsedOrdered.length);
-  const rendered = collapsed ? collapsedOrdered : ordered;
+  const rendered = ordered;
   // The marks a search asks, in the order they answer.
   const asked = searchPhase ? rendered.filter((item) => platforms.includes(item.id)) : [];
 
@@ -878,12 +602,6 @@ export const SearchPlatforms = memo(function SearchPlatforms({
 
   const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>, id: Platform) => {
     if (event.button !== 0) return;
-    if (collapsed) {
-      event.preventDefault();
-      event.stopPropagation();
-      onExpand?.();
-      return;
-    }
     // 挡住浏览器默认拖图 / 选中，否则 pointer 序列会被掐断。
     event.preventDefault();
     event.stopPropagation();
@@ -905,25 +623,16 @@ export const SearchPlatforms = memo(function SearchPlatforms({
   return (
     <div
       className="kd-plats"
-      data-collapsed={collapsed ? "true" : undefined}
       role="group"
-      aria-expanded={!collapsed}
-      onPointerDown={(event) => {
-        if (!collapsed || event.button !== 0 || event.target !== event.currentTarget) return;
-        event.preventDefault();
-        event.stopPropagation();
-        onExpand?.();
-      }}
       aria-label="搜索平台（拖动排序 = 来源优先级）"
     >
-      {rendered.map((item, index) => (
+      {rendered.map((item) => (
           <button
             key={item.id}
             type="button"
             className="kd-plat"
             aria-pressed={platforms.includes(item.id)}
-            aria-label={collapsed ? `展开搜索平台，当前首项 ${item.label}` : item.label}
-            tabIndex={collapsed && index > 0 ? -1 : 0}
+            aria-label={item.label}
             data-platform={item.id}
             data-dragging={dragging === item.id || undefined}
             data-drop={over === item.id || undefined}
@@ -948,16 +657,12 @@ export const SearchPlatforms = memo(function SearchPlatforms({
             onClick={(event) => {
               // 真正的点击在 pointerup 里处理；这里挡住 form 提交式 click。
               event.preventDefault();
-              if (collapsed) onExpand?.();
-              else if (event.detail === 0) onTogglePlatform(item.id);
+              if (event.detail === 0) onTogglePlatform(item.id);
             }}
           >
             <PlatformMark id={item.id} />
           </button>
         ))}
-      {collapsed && collapsedOverflow > 0 ? (
-        <span className="kd-plat-more" aria-hidden="true">+{collapsedOverflow}</span>
-      ) : null}
     </div>
   );
 });

@@ -215,9 +215,9 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
   );
 
   /**
-   * Both elements let go of their source, until the next `load`. A `.kdjv` project drawn live
-   * (KdjvLivePicture) needs neither: a source left from the video played before it would keep
-   * decoding on the project's clock, report its own time and shape, and fade over the picture.
+   * Both elements let go of their source, until the next `load`. A video drawn with WebCodecs
+   * (KdjvCodecPicture) needs neither: a source left from the video played before it would keep
+   * decoding on the player's clock, report its own time and shape, and fade over the picture.
    */
   const unload = useCallback(() => {
     cancelPending();

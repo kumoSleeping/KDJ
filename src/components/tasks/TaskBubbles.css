@@ -22,6 +22,11 @@
   overflow: hidden;
   pointer-events: none;
 }
+/* A phone draws under its gesture bar (design.css, --kd-safe-bottom): with the bar away the
+   bottom stack stands clear of it instead of on the window's very edge. */
+.kd-app[data-mobile="true"] > .kd-task-host[data-place="bottom"] {
+  bottom: max(var(--kd-task-floor, 0px), var(--kd-safe-bottom, 0px));
+}
 /* The top host hangs under the search row, where the drawer's panels have their place: it
    clips at that row's bottom edge and ends at the right edge of the list's column
    (--kd-task-ceiling and --kd-task-ceiling-right, measured by the host when a bubble comes up
@@ -67,20 +72,6 @@
   transform: translateY(calc(var(--kd-task-dir) * var(--kd-task-lift, 0px)));
   transition: transform var(--kd-task-in) var(--kd-task-in-ease);
 }
-/* A resizable bubble's inner edge (TaskBubbleSpec.resizable): a grip as tall as the bubble,
-   drawn as nothing but the cursor. A small bubble that can be widened keeps the regular size's
-   width until it is dragged. */
-.kd-task-resize {
-  position: absolute;
-  z-index: 1;
-  top: 8px;
-  bottom: 8px;
-  left: -5px;
-  width: 10px;
-  cursor: ew-resize;
-  pointer-events: auto;
-  touch-action: none;
-}
 .kd-task-host[data-place="top"] .kd-task-slot {
   top: var(--kd-task-gap);
   bottom: auto;
@@ -104,54 +95,6 @@
   font: var(--kd-size-sm)/1.35 var(--kd-font);
   pointer-events: auto;
   will-change: transform;
-}
-/* `working` (the AI's task while it runs): one soft arc of warm light — red into orange into
-   yellow, fading at both ends, the `/pi` field's colours (docs/ai-dock.md) — goes round the
-   bubble's edge every few seconds. A masked ring on the bubble's own outline, over its content
-   and under the pointer, so nothing is laid out or moved; under reduced motion the whole edge
-   stays faintly lit instead. */
-@property --kd-task-sweep {
-  syntax: "<angle>";
-  inherits: false;
-  initial-value: 0deg;
-}
-.kd-task[data-working] {
-  --kd-task-work-a: #e8412f;
-  --kd-task-work-b: #f2811d;
-  --kd-task-work-c: #f2b822;
-}
-:root[data-theme="light"] .kd-task[data-working] { --kd-task-work-c: #d99a06; }
-.kd-task[data-working]::after {
-  content: "";
-  position: absolute;
-  z-index: 3;
-  inset: 0;
-  padding: 1.5px;
-  border-radius: inherit;
-  background: conic-gradient(from var(--kd-task-sweep),
-    transparent 0deg,
-    color-mix(in srgb, var(--kd-task-work-a) 55%, transparent) 40deg,
-    var(--kd-task-work-a) 80deg,
-    var(--kd-task-work-b) 120deg,
-    var(--kd-task-work-c) 160deg,
-    transparent 200deg,
-    transparent 360deg);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  pointer-events: none;
-  animation: kd-task-sweep 2.8s linear infinite;
-}
-@keyframes kd-task-sweep {
-  from { --kd-task-sweep: 0deg; }
-  to { --kd-task-sweep: 360deg; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .kd-task[data-working]::after {
-    animation: none;
-    background: linear-gradient(115deg, var(--kd-task-work-a), var(--kd-task-work-b) 50%, var(--kd-task-work-c));
-    opacity: 0.6;
-  }
 }
 /* 460 ms in and 360 ms out: the song-change clock (src/lib/songSwapMotion.ts), which the host
    passes in. One pair of keyframes serves both places: --kd-task-drop lies below a bottom
@@ -190,11 +133,6 @@
   padding: 8px 8px 8px 10px;
 }
 .kd-task-main[data-opens] { cursor: pointer; }
-/* Only the actions are left above an open body that restates the summary. */
-.kd-task-main[data-bare] {
-  min-height: 0;
-  padding-bottom: 4px;
-}
 
 /* Covers: one alone, or up to three overlapping with the count of the rest beside them. Each
    later cover is tucked under the one before it and keeps a rim of the surface around it. */
@@ -535,9 +473,8 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
 }
 .kd-task-slot[data-size="small"] .kd-task-main { min-height: 2.5rem; padding-block: 5px; }
 .kd-task-slot[data-size="large"] { width: min(28rem, calc(100% - 2 * var(--kd-task-gap))); }
-.kd-task-slot[data-size="wide"] { width: min(44rem, calc(100% - 2 * var(--kd-task-gap))); }
 .kd-task-slot[data-size="large"] .kd-task { border-radius: 14px; }
-.kd-task-slot[data-size="large"] .kd-task-main:not([data-bare]) {
+.kd-task-slot[data-size="large"] .kd-task-main {
   gap: 14px;
   min-height: 5.25rem;
   padding: 12px 10px 12px 12px;
@@ -560,14 +497,14 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
    the same gap on its left and on its right. The bar is put away there unless the listener
    brought it back, so the playing song's bubble is the window's usual transport and reads as
    its bar. Regular and small bubbles keep their size and stack above it at the right. A phone
-   keeps the sizes above. */
-.kd-app[data-tall="true"]:not([data-mobile="true"]) .kd-task-slot[data-size="large"] {
+   is always tall and does the same once its bar is put away. */
+.kd-app[data-tall="true"] .kd-task-slot[data-size="large"] {
   left: var(--kd-task-gap);
   width: auto;
 }
 /* A bubble that spans the window and is kept up holds its strip, as the bar does: the page ends
    above it (--kd-info-lift, the height the kept stack reaches, set by the host) instead of
    running underneath. A bubble that leaves by itself still passes over the page. */
-.kd-app[data-tall="true"]:not([data-mobile="true"]) { padding-bottom: var(--kd-info-lift, 0px); }
+.kd-app[data-tall="true"] { padding-bottom: var(--kd-info-lift, 0px); }
 /* The drawer hangs in that shortened page already; it does not keep clear of the bubble twice. */
-.kd-app[data-tall="true"]:not([data-mobile="true"]) .kd-drawer-sheets { --kd-info-lift: 0px; }
+.kd-app[data-tall="true"] .kd-drawer-sheets { --kd-info-lift: 0px; }

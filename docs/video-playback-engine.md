@@ -14,9 +14,8 @@
 | 本地详情、浮窗、系统 PiP | 共享设备时钟策略；应用内双槽出帧确认；系统 PiP 保持绑定的视频元素 |
 | 在线代理视频、YouTube HLS 浮窗 | 同一 `VideoPlaybackEngine.seek` 队列；保留当前源加载、错误和会话释放逻辑 |
 | 下载区视频预览及协同播放 | 同一跳转队列；音量、音频焦点仍由已有协同播放逻辑处理 |
-| 混合编辑多轨预览 | 同一设备时钟策略、跳转队列、备用槽出帧确认；素材时间映射留在编辑器 |
 | 旧合成/叠加预览 | 同一时钟和跳转调度；保留已有画布合成 |
-| 本地视频画面、工程（`.kdjv`）画面 | 见下节 WebCodecs；不经过 `<video>`，也不经过这里的调度层 |
+| 本地视频画面 | 见下节 WebCodecs；不经过 `<video>`，也不经过这里的调度层 |
 
 ## 体积、资源与边界
 
@@ -26,15 +25,15 @@
 
 网络缓冲、源文件关键帧间隔、系统解码延迟仍会影响随机跳转；不能承诺任意位置零延迟。后续如果增加 macOS/Windows/Android 原生后端，需要维持上述统一入口和取消规则，再通过实测比较解码启动延迟、显示帧连续性、音画误差、峰值内存和发行包增量。
 
-## WebCodecs 画面（本地视频、工程）
+## WebCodecs 画面（本地视频）
 
-跟着 KDJ 原生音频走的画面（库里的本地视频、`.kdjv` 工程）由 WebView 自己的 WebCodecs `VideoDecoder` 解码，画在页面里的一个 canvas 上。解码器是系统的：macOS 是 VideoToolbox，Windows（WebView2）是 Media Foundation，Android WebView 是 MediaCodec。解封装用 [mediabunny](https://mediabunny.dev/)（MPL-2.0，纯 TypeScript，只引入 MP4/MOV/WebM/MKV 四种读取格式），从 KDJ 本机服务按 Range 读文件。
+跟着 KDJ 原生音频走的画面（库里的本地视频）由 WebView 自己的 WebCodecs `VideoDecoder` 解码，画在页面里的一个 canvas 上。解码器是系统的：macOS 是 VideoToolbox，Windows（WebView2）是 Media Foundation，Android WebView 是 MediaCodec。解封装用 [mediabunny](https://mediabunny.dev/)（MPL-2.0，纯 TypeScript，只引入 MP4/MOV/WebM/MKV 四种读取格式），从 KDJ 本机服务按 Range 读文件。
 
 - `src/lib/codecClip.ts`：一个素材一个解码器。切点前 `prime`：从入点解出前几帧等着，切点一到就是动着的画面；播放中 `play`：从连续解码里取当前时钟该显示的帧，只有跳出已解码范围才重新开始解码（同一次跳转只重启一次，150 ms 内目标相近不重来）；暂停 `still`：精确解出目标帧，后到的目标替换排队的目标。帧用完立即 `close()`，系统解码器的帧池很小。
-- `src/components/player/KdjvCodecPicture.tsx`：按导出的位置、裁切、淡入淡出和轨道顺序把各片段的帧画到一个 canvas 上（和 render.rs 同一套 `clipBox`/`clipAlpha`）。新片段第一帧没到时保留上一幅画面（最多 0.5 秒）或停在前一片段末帧（`heldClips`），不闪黑。
+- `src/components/player/KdjvCodecPicture.tsx`：按片段的位置、裁切、淡入淡出和轨道顺序把帧画到一个 canvas 上（`kdjvLive.ts` 的 `clipBox`/`clipAlpha`；名字沿用 1.1.0-rc19 之前的 `.kdjv` 工程，剪辑已移出 KDJ）。新片段第一帧没到时保留上一幅画面（最多 0.5 秒）或停在前一片段末帧（`heldClips`），不闪黑。
 - `src/lib/codecVideo.ts`：本地视频当成“只有一个片段的工程”交给同一个画面。先读一次文件头拿到画面尺寸和时长；没有视频、容器不认识或系统解码器不支持的文件记为 refused，这个视频退回原来的 `<video>` 双槽路径（含兼容格式转换）。
 - 画面是页面的一部分：拖动、滚动、圆角、遮挡都和普通元素一样，没有原生视图和挖洞。
-- 在线预览（B站代理流、YouTube HLS）仍用 `<video>`，它自带声音和缓冲；没有 WebCodecs 的 WebView 上，工程画面退回 `KdjvLivePicture`（每片段一个 `<video>`）。
+- 在线预览（B站代理流、YouTube HLS）仍用 `<video>`，它自带声音和缓冲；没有 WebCodecs 的 WebView 上，本地视频用 `<video>` 双槽路径。
 - WebCodecs 画面没有对应的 `<video>` 元素，系统画中画按钮在这类画面上不显示。
 - 回放日志里的 `codec-open / codec-first / codec-seek / codec-still / codec-late / codec-error / codec-video(-refused)` 记录打开、首帧、跳转出帧、暂停出帧、落后和失败，带 `waitMs` 和重启原因 `why`。
 

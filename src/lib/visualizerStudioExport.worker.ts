@@ -1,7 +1,7 @@
-// One export renderer. Frames are a pure function of their index, so several of these
-// draw different frames of the same frozen project and upload them straight to the
-// local server: pixels never cross back through the editor's thread. With a system
-// hardware encoder in the WebView the renderer encodes as well, and uploads H.264.
+// One export renderer. Frames are a pure function of their index, so several of these draw
+// different GOPs of the same frozen project, encode them with the WebView's own H.264 encoder
+// and upload them straight to the local server: pixels never cross back through the editor's
+// thread.
 import type { VisualizerFeatureTimeline } from "../types/audioVisualizer";
 import type { VisualizerJobStatus } from "./api";
 import { studioDuration, type VisualizerProject } from "./visualizerStudio";
@@ -14,33 +14,42 @@ export type StudioWorkerCommand =
   | { type: "init"; project: VisualizerProject; images: ImageBitmap[]; timeline: string; baseUrl: string; authToken: string }
   | { type: "context"; willReadFrequently: boolean }
   | { type: "time"; indices: number[] }
-  | { type: "upload"; job: string; token: number; index: number }
-  /** Opens this renderer's hardware encoder and proves it on a short GOP. `anyEncoder`: where
-   * nothing else can encode (no FFmpeg), the WebView's software encoder and lower profiles do. */
-  | { type: "encoder"; anyEncoder?: boolean }
-  /** As `upload`, for GOP `index` instead of frame `index`. */
+  /** Opens this renderer's encoder and proves it on a short GOP. */
+  | { type: "encoder" }
+  /** Draws, encodes and uploads GOP `index`. */
   | { type: "encode"; job: string; token: number; index: number };
 export interface StudioWorkerRequest { id: number; command: StudioWorkerCommand }
-export interface StudioWorkerResult { status?: VisualizerJobStatus; parameters?: string }
+export interface StudioWorkerResult { status?: VisualizerJobStatus; parameters?: string; timing?: StudioFrameTiming }
+/** Milliseconds this renderer spent in each step of the frames it encoded. `encodeMs` is the
+ * time spent waiting for the encoder (its queue, and the flush that closes each GOP). */
+export interface StudioFrameTiming { frames: number; drawMs: number; readMs: number; convertMs: number; encodeMs: number; sendMs: number }
 export type StudioWorkerReply = { id: number } & ({ ok: true } & StudioWorkerResult | { ok: false; message: string });
 
 let prepared: PreparedStudio | undefined;
 let surface: ReturnType<typeof studioCanvas> | undefined;
 let server = { baseUrl: "", authToken: "" };
+const timing: StudioFrameTiming = { frames: 0, drawMs: 0, readMs: 0, convertMs: 0, encodeMs: 0, sendMs: 0 };
 
-function pixels(index: number): ImageData {
+function draw(index: number): void {
   if (!prepared || !surface) throw new Error("导出线程尚未准备画面");
-  const [canvas, context] = surface;
-  drawStudioFrame(context, prepared, index / prepared.project.output.fps);
-  return context.getImageData(0, 0, canvas.width, canvas.height);
+  const before = performance.now();
+  drawStudioFrame(surface[1], prepared, index / prepared.project.output.fps);
+  timing.drawMs += performance.now() - before;
 }
 
-/** Same request as `visualizerApi.frame`. Drawing happens before the first await, so
- * the next queued frame renders while this upload is still in flight. */
-function upload(job: string, token: number, index: number): Promise<VisualizerJobStatus> {
-  const image = pixels(index);
-  // A Blob body: Chromium uploads an ArrayBuffer body from a worker at only ~7 MB/s.
-  return send(job, token, index, new Blob([rgbaToYuv420(image.data, image.width, image.height)]));
+function pixels(index: number): ImageData {
+  draw(index);
+  const [canvas, context] = surface!, before = performance.now();
+  const image = context.getImageData(0, 0, canvas.width, canvas.height);
+  timing.readMs += performance.now() - before;
+  return image;
+}
+
+function i420(index: number): Uint8Array<ArrayBuffer> {
+  const image = pixels(index), before = performance.now();
+  const yuv = rgbaToYuv420(image.data, image.width, image.height);
+  timing.convertMs += performance.now() - before;
+  return yuv;
 }
 
 interface Gop { parts: Uint8Array<ArrayBuffer>[]; last: number; failure?: string }
@@ -55,22 +64,21 @@ function exclusive<T>(task: () => Promise<T>): Promise<T> {
 }
 const frameCount = (s: PreparedStudio) => Math.ceil(studioDuration(s.timeline) * s.project.output.fps);
 
-/** One hardware encoder session for the whole export. Software encoders are left to
- * FFmpeg: x264 is both faster and better than what a WebView falls back to. Without FFmpeg
- * (`anyEncoder`) the first encoder the WebView has is taken, High profile before Main and
- * Baseline: some phones and emulators have only a software one, or no High profile. */
-async function openEncoder(anyEncoder = false): Promise<void> {
+/** One encoder session for the whole export: the first the WebView has, hardware before
+ * software and High profile before Main and Baseline (some phones and emulators have only a
+ * software one, or no High profile). There is no other encoder to fall back on. */
+async function openEncoder(): Promise<void> {
   if (!prepared) throw new Error("导出线程尚未准备画面");
   if (typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined") throw new Error("这个 WebView 没有 WebCodecs");
   const { width, height } = prepared.project.scene.canvas, fps = prepared.project.output.fps;
   const base = { width, height, framerate: fps, bitrate: studioVideoBitrate(width, height, fps, prepared.project.output.quality),
     bitrateMode: "variable", latencyMode: "quality", avc: { format: "annexb" } } as const;
-  const candidates: VideoEncoderConfig[] = (anyEncoder ? ["prefer-hardware", "no-preference"] as const : ["prefer-hardware"] as const)
-    .flatMap(hardwareAcceleration => (anyEncoder ? ["high", "main", "baseline"] as const : ["high"] as const)
+  const candidates: VideoEncoderConfig[] = (["prefer-hardware", "no-preference"] as const)
+    .flatMap(hardwareAcceleration => (["high", "main", "baseline"] as const)
       .map(profile => ({ ...base, codec: studioAvcCodec(width, height, fps, profile), hardwareAcceleration })));
   let config: VideoEncoderConfig | undefined;
   for (const candidate of candidates) if ((await VideoEncoder.isConfigSupported(candidate)).supported) { config = candidate; break; }
-  if (!config) throw new Error(anyEncoder ? `这台设备不能编码 ${width} × ${height} 的 H.264 视频，换一个较小的分辨率` : "系统硬件编码器不支持这个画布");
+  if (!config) throw new Error(`这台设备不能编码 ${width} × ${height} 的 H.264 视频，换一个较小的分辨率`);
   const state: StudioEncoder = {
     gop: { parts: [], last: -1 },
     encoder: new VideoEncoder({
@@ -98,30 +106,41 @@ const settle = (encoder: VideoEncoder) => new Promise<void>(resolve => {
   encoder.addEventListener("dequeue", done);
 });
 
-/** Frames `first .. first + count` as one closed GOP. The pixels are the I420 frames
- * the other path uploads, so both paths encode the same BT.709 limited-range picture. */
+/** Frames `first .. first + count` as one closed GOP, from I420 frames in BT.709 limited range. */
 async function encodeGop(first: number, count: number): Promise<Uint8Array<ArrayBuffer>[]> {
   if (!prepared || !video) throw new Error("导出线程尚未准备编码器");
   const { encoder } = video, gop: Gop = video.gop = { parts: [], last: -1 };
   const { width, height } = prepared.project.scene.canvas, fps = prepared.project.output.fps;
   for (let n = 0; n < count; n++) {
-    const index = first + n, image = pixels(index);
-    const frame = new VideoFrame(rgbaToYuv420(image.data, width, height), {
-      format: "I420", codedWidth: width, codedHeight: height, timestamp: Math.round(index * 1e6 / fps), duration: Math.round(1e6 / fps),
+    const index = first + n, timestamp = Math.round(index * 1e6 / fps), duration = Math.round(1e6 / fps);
+    // Not `new VideoFrame(canvas)`: Android's WebView turns an RGB frame into BT.601 YUV and
+    // writes no colour description, so players read it as BT.709 and shift reds and greens.
+    const frame = new VideoFrame(i420(index), {
+      format: "I420", codedWidth: width, codedHeight: height, timestamp, duration,
       colorSpace: { primaries: "bt709", transfer: "bt709", matrix: "bt709", fullRange: false },
     });
+    const before = performance.now();
     try { encoder.encode(frame, { keyFrame: n === 0 }); } finally { frame.close(); }
     // Bound the frames waiting for the encoder: each holds a full I420 copy.
     while (encoder.encodeQueueSize > 2 && !gop.failure) await settle(encoder);
+    timing.encodeMs += performance.now() - before;
+    timing.frames++;
     if (gop.failure) throw new Error(gop.failure);
   }
+  const flushing = performance.now();
   await encoder.flush();
+  timing.encodeMs += performance.now() - flushing;
   if (gop.failure) throw new Error(gop.failure);
   if (gop.parts.length !== count) throw new Error(`硬件编码器输出了 ${gop.parts.length} 帧，应为 ${count} 帧`);
   return gop.parts;
 }
 
 async function send(job: string, token: number, index: number, body: Blob): Promise<VisualizerJobStatus> {
+  const before = performance.now();
+  try { return await post(job, token, index, body); } finally { timing.sendMs += performance.now() - before; }
+}
+
+async function post(job: string, token: number, index: number, body: Blob): Promise<VisualizerJobStatus> {
   const response = await fetch(`${server.baseUrl}/api/visualizer/jobs/${encodeURIComponent(job)}/frames`, {
     method: "POST", body,
     headers: { Authorization: `Bearer ${server.authToken}`, "Content-Type": "application/octet-stream", "X-KDJ-Activity-Recorded": "1", "X-KDJ-Video-Frame": `${token}:${index}` },
@@ -153,19 +172,19 @@ async function handle(command: StudioWorkerCommand): Promise<StudioWorkerResult 
     case "time":
       for (const index of command.indices) pixels(index);
       return;
-    case "upload":
-      return { status: await upload(command.job, command.token, command.index) };
     case "encoder": {
-      await openEncoder(command.anyEncoder);
+      await openEncoder();
       const parts = await exclusive(() => encodeGop(0, Math.min(4, frameCount(prepared!))));
       const parameters = h264ParameterSets(new Uint8Array(await new Blob(parts).arrayBuffer()));
       if (!parameters) throw new Error("硬件编码器没有输出 Annex B 关键帧");
+      // The probe's frames are not the export's.
+      Object.assign(timing, { frames: 0, drawMs: 0, readMs: 0, convertMs: 0, encodeMs: 0, sendMs: 0 });
       return { parameters };
     }
     case "encode": {
       const per = studioChunkFrames(prepared!.project.output.fps), first = command.index * per;
       const parts = await exclusive(() => encodeGop(first, Math.min(per, frameCount(prepared!) - first)));
-      return { status: await send(command.job, command.token, command.index, new Blob(parts)) };
+      return { status: await send(command.job, command.token, command.index, new Blob(parts)), timing: { ...timing } };
     }
   }
 }

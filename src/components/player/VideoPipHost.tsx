@@ -24,7 +24,6 @@ import { createPortal } from "react-dom";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./AndroidVideoPip.css";
 import { canAndroidVideoPip, configureAndroidVideoPip, enterAndroidVideoPip } from "../../lib/androidVideoPip";
-import { mediaProductionAvailable } from "../../lib/platformFeatures";
 import { PictureInPicture2 } from "lucide-react";
 import { FloatingMediaResizeHandles, useFloatingMediaWindow } from "./FloatingMediaWindow";
 import { FloatingVideoControls, FloatingVideoScrub } from "./FloatingVideoControls";
@@ -44,10 +43,8 @@ import {
   VideoTransportEchoGuard,
 } from "../../lib/videoPlaybackEngine";
 import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
-import { ensureProjectLive, useKdjvLive } from "../../lib/kdjvPlay";
-import { isProjectTrack } from "../../lib/format";
-import { KdjvLivePicture } from "./KdjvLivePicture";
 import { KdjvCodecPicture } from "./KdjvCodecPicture";
+import { PICTURE_FAILED, SystemPlayerNotice, useVideoSound } from "./SystemPlayerNotice";
 import { codecDecodeAvailable, codecVideoRefused, useVideoProject } from "../../lib/codecVideo";
 import { PanelErrorBoundary } from "../RootErrorBoundary";
 import {
@@ -175,13 +172,8 @@ function sessionKey(session: VideoPipSession): string {
     : `local:${session.trackId}`;
 }
 
-function hasLoadedSessionSource(
-  loadedKey: string | null,
-  nextKey: string,
-  session: VideoPipSession,
-): boolean {
-  if (loadedKey === nextKey) return true;
-  return session.source === "local" && loadedKey === `${nextKey}:compat`;
+function hasLoadedSessionSource(loadedKey: string | null, nextKey: string): boolean {
+  return loadedKey === nextKey;
 }
 
 type YoutubeNetworkSession = Extract<VideoPipSession, { source: "network" }> & {
@@ -201,27 +193,18 @@ interface Bounds {
   height: number;
 }
 
-/**
- * A local session of a project, drawn live while it plays from its sound (kdjvPlay.ts): also
- * before its live picture is there (the window was loaded again while it played), when nothing
- * is loaded as a video either — that was its render, keyed every few seconds, or a 409.
- */
-function projectSession(session: VideoPipSession | null): boolean {
-  return session?.source === "local" && (session.project === true || Boolean(useKdjvLive.getState().live[session.trackId]));
-}
-
 /** A local video on the song's clock whose picture is decoded with WebCodecs (codecVideo.ts). */
 function codecVideoSession(session: VideoPipSession | null): boolean {
-  return session?.source === "local" && !projectSession(session) && usesLocalVideoDeviceClock()
+  return session?.source === "local" && usesLocalVideoDeviceClock()
     && codecDecodeAvailable() && !codecVideoRefused(session.trackId);
 }
 
 /**
- * A local session drawn as a picture that follows the player by itself (a project, or a video
- * decoded with WebCodecs): no `<video>` here is loaded, started or sought for it.
+ * A local session drawn as a picture that follows the player by itself (a video decoded with
+ * WebCodecs): no `<video>` here is loaded, started or sought for it.
  */
 function pictureSession(session: VideoPipSession | null): boolean {
-  return projectSession(session) || codecVideoSession(session);
+  return codecVideoSession(session);
 }
 
 function mediaUrl(session: VideoPipSession): string {
@@ -248,7 +231,6 @@ export function VideoPipHost() {
   const pipVideoRef = useRef<HTMLVideoElement | null>(null);
   const loadedKeyRef = useRef<string | null>(null);
   const youtubePreviewRef = useRef<YoutubeVideoPreviewController | null>(null);
-  const compatRetryKeyRef = useRef<string | null>(null);
   const desiredPlayingRef = useRef(false);
   const pendingScrubRef = useRef<number | null>(null);
   const nativeVideoSeekTimerRef = useRef(0);
@@ -281,6 +263,8 @@ export function VideoPipHost() {
   const duration = useVideoPip((state) => state.duration);
   const error = useVideoPip((state) => state.error);
   const session = useVideoPip((state) => state.session);
+  // Whether a library video's sound plays: one that does not plays as silence (SystemPlayerNotice).
+  const localSound = useVideoSound(session?.source === "local" ? session.trackId : null);
   const [videoFullscreen, setVideoFullscreen] = useState(false);
   // The picture's own width / height, once the source has told it. The floating window is the
   // shape of the video it holds, not of a 16:9 frame; a change (metadata arriving, another
@@ -344,14 +328,11 @@ export function VideoPipHost() {
   const showSurface = Boolean(hostActive && !systemPip && panelReady);
   const showFloating = showSurface && !docked;
   const isLocal = session?.source === "local";
-  // A project playing from its sound: its picture is drawn live, in the canvas's shape.
-  const projectLive = useKdjvLive(state => session?.source === "local" ? state.live[session.trackId] : undefined);
-  // A local video is drawn the same way, as a project of one clip, once its file is known to
+  // A local video is drawn with WebCodecs, as a project of one clip, once its file is known to
   // decode here; a refused one keeps the `<video>` elements below.
-  const codecWanted = session?.source === "local" && !session.project && !projectLive
-    && usesLocalVideoDeviceClock() && codecDecodeAvailable();
+  const codecWanted = session?.source === "local" && usesLocalVideoDeviceClock() && codecDecodeAvailable();
   const videoPicture = useVideoProject(codecWanted && session?.source === "local" ? session.trackId : null);
-  const live = projectLive ?? videoPicture.project ?? undefined;
+  const live = videoPicture.project ?? undefined;
   useEffect(() => {
     if (!live) return;
     setSourceRatio(live.width / live.height);
@@ -362,8 +343,8 @@ export function VideoPipHost() {
   const localSwap = useLocalVideoSwap({
     // WebKit PiP is bound to the concrete source <video>. While it is open, keep that element
     // stable and use the single-video seek fallback instead of swapping it out from underneath PiP.
-    // A live project has no video of its own here: its seeks are not prepared on these elements.
-    enabled: Boolean(isLocal && hostActive && !systemPip && !live && !(session?.source === "local" && session.project) && !(codecWanted && !videoPicture.refused)),
+    // A picture drawn with WebCodecs has no video of its own here: its seeks are not prepared on these elements.
+    enabled: Boolean(isLocal && hostActive && !systemPip && !live && !(codecWanted && !videoPicture.refused)),
     trackId: session?.source === "local" ? session.trackId : null,
     desiredPlayingRef,
     getRate: () => {
@@ -589,7 +570,6 @@ export function VideoPipHost() {
       }
     }
     loadedKeyRef.current = null;
-    compatRetryKeyRef.current = null;
     desiredPlayingRef.current = false;
     useVideoPip.getState().setPlaying(false);
   };
@@ -673,7 +653,7 @@ export function VideoPipHost() {
     const nextKey = `${sessionKey(next)}:kdj`;
     // A panel-first session has no local source to retain. A source left by another session must
     // still be torn down; only the exact local session receives the non-destructive suspension.
-    if (!hasLoadedSessionSource(loadedKeyRef.current, nextKey, next)) {
+    if (!hasLoadedSessionSource(loadedKeyRef.current, nextKey)) {
       networkRetryRef.current = { key: nextKey, count: 0 };
       stopHost();
       return;
@@ -700,14 +680,12 @@ export function VideoPipHost() {
         : desiredPlayingRef.current || next.source === "network" || next.autoPlay;
     desiredPlayingRef.current = shouldPlay;
     useVideoPip.getState().setError("");
-    // A live project, and a video decoded with WebCodecs, follow the player's clock by
-    // themselves; there is no video here to start, and the one played before is let go
-    // (useLocalVideoSwap `unload`).
+    // A video decoded with WebCodecs follows the player's clock by itself; there is no video
+    // here to start, and the one played before is let go (useLocalVideoSwap `unload`).
     if (pictureSession(next)) {
       pauseHostVideos();
       localSwap.unload();
       loadedKeyRef.current = null;
-      if (next.source === "local" && projectSession(next)) ensureProjectLive(next.trackId);
       return;
     }
     let video = activeVideo();
@@ -716,9 +694,8 @@ export function VideoPipHost() {
     // The swap binds both elements picture-only (muted attribute included) before any source.
     video.defaultMuted = video.muted;
     if (next.source === "network") video.volume = currentNetworkVolume();
-    if (!hasLoadedSessionSource(loadedKeyRef.current, nextKey, next)) {
+    if (!hasLoadedSessionSource(loadedKeyRef.current, nextKey)) {
       localSynchronizerRef.current?.reset(video);
-      compatRetryKeyRef.current = null;
       void youtubePreviewRef.current?.dispose();
       youtubePreviewRef.current = null;
       if (next.source === "local") {
@@ -816,32 +793,10 @@ export function VideoPipHost() {
       const unsupported =
         (reason instanceof DOMException && reason.name === "NotSupportedError") ||
         playingVideo.error?.code === 4; // MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
-      if (mediaProductionAvailable() && next.source === "local" && unsupported && compatRetryKeyRef.current !== nextKey) {
-        compatRetryKeyRef.current = nextKey;
-        loadedKeyRef.current = `${nextKey}:compat`;
-        useVideoPip.getState().setError("正在转换为系统播放器兼容格式…");
-        localSwap.load(`${nextKey}:compat`, api.videoUrl(next.trackId, true));
-        video = activeVideo();
-        if (!video) return;
-        const compatVideo = video;
-        void compatVideo
-          .play()
-          .then(() => {
-            if (!desiredPlayingRef.current) {
-              compatVideo.pause();
-              return;
-            }
-            useVideoPip.getState().setError("");
-          })
-          .catch((compatReason: unknown) => {
-            if (!desiredPlayingRef.current) return;
-            useVideoPip.getState().setPlaying(false);
-            useVideoPip
-              .getState()
-              .setError(
-                `这个视频无法转换为兼容格式：${compatReason instanceof Error ? compatReason.message : String(compatReason)}`,
-              );
-          });
+      // A library video this WebView cannot decode: its sound plays on, the picture says so
+      // and offers the system's player (SystemPlayerNotice). KDJ has no FFmpeg to convert it.
+      if (next.source === "local" && unsupported) {
+        useVideoPip.getState().setError(PICTURE_FAILED);
         return;
       }
       if (next.source === "network") {
@@ -907,7 +862,6 @@ export function VideoPipHost() {
         title: track.title || track.filename,
         author: track.artist || "",
         autoPlay: detail.autoPlay !== false,
-        project: isProjectTrack(track.format),
       };
       pip.setSession(next);
       applyPanelChrome(next, pip.mode);
@@ -1225,7 +1179,7 @@ export function VideoPipHost() {
   useEffect(() => {
     const video = activeVideo();
     if (!video) return;
-    // A picture that follows the player (a project, a video decoded with WebCodecs) is
+    // A picture that follows the player (a video decoded with WebCodecs) is
     // KdjvCodecPicture's: these elements say nothing about it.
     const stillActive = () => localSwap.isActiveVideo(video) && !pictureSession(useVideoPip.getState().session);
     const onSize = () => {
@@ -1609,20 +1563,14 @@ export function VideoPipHost() {
             muted
           />
           {live && showSurface && session?.source === "local" && (
-            <PanelErrorBoundary name="工程画面" turn={session.trackId}>
-              {codecDecodeAvailable()
-                ? <KdjvCodecPicture trackId={session.trackId} project={live}
-                    sourceUrl={projectLive ? undefined : () => api.videoUrl(session.trackId)}
-                    onTransport={({ position, playing }) => {
-                      const pip = useVideoPip.getState();
-                      if (pendingScrubRef.current === null) pip.setPosition(position);
-                      if (pip.playing !== playing) pip.setPlaying(playing);
-                    }} />
-                : <KdjvLivePicture trackId={session.trackId} project={live} onTransport={({ position, playing }) => {
-                    const pip = useVideoPip.getState();
-                    if (pendingScrubRef.current === null) pip.setPosition(position);
-                    if (pip.playing !== playing) pip.setPlaying(playing);
-                  }} />}
+            <PanelErrorBoundary name="视频画面" turn={session.trackId}>
+              <KdjvCodecPicture trackId={session.trackId} project={live}
+                sourceUrl={() => api.videoUrl(session.trackId)}
+                onTransport={({ position, playing }) => {
+                  const pip = useVideoPip.getState();
+                  if (pendingScrubRef.current === null) pip.setPosition(position);
+                  if (pip.playing !== playing) pip.setPlaying(playing);
+                }} />
             </PanelErrorBoundary>
           )}
           <canvas ref={pipCanvasRef} className="kd-pip-compositor" aria-hidden="true" />
@@ -1634,10 +1582,13 @@ export function VideoPipHost() {
             playsInline
             aria-hidden="true"
           />
+          {showSurface && session?.source === "local" && (error === PICTURE_FAILED
+            ? <SystemPlayerNotice trackId={session.trackId} kind="picture" />
+            : localSound === false && <SystemPlayerNotice trackId={session.trackId} kind="sound" />)}
           {showSurface && (
             <FloatingVideoControls title={title} playing={playing} position={position} duration={duration}
               fullscreen={videoFullscreen} onClose={close} onToggle={toggle}
-              onFullscreen={() => void applyVideoFullscreen(!videoFullscreen)} error={error}
+              onFullscreen={() => void applyVideoFullscreen(!videoFullscreen)} error={error === PICTURE_FAILED ? undefined : error}
               extra={showFloating && !live && canSystemPip() ? <button type="button" aria-label="系统画中画"
                 title="系统画中画（切走应用时也会自动打开）" onClick={event => {
                   event.stopPropagation();

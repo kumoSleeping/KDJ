@@ -45,7 +45,6 @@ import type {
   FolderUndoStatus,
   HarmonicMatch,
   Health,
-  FfmpegInstallationStatus,
   IntakeRequest,
   IntakeResponse,
   LibraryStats,
@@ -826,7 +825,6 @@ export const api = {
   health: () => request<Health>("/health"),
   /** Brings the main window to the front, from whichever window asks. */
   showMainWindow: () => post<{ ok: boolean }>("/control/show"),
-  ffmpegInstallationStatus: () => request<FfmpegInstallationStatus>("/tools/ffmpeg"),
   prewarmYtmPlayback,
 
   getSettings: () => request<Settings>("/settings"),
@@ -941,41 +939,6 @@ export const api = {
   resolve: (url: string, limit = 0) => post<ResolveResponse>("/resolve", { url, limit }),
   intake: (body: IntakeRequest) => post<IntakeResponse>("/intake", body),
 
-  /** What playing a `.kdjv` project starts from (docs/kdjv.md): its sound (mixed now if need be, seconds), its render if any, its live picture. */
-  previewKdjv: (trackId: number) => post<import("../types").KdjvPreview>("/kdjv/preview", { track_id: trackId }),
-  /** The n-th source file of a project's live preview, with Range. */
-  kdjvSourceUrl: (trackId: number, n: number) => authenticatedGetUrl(`${bridge().baseUrl}/api/kdjv/source/${trackId}/${n}`),
-  /** The source's preview proxy, once the project says it is made (`proxy`). */
-  kdjvProxyUrl: (trackId: number, n: number) => authenticatedGetUrl(`${bridge().baseUrl}/api/kdjv/proxy/${trackId}/${n}`),
-  /** A small JPEG of a project's source (`src` as its document names it) at `t` seconds, `h` pixels high. */
-  kdjvFrameUrl: (trackId: number, src: string, t: number, h: number) =>
-    authenticatedGetUrl(`${bridge().baseUrl}/api/kdjv/frame?track_id=${trackId}&src=${encodeURIComponent(src)}&t=${t.toFixed(1)}&h=${h}`),
-  /** A `.kdjv` project's render (docs/kdjv.md): found in the cache, or made now (can take minutes). */
-  renderKdjv: (trackId: number) => post<{ path: string; track_id: number | null }>("/kdjv/render", { track_id: trackId }),
-  /** A track's beat grid (kdj-analysis rhythm): bar lines, beats and tempo stretches in seconds, or null before it is analysed. */
-  rhythm: (trackId: number) => request<{
-    analysis: { downbeats: number[]; beats: number[]; segments: Array<{ start_seconds: number; end_seconds: number; bpm: number }> } | null;
-    /** The analysis under way or last run this session ("queued", "analyzing", "failed", "canceled", …). */
-    status?: { phase: string } | null;
-  }>(`/library/rhythm/${trackId}`),
-  /** Analyse a track's beat grid now (`precise`: the whole song, every tempo change); null job when it already has one. */
-  startRhythm: (trackId: number, precise = true) => post<{ job_id: string | null; queued: number }>(`/library/rhythm/${trackId}`, { precise }),
-  /** Operations on a `.kdjv` 2 project (src/lib/lanes.ts), applied in order and saved only when the result plays. */
-  /** Where a video's sound is found in a reference song (cli_media.rs `align`): placement plans, best first. */
-  align: (reference: string, video: string) =>
-    post<{ matched: boolean; plans: import("./lanes").AlignPlan[]; reason?: string }>("/cli/align", { reference, video }),
-  editKdjv: (body: { path?: string; track_id?: number; ops: import("./lanes").LaneOp[]; create?: boolean }) =>
-    post<import("./lanes").LaneEdited>("/kdjv/edit", body),
-  /** A project's file and title renamed in its folder, its library row moved with it; answers as an edit does. */
-  renameKdjv: (path: string, name: string) => post<import("./lanes").LaneEdited>("/kdjv/rename", { path, name }),
-  /** A `.kdjv` project written out as one MP4 beside it, never over an existing file. `id` names
-   *  the export for `cancelKdjvExport`; a project written meanwhile stops it (`kdjv_project_changed`). */
-  exportKdjv: (trackId: number, options: import("./lanes").ExportOptions | undefined, id: string) =>
-    post<{ path: string; track_id: number | null }>("/kdjv/export", options ? { track_id: trackId, options, id } : { track_id: trackId, id }),
-  /** Stops the export of that id; its own request then answers `kdjv_export_stopped`. */
-  cancelKdjvExport: (id: string) => post<{ stopped: boolean }>("/kdjv/export/cancel", { id }),
-  /** A title's text drawn as a PNG (base64), kept by the server; answers where. */
-  saveTitleImage: (png: string) => post<{ src: string }>("/kdjv/title-image", { png }),
   downloads: () => request<DownloadTask[]>("/downloads"),
   enqueue: async (body: DownloadRequest) => {
     // 目录选择先乐观更新 UI、再异步落盘。入队若抢在落盘前，后端会冻结上一个目录。
@@ -1257,12 +1220,9 @@ export const api = {
     const { baseUrl } = bridge();
     return authenticatedGetUrl(`${baseUrl}/api/library/audio/${id}`);
   },
-  videoUrl: (id: number, compatible = false) => {
-    const { baseUrl } = bridge();
-    return authenticatedGetUrl(
-      `${baseUrl}/api/library/video/${id}${compatible ? "?compat=true" : ""}`,
-    );
-  },
+  videoUrl: (id: number) => authenticatedGetUrl(`${bridge().baseUrl}/api/library/video/${id}`),
+  /** Whether a library video's sound plays; one that does not plays as silence. */
+  videoSound: (id: number) => request<{ sound: boolean }>(`/library/video-sound/${id}`),
   /**
    * `version` 是 cache-buster，不是后端认识的参数。
    *
@@ -1297,11 +1257,8 @@ export const visualizerApi = {
     if (!response.ok) throw new ApiError("读取封面失败", response.status);
     const blob = await response.blob(); return blob.size ? blob : null;
   },
-  start: (body: { track_id: number; signature: string; duration: number; output_path: string; width: number; height: number; fps: number; acceleration: string; pixel_format?: "rgba" | "yuv420p" | "h264"; chunk_frames?: number; video_bitrate?: number; audio_48k?: boolean }) => request<VisualizerJobStatus>("/visualizer/export", { method: "POST", body: JSON.stringify(body) }),
+  start: (body: { track_id: number; signature: string; duration: number; output_path: string; width: number; height: number; fps: number; chunk_frames: number; video_bitrate?: number; audio_48k?: boolean }) => request<VisualizerJobStatus>("/visualizer/export", { method: "POST", body: JSON.stringify(body) }),
   poll: (id: string, since: number, signal?: AbortSignal) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}?since=${since}`, { signal, headers: { "X-KDJ-Activity-Recorded": "1" } }),
-  // Blob, not ArrayBuffer: Chromium serializes an ArrayBuffer body inside fetch(), which
-  // stalls the thread that draws the next frame for about twice as long (17 vs 9 ms at 1080p).
-  frame: (id: string, token: number, index: number, pixels: ArrayBuffer, signal?: AbortSignal) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}/frames`, { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-KDJ-Activity-Recorded": "1", "X-KDJ-Video-Frame": `${token}:${index}` }, body: new Blob([pixels]), signal }),
   cancel: (id: string, keepalive = false) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST", keepalive }),
   /** `kdj visualizer render`: the first window to claim a request renders it. */
   claimCliRender: (id: string) => request<{ claimed: boolean }>(`/visualizer/render/${encodeURIComponent(id)}/claim`, { method: "POST" }),
@@ -1310,42 +1267,20 @@ export const visualizerApi = {
 };
 
 /**
- * The AI corner (docs/ai-dock.md). Nothing here is written to the activity log: the provider key
- * and the conversation stay out of it.
+ * `kdj peek` (cliPeek.ts): the first window to claim a peek decodes its frames and sends them
+ * back one JPEG at a time. And a library video's cover frame, made the same way (videoCover.ts).
  */
-export const aiApi = {
-  status: (refresh = false) => request<import("../types/ai").AiStatus>(`/ai/status${refresh ? "?refresh=1" : ""}`, {}, null),
-  models: (provider: string) =>
-    request<{ models: import("../types/ai").AiModel[] }>(`/ai/models?provider=${encodeURIComponent(provider)}`, {}, null),
-  saveProvider: (body: { provider: string; key?: string; model?: string | null }) =>
-    request<import("../types/ai").AiStatus>("/ai/provider", { method: "PUT", body: JSON.stringify(body) }, null),
-  /** `images`: paths of pictures that go with the request; the model sees them. */
-  /** A request of its own opens a new session; `follow` (a supplement) goes on in the open one. */
-  prompt: (message: string, images: string[] = [], follow = false) =>
-    request<{ disposition: string }>("/ai/prompt", { method: "POST", body: JSON.stringify({ message, images, follow }) }, null),
-  /** A picture pasted into the `/pi` field, kept in the AI's workspace. */
-  paste: (image: Blob) =>
-    request<{ path: string }>("/ai/paste", { method: "POST", headers: { "Content-Type": image.type || "image/png" }, body: image }, null),
-  abort: () => request<void>("/ai/abort", { method: "POST" }, null),
-  reset: () => request<void>("/ai/reset", { method: "POST" }, null),
-  clearQueue: () => request<{ steering: string[]; followUp: string[] }>("/ai/clear-queue", { method: "POST" }, null),
-  answer: (body: { id: string; value?: string; confirmed?: boolean; cancelled?: boolean }) =>
-    request<void>("/ai/answer", { method: "POST", body: JSON.stringify(body) }, null),
-  installAccess: () => request<import("../types/ai").AiStatus>("/ai/web/install", { method: "POST" }, null),
-  installRemotion: () => request<import("../types/ai").AiStatus>("/ai/remotion/install", { method: "POST" }, null),
-  setThinking: (level: import("../types/ai").AiThinking) =>
-    request<import("../types/ai").AiStatus>("/ai/thinking", { method: "PUT", body: JSON.stringify({ level }) }, null),
-  setWeb: (body: { mode?: import("../types/ai").AiWebMode; jina_key?: string }) =>
-    request<import("../types/ai").AiStatus>("/ai/web", { method: "PUT", body: JSON.stringify(body) }, null),
-  globalLogins: () => request<{ path?: string; logins: import("../types/ai").AiGlobalLogin[] }>("/ai/global", {}, null),
-  importLogin: (provider: string) =>
-    request<import("../types/ai").AiStatus>("/ai/import", { method: "POST", body: JSON.stringify({ provider }) }, null),
-  /** The AI's history: its sessions, newest first, and the one pi has open. */
-  sessions: () => request<{ current: string | null; sessions: import("../types/ai").AiSessionSummary[] }>("/ai/sessions", {}, null),
-  session: (path: string) =>
-    request<{ steps: import("../types/ai").AiSessionStep[] }>(`/ai/sessions/detail?path=${encodeURIComponent(path)}`, {}, null),
-  switchSession: (path: string) =>
-    request<void>("/ai/sessions/switch", { method: "POST", body: JSON.stringify({ path }) }, null),
+export const framesApi = {
+  claimPeek: (id: string) => request<{ claimed: boolean }>(`/cli/peek/${encodeURIComponent(id)}/claim`, { method: "POST" }),
+  peekSourceUrl: (path: string) => authenticatedGetUrl(`${bridge().baseUrl}${path}`),
+  /** `n` is the frame's 1-based number; without it, the contact sheet. */
+  peekPicture: (id: string, jpeg: Blob, n?: number) =>
+    request<{ ok: boolean }>(`/cli/peek/${encodeURIComponent(id)}/picture${n === undefined ? "" : `?n=${n}`}`, { method: "POST", headers: { "Content-Type": "image/jpeg" }, body: jpeg }),
+  finishPeek: (id: string, result: { report: Record<string, unknown> } | { error: string }) =>
+    request<{ delivered: boolean }>(`/cli/peek/${encodeURIComponent(id)}/done`, { method: "POST", body: JSON.stringify(result) }),
+  /** A library video's cover, a frame the window decoded. */
+  saveVideoCover: (trackId: number, jpeg: Blob) =>
+    request<{ ok: boolean }>(`/library/video-cover/${trackId}`, { method: "POST", headers: { "Content-Type": "image/jpeg" }, body: jpeg }),
 };
 
 /* ---------------------------------------------------------------- WebSocket */

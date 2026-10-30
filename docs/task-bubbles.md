@@ -24,8 +24,8 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
 - **The place.** `placement` is `bottom` (the default) or `top`. It is chosen by where the
   listener is looking when the task reports, not by what the task is: `top` is for the answer to
   something pressed or dropped in the top row (the drawer's entries, the list's work rail), which
-  would not be seen at the other end of the window. Downloads, which the search row and the
-  AI (`docs/ai-dock.md`) start, and the AI's own steps report at the top too. What any other
+  would not be seen at the other end of the window. Downloads, which the search row starts,
+  report at the top too. What any other
   activity reports by itself — an export, an import, the song, the player's messages — stays
   at the bottom.
   - A top bubble drops from behind the bottom edge of the search row to a place at the top right,
@@ -35,9 +35,9 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
     sign (`--kd-task-dir`) turns the stack and the gesture over.
   - That place is where the drawer's panels hang (`.kd-drawer-area`: under the search row, two
     rows down in a tall window, left of an editor column). The host measures its top and right
-    edge when a bubble comes up there and when it changes size. A window without a drawer (a
-    phone, an editor window) hangs the stack under its top bar (`--kd-chrome-top`, which
-    includes a phone's status-bar inset).
+    edge when a bubble comes up there and when it changes size. A window without a drawer (an
+    editor window) hangs the stack under its top bar (`--kd-chrome-top`, which includes a
+    phone's status-bar inset).
   - The place is read when the bubble arrives. `updateTask` cannot move a bubble; showing an id
     that is up at the other place sends that bubble away where it is — its owner is not told of
     a dismissal — and brings a new one up where it is now wanted.
@@ -61,27 +61,14 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   In a tall desktop window (`tall` in `src/lib/useLayoutMode.ts`) a `large` bubble spans the
   window, with the same gap on its left and its right; `regular` and `small` keep their size
   and stack above it at the right, where they rise from behind it.
-  The one exception is `resizable: true`, for a bubble that is read at length (the AI's plans and
-  messages): the listener drags its inner (left) edge to set the width, the height still follows
-  what it holds, the width is kept per `kind`, and a double click on the edge gives the usual
-  width back. The owner still sets no width itself.
 - **The stay.** Each kind chooses its own `stay`: the playing song 5 s, a short note such as
   "没有找到歌词" 3 s. `stay` in ms; left out, the listener's own length decides (设置 → 通用 → 提示停留, 30 s by default;
   `taskDefaultStay`), an error twice that, and downloads twice that too.
   `stay: 0` keeps the bubble until it is dismissed — a pinned or opened bubble. The ring shows the
   time that is left and stops while the stack is hovered or focused. Every bubble can be rolled
-  down by hand; `escape: true` also lets Esc do it (only for a bubble the user called up). The
-  one exception is `held: true`: work under way that must stay in sight (the AI's task) has no
-  key that rolls it down and no Esc, only its own stop key in `actions`, and leaves when its
-  caller takes it down.
+  down by hand; `escape: true` also lets Esc do it (only for a bubble the user called up).
   `dismiss: { label, icon? }` rewrites the key that rolls it down when doing so does more than
   put the bubble away — never by testing an id in the host.
-- **Working.** `working: true` says the task is at work right now and shows no percentage
-  (the AI's task, `docs/ai-dock.md`): the host runs one soft arc of warm light — red into
-  orange into yellow, the `/pi` field's colours — round the bubble's edge (a masked ring on its
-  outline, `--kd-task-sweep`; under reduced motion a still, faintly lit edge). It stops when the
-  flag goes. This is the one warm edge a bubble may have; no task draws it itself, and the
-  search row shows nothing of the AI's work.
 - **Tone is not selection.** `info`, `success`, `error` colour the leading mark only (on a cover
   stack, a small mark on its corner); an error is amber, never the theme red. An error shows its
   whole sentence (up to four lines) instead of scrolling it.
@@ -205,7 +192,8 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
     away, a tall one keeps it away unless it was brought back. Crossing from one shape to the
     other is the same handover as the key. A slide always runs to its end; if what is wanted
     changes on the way, the bar arrives and sets off again.
-  - A phone keeps its bar: the collapse is not offered there.
+  - A phone has the same key; it is never a tall window (it is locked to landscape), so its
+    bar starts up until the listener puts it away.
   - An app that has the window (full-screen lyrics, `takesWindow` in `docs/drawer-schema.md`)
     sends the bar away the same way for as long as it has it, without reading or writing
     either shape's choice. The bubble is then the window's lower block. Its 展开播放条 key
@@ -255,14 +243,11 @@ Name the source in the `sources` of the window's `<TaskBubbleHost>`.
 | --- | --- | --- | --- |
 | A song starts (not pause/resume) | `now-playing`: cover, title, artist (two lines, no figures); 歌词, 小窗, 歌曲色彩; the mini transport while the bar is away; the song's colours as its backdrop while 歌曲色彩 is on | bottom, the base | `NowPlayingTask.tsx` |
 | Downloads started / progress / ended / failed | `downloads`: one bubble per run | top | source `downloads` |
-| Exports added / started / ended / failed (剪辑/VJ projects and visualizer; a project export stopped by an edit of its project reports as failed, one finished alone names its folder with 打开所在文件夹) | `exports` | bottom | source `exports` |
+| Visualizer exports added / started / ended / failed | `exports` | bottom | source `exports` |
 | A folder import ended or failed | `import` | bottom | source `imports` |
 | The player's own message (playback, transition and deck errors, "下一首已替换为…") | `player-notice` | bottom | `PlayerBar.tsx` `setNotice` |
 | The playing song has no lyrics to open ("没有找到歌词") | `lyrics-entry`, small, 3 s | top when asked from the drawer's 歌词 entry; bottom from the bar's key or the song's bubble | `lyricsEntry.ts` `requestPlayingLyrics(onOpened, near)` |
 | A search result dropped on the 下载 entry could not be queued ("加入队列失败…") | `notice:<text>` | top | `downloadDropEntry.ts` |
 | Cancelling an import from the list's work rail failed ("取消导入失败…") | `notice:<text>` | top | `LibraryWorkRail.tsx` |
 | A YouTube video, its preview or its download stopped for a login ("YouTube 登录已失效", "YouTube 需要先登录") | `login-needed:youtube`, its 登录 key opens that source's ways to log in | bottom | `loginNeeded.tsx` `reportLoginNeeded` |
-| The AI's steps, a message it sends (`tell_user`), what went wrong (`docs/ai-dock.md`) | `ai:<call>`, `ai-tell:<call>`, `ai:problem` | top | `components/ai/aiEvents.tsx` |
-| The listener's request to the AI and its supplements, until done | `ai-task:<id>`, kept up | bottom | `aiEvents.tsx` |
-| A question from the AI (`ask_user`): songs and choices, the listener's words, pause | `ai-ask:<call>`, the AI's countdown | bottom | `aiEvents.tsx` |
 | Every other former toast (window, fullscreen, import-drop, visualizer memory errors) | `notice:<text>` | bottom | `showNotice` |

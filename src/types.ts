@@ -26,32 +26,9 @@ export type TaskPhase =
 export type AccountState = "missing" | "valid" | "expired" | "unknown";
 export type QrStateValue = "waiting" | "scanned" | "done" | "expired" | "refused" | "error";
 
-export interface FfmpegToolStatus {
-  state: "missing" | "ready" | "broken";
-  path: string | null;
-  version: string | null;
-  error: string | null;
-}
-
-export interface FfmpegInstallationStatus {
-  platform: string;
-  arch: string;
-  ffmpeg: FfmpegToolStatus;
-  ffprobe: FfmpegToolStatus;
-}
-
-export interface FfmpegInstallProgress {
-  component: string | null;
-  phase: "idle" | "preparing" | "downloading" | "extracting" | "validating" | "done" | "failed";
-  downloaded: number;
-  total: number | null;
-  error: string | null;
-}
-
 export interface Health {
   ok: boolean;
   version: string;
-  ffmpeg: boolean;
   data_dir: string;
   download_dir: string;
   /**
@@ -502,7 +479,6 @@ export interface VideoDownloadRequest {
   max_height?: number;
   audio_only?: boolean;
   video_only?: boolean;
-  transcode?: boolean;
   /** 成品起点偏移（毫秒）：正=掐头，负=开头补黑场/静音。见 models.rs。 */
   offset_ms?: number;
   /** 下载完成后挪进这个曲库文件夹；空 = 默认视频目录。 */
@@ -956,41 +932,23 @@ export interface MaintenanceProgress {
  * 但前端已经没有浮层通知了，这条分支故意不在联合类型里：
  * 收到就当没这回事，各 store 的 switch 落到 default 直接忽略。
  */
-/** A `.kdjv` project as its live preview draws it (docs/kdjv.md, `kdjv.rs::Live`); seconds. */
+/**
+ * What a WebCodecs picture draws (KdjvCodecPicture): a local video as a project of one clip
+ * (codecVideo.ts). Shaped after the old `.kdjv` live preview; seconds.
+ */
 export interface KdjvLive {
   duration: number;
   width: number;
   height: number;
-  /**
-   * `file` names the file (and its signature): a source number may be another file after an edit.
-   * `proxy`: its preview proxy is made, loaded from `/api/kdjv/proxy/{track}/{n}` (proxy.rs).
-   */
-  sources: Array<{ kind: "video" | "image" | "gif" | "audio"; width: number; height: number; fps: number; file?: string; proxy?: boolean }>;
-  /** Picture clips; `track` 0 is the top one, `source` numbers `/api/kdjv/source/{track}/{n}`. */
+  /** `file` names the file (and its signature). */
+  sources: Array<{ kind: "video" | "image" | "gif" | "audio"; width: number; height: number; fps: number; file?: string }>;
+  /** Picture clips; `track` 0 is the top one. */
   clips: Array<{
     source: number; track: number; at: number; in: number; out: number; length: number;
     x: number; y: number; scale: number; opacity: number; fill: boolean; fade_in: number; fade_out: number;
     /** Fractions taken off: left, top, right, bottom (absent from older servers). */
     crop?: [number, number, number, number];
   }>;
-}
-
-/** What playing a project starts from: its sound, its render when there is one, its live picture. */
-export interface KdjvPreview {
-  sound: string;
-  render: string | null;
-  project: KdjvLive;
-}
-
-/** A `.kdjv` project being rendered for playing (docs/kdjv.md). */
-export interface KdjvProgress {
-  path: string;
-  track_id: number | null;
-  /** The export queue's task this render is for, if any. */
-  export?: string | null;
-  progress: number;
-  detail: string;
-  error: string | null;
 }
 
 export type WsEvent =
@@ -1008,12 +966,8 @@ export type WsEvent =
   | { type: "library.updated"; payload: { track_ids: number[] } }
   | { type: "library.folders.updated"; payload: Record<string, never> }
   | { type: "account.changed"; payload: Account }
-  | { type: "kdjv.progress"; payload: KdjvProgress }
-  /** A source's preview proxy is made (proxy.rs). */
-  | { type: "kdjv.proxy"; payload: { source: string } }
   | { type: "visualizer.render.requested"; payload: import("./lib/visualizerCliRender").VisualizerCliRender }
-  | { type: "ai.event"; payload: import("./types/ai").PiEvent }
-  | { type: "ai.status"; payload: import("./types/ai").AiStatus };
+  | { type: "peek.requested"; payload: import("./lib/cliPeek").CliPeek };
 
 /* ---------------------------------------------------------------- preload */
 
@@ -1130,8 +1084,6 @@ export interface KdjBridge {
     image: string;
   }) => Promise<SavedLoginQr>;
   pickFolder: (options?: { defaultPath?: string; title?: string }) => Promise<string | null>;
-  installMediaTools?: (action: "download" | "archive" | "folder") => Promise<boolean>;
-  mediaToolsProgress?: () => Promise<FfmpegInstallProgress>;
   pickFolders: () => Promise<string[]>;
   /** 桌面：选音频/视频文件直接入库；取消返回 `[]`。手机和浏览器没有这个入口。 */
   pickMediaFiles?: () => Promise<string[]>;
@@ -1143,6 +1095,8 @@ export interface KdjBridge {
   openExternal?: (url: string) => Promise<void>;
   /** 剪贴板里的文字；只给登录面板取回用户导出的登录。 */
   readClipboardText?: () => Promise<string>;
+  /** 安卓：在 App 里打开平台的登录页，登录后返回一行 `Cookie:`；用户离开登录页是 `null`。 */
+  webLogin?: (platform: string) => Promise<string | null>;
   /**
    * 桌面直接问 Tauri Updater 的清单；只有当前安装格式真的存在签名更新包时
    * 才会返回 newer=true。移动端/浏览器没有它，继续走 GitHub Release API。
@@ -1151,9 +1105,19 @@ export interface KdjBridge {
   /**
    * 桌面独有的一键更新：下载 + 校验 + 原地替换 + 重启，全程由
    * tauri-plugin-updater 托管。非桌面壳是 null/缺席——调用方按平台
-   * 各给各的操作（安卓开 Release 页下 APK，浏览器开发布页）。
+   * 各给各的操作（安卓见 installAndroidUpdate，浏览器开发布页）。
    */
   applyUpdate?: null | ((onProgress?: (progress: UpdateProgress) => void) => Promise<void>);
+  /**
+   * 安卓：在应用里下载 Release 的 APK，下完打开系统安装页（安装和确认仍是系统的）。
+   * "permission"：还没有「安装未知应用」授权；askPermission 为真时已打开授权页，允许后再调一次。
+   */
+  installAndroidUpdate?: (options: {
+    url: string;
+    version: string;
+    askPermission: boolean;
+    onProgress?: (progress: UpdateProgress) => void;
+  }) => Promise<"installing" | "permission">;
   windowControl: (action: "minimize" | "maximize" | "close" | "drag") => void;
   /** 主窗口收成迷你播放器再放回来（src/lib/miniPlayer.ts）。只有桌面壳的主窗口有。 */
   miniPlayer?: MiniPlayerBridge;

@@ -92,8 +92,7 @@ function youtubeNativePoDevBundle(): Plugin {
 function mobileMediaPanels(): Plugin {
   const mobile = ["android", "androideabi", "ios"].includes(tauriPlatform ?? "");
   const panels: Record<string, string> = {
-    LaneEditor: "LaneEditor", KdjvLivePicture: "KdjvLivePicture", KvjApp: "KvjApp",
-    AiPanel: "AiPanel", AiDrawer: "AiDrawer,AiDrawerTools", FfmpegPanel: "FfmpegPanel",
+    KvjApp: "KvjApp",
   };
   const prefix = "\0kdj-mobile-panel:";
   return {

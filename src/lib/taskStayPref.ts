@@ -4,7 +4,7 @@ import { readLocalStorage, writeLocalStorageSoon } from "./storageWrite";
 /**
  * How long a notice stays when it does not say (设置 → 通用 → 提示停留, docs/task-bubbles.md).
  * One length for all of them; the bubbles with a time of their own keep it (the playing song's
- * peek, a short note, what the AI times), downloads stay twice as long, errors too.
+ * peek, a short note), downloads stay twice as long, errors too.
  */
 export const TASK_STAY_CHOICES = [5, 10, 30, 60] as const;
 export type TaskStaySeconds = (typeof TASK_STAY_CHOICES)[number];

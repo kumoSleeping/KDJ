@@ -46,31 +46,15 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/health", get(health));
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let router = router
-        .route("/api/tools/ffmpeg", get(ffmpeg_installation_status))
-        .route("/api/ai/status", get(crate::ai::status))
-        .route("/api/ai/models", get(crate::ai::models))
-        .route("/api/ai/provider", axum::routing::put(crate::ai::set_provider))
-        .route("/api/ai/prompt", post(crate::ai::prompt))
-        .route("/api/ai/abort", post(crate::ai::abort))
-        .route("/api/ai/reset", post(crate::ai::reset))
-        .route("/api/ai/clear-queue", post(crate::ai::clear_queue))
-        .route("/api/ai/answer", post(crate::ai::answer))
-        .route("/api/ai/global", get(crate::ai::global_logins))
-        .route("/api/ai/import", post(crate::ai::import_login))
-        .route("/api/ai/web", axum::routing::put(crate::ai::set_web))
-        .route("/api/ai/web/install", post(crate::ai::install_access))
-        .route("/api/ai/remotion/install", post(crate::ai::install_remotion))
-        .route("/api/ai/thinking", axum::routing::put(crate::ai::set_thinking))
-        // A screenshot is easily larger than axum's default 2 MB body.
-        .route("/api/ai/paste", post(crate::ai::paste).layer(axum::extract::DefaultBodyLimit::max(crate::ai::PASTE_BYTES)))
-        .route("/api/ai/sessions", get(crate::ai::list_sessions))
-        .route("/api/ai/sessions/detail", get(crate::ai::session_detail))
-        .route("/api/ai/sessions/switch", post(crate::ai::switch_session))
         .route("/api/cli/status", get(crate::cli_api::status))
         .route("/api/cli/search", post(crate::cli_api::search))
         .route("/api/cli/download", post(crate::cli_api::download))
         .route("/api/cli/peek", post(crate::cli_media::peek))
         .route("/api/cli/align", post(crate::cli_media::align))
+        .route("/api/cli/peek/{id}/claim", post(crate::cli_media::claim_peek))
+        .route("/api/cli/peek/{id}/source", get(crate::cli_media::peek_source))
+        .route("/api/cli/peek/{id}/picture", post(crate::cli_media::peek_picture))
+        .route("/api/cli/peek/{id}/done", post(crate::cli_media::finish_peek))
         .route("/api/video/calibrate", post(video_calibrate));
     let router = router
         .route("/api/control/show", post(control_show))
@@ -285,6 +269,8 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/library/rhythm/{id}", get(crate::rhythm::read).post(crate::rhythm::start))
         .route("/api/library/analyze/cancel", post(library_analyze_cancel))
         .route("/api/library/audio/{id}", get(library_audio))
+        .route("/api/library/video-cover/{id}", post(save_video_cover))
+        .route("/api/library/video-sound/{id}", get(library_video_sound))
         .route("/api/library/video/{id}", get(library_video))
         .route(
             "/api/library/cover/{id}",
@@ -326,17 +312,12 @@ async fn guard_download_writes(
 
 // ---------------------------------------------------------------- 基础
 
-async fn ffmpeg_installation_status() -> Json<kdj_providers::ffmpeg::FfmpegInstallationStatus> {
-    Json(kdj_providers::ffmpeg::installation_status().await)
-}
-
 async fn health() -> Json<Value> {
     // 健康检查只用于版本/能力探测。设置接口已经在认证后提供用户配置，没必要在这里
     // 重复暴露 data_dir/download_dir 的绝对路径。
     Json(json!({
         "ok": true,
         "version": kdj_core::VERSION,
-        "ffmpeg": kdj_providers::ffmpeg::available(),
         "platform": std::env::consts::OS,
     }))
 }
@@ -5214,7 +5195,7 @@ pub(crate) fn apply_video_defaults(req: &mut VideoDownloadRequest, settings: &Se
         req.transcode = settings.video_transcode;
     }
     // 偏移封顶 ±10 分钟：这个值来自预览面板一下一下按出来的校准，
-    // 正常不过几秒；来一个天文数字的负偏移等于让 ffmpeg 铺几小时黑场
+    // 正常不过几秒；来一个天文数字的负偏移等于让 ffmpeg 铺几小时静音
     req.offset_ms = req.offset_ms.clamp(-600_000, 600_000);
 }
 
@@ -5371,8 +5352,7 @@ fn pcm_envelope(bytes: &[u8]) -> Vec<f64> {
     values
 }
 
-/// The same envelope from a local file, decoded by symphonia (no FFmpeg) from where players
-/// start it, as FFmpeg decodes it.
+/// The same envelope from a local file, decoded by symphonia from where players start it.
 fn native_alignment_envelope(path: &Path) -> Result<Vec<f64>, String> {
     let channels = kdj_media::pcm::inspect(path).map_err(|err| format!("{err:#}"))?.channels as usize;
     let mut bytes = Vec::new();
@@ -5392,7 +5372,7 @@ fn native_alignment_envelope(path: &Path) -> Result<Vec<f64>, String> {
 }
 
 /// The first 210 s of a remote stream: its head is fetched (a DASH audio track holds that in
-/// a few MB) and decoded natively; FFmpeg reads the URL itself where the head is not enough.
+/// a few MB) and decoded natively.
 async fn remote_alignment_envelope(http: reqwest::Client, url: String, headers: Vec<(String, String)>) -> Result<Vec<f64>, String> {
     const HEAD: u64 = 9 * 1024 * 1024;
     let file = std::env::temp_dir().join(format!("kdj-align-{:016x}.m4s", rand::random::<u64>()));
@@ -5425,40 +5405,7 @@ async fn remote_alignment_envelope(http: reqwest::Client, url: String, headers: 
         Err(error) => Err(error),
     };
     let _ = std::fs::remove_file(&file);
-    match native {
-        Ok(envelope) => Ok(envelope),
-        Err(error) if !kdj_providers::ffmpeg::available() => Err(error),
-        Err(_) => {
-            let headers: String = headers.iter().map(|(name, value)| format!("{name}: {value}\r\n")).collect();
-            tokio::task::spawn_blocking(move || decode_alignment_envelope(url, Some(headers))).await.map_err(|err| err.to_string())?
-        }
-    }
-}
-
-fn decode_alignment_envelope(input: String, headers: Option<String>) -> Result<Vec<f64>, String> {
-    let ffmpeg = kdj_providers::ffmpeg::binary().map_err(|err| format!("{err:#}"))?;
-    let mut command = std::process::Command::new(ffmpeg);
-    command.args(["-v", "error", "-t", "210"]);
-    if let Some(headers) = headers {
-        command.args(["-headers", &headers]);
-    }
-    let output = command
-        .args([
-            "-i", &input, "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1",
-        ])
-        .output()
-        .map_err(|err| format!("启动 ffmpeg 失败：{err}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "ffmpeg 解码失败：{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let envelope = pcm_envelope(&output.stdout);
-    if envelope.len() < 20 * 30 {
-        return Err("可用于校准的音频不足 30 秒".into());
-    }
-    Ok(envelope)
+    native
 }
 
 /// 在周期 20Hz 的响度包络上做归一化互相关。返回“视频相对本地音频”的偏移：
@@ -5516,12 +5463,7 @@ async fn video_calibrate(
         headers.push(("Cookie".to_string(), cookies));
     }
     let local_path = track.path;
-    // A song symphonia cannot read (rare containers) is left to FFmpeg where it is installed.
-    let local_job = tokio::task::spawn_blocking(move || {
-        native_alignment_envelope(Path::new(&local_path)).or_else(|error| {
-            if kdj_providers::ffmpeg::available() { decode_alignment_envelope(local_path, None) } else { Err(error) }
-        })
-    });
+    let local_job = tokio::task::spawn_blocking(move || native_alignment_envelope(Path::new(&local_path)));
     let video_job = remote_alignment_envelope(state.preview_http.clone(), video_url, headers);
     let (local, video) = tokio::join!(local_job, video_job);
     let local = local
@@ -7854,8 +7796,7 @@ async fn library_analyze_cancel(
 
 // ---------------------------------------------------------------- 媒体
 
-/// 是不是视频容器。播放时不给 `<audio>` 塞整个视频文件（mkv 根本放不了），
-/// 先用 ffmpeg 把音轨抽出来缓存成 m4a，再按普通音频伺服；封面也走视频那条路。
+/// 是不是视频容器。播放时声音由原生播放器放（video_sound 决定从哪里读），画面在窗口里。
 ///
 /// 后缀表用 `tags::VIDEO_EXTENSIONS` 那一份，不在这里再抄一遍：
 /// 抄一份的下场是扫描认得的格式和播放认得的格式慢慢对不上，
@@ -7869,28 +7810,13 @@ fn is_video_container(path: &Path) -> bool {
     kdj_providers::tags::VIDEO_EXTENSIONS.contains(&ext.as_str())
 }
 
-/// A `.kdjv` project plays from its render (compositions/workshop/kdjv.rs), which the window asks
-/// for before it plays the project; here the render is only looked up.
-fn kdjv_render_for(path: &Path) -> ApiResult<Option<PathBuf>> {
-    use crate::compositions::workshop::kdjv;
-    if !kdjv::is_project_path(path) {
-        return Ok(None);
+/// KDJ's own video projects (`.kdjv`) are no longer played: the editor and its renderer were
+/// taken out after 1.1.0-rc19. A project already in the library keeps its row and its file.
+fn refuse_project(path: &Path) -> ApiResult<()> {
+    if kdj_providers::tags::is_project_path(path) {
+        return Err(ApiError::bad_request("不再支持视频工程"));
     }
-    kdjv::rendered(path)
-        .map(Some)
-        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "工程还没有渲染好"))
-}
-
-/// A `.kdjv` project's sound: its render's, else the mix its live preview plays (kdjv.rs), there
-/// once the project has been played.
-fn kdjv_sound_for(path: &Path) -> ApiResult<Option<PathBuf>> {
-    use crate::compositions::workshop::kdjv;
-    if !kdjv::is_project_path(path) {
-        return Ok(None);
-    }
-    kdjv::sounded(path)
-        .map(Some)
-        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "工程还没有播放过"))
+    Ok(())
 }
 
 /// 缓存键里的文件 mtime。文件被换掉（重新打了标签、换了个更好的版本）之后
@@ -7905,47 +7831,101 @@ fn file_mtime(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// 视频文件 → 音轨 m4a 缓存。MP4 里的 AAC 由 kdj-media 原样复制，不需要 FFmpeg；
-/// webm/mkv 里常见的 opus/vorbis 塞不进 m4a，交给 FFmpeg 转码 AAC（有的话）。
-///
-/// 缓存键带 mtime：文件被替换后旧缓存自动失效。半成品写 `.partial` 名，
-/// 中断不会留下能被下次请求误用的坏文件。
-async fn extracted_audio(path: &Path, track_id: i64, cache_dir: &Path) -> ApiResult<PathBuf> {
+/// Where a library video's sound is played from. KDJ has no FFmpeg:
+/// - an MP4's AAC is copied into an M4A once (kdj-media), which seeks like any song;
+/// - any other track symphonia decodes (Vorbis, FLAC, MP3, … in MKV / WebM / MP4) is played
+///   from the video file itself;
+/// - one it cannot (Opus, AC-3, a container it does not read) is silence as long as the video,
+///   so that the picture still has a clock to follow; the window says there is no sound and
+///   offers the system's own player (`/library/video-sound`).
+enum VideoSound {
+    File(PathBuf),
+    Silent(PathBuf),
+}
+
+/// Whether symphonia decodes the file's first audio track: one packet is enough to know.
+fn sound_decodes(path: &Path) -> bool {
+    kdj_media::pcm::decode(path, None, Some(1), &|| false, &mut |_| Ok(())).is_ok()
+}
+
+async fn video_sound(path: &Path, track: &Track, cache_dir: &Path) -> ApiResult<VideoSound> {
     let mtime = file_mtime(path);
-    let target = cache_dir.join(format!("{track_id}-{mtime}.m4a"));
-    if std::fs::metadata(&target)
-        .map(|meta| meta.len() > 0)
-        .unwrap_or(false)
-    {
-        return Ok(target);
+    let copied = cache_dir.join(format!("{}-{mtime}.m4a", track.id));
+    if std::fs::metadata(&copied).map(|meta| meta.len() > 0).unwrap_or(false) {
+        return Ok(VideoSound::File(copied));
+    }
+    let silent = cache_dir.join(format!("{}-{mtime}.silent.wav", track.id));
+    if std::fs::metadata(&silent).map(|meta| meta.len() > 0).unwrap_or(false) {
+        return Ok(VideoSound::Silent(silent));
     }
     std::fs::create_dir_all(cache_dir).map_err(|err| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("建缓存目录失败：{err}"),
-        )
+        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("建缓存目录失败：{err}"))
     })?;
-    let tmp = cache_dir.join(format!("{track_id}-{mtime}.partial.m4a"));
-    let log = cache_dir.join(format!("{track_id}-{mtime}.log"));
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let result = kdj_providers::finish::extract_audio(path, &tmp, 0, &log, &cancel).await;
-    let _ = std::fs::remove_file(&log);
-    if result.is_ok()
-        && std::fs::metadata(&tmp)
-            .map(|meta| meta.len() > 0)
-            .unwrap_or(false)
-    {
-        let _ = std::fs::rename(&tmp, &target);
-        return Ok(target);
+    if kdj_media::mp4::read::looks_like_mp4(path) {
+        let tmp = cache_dir.join(format!("{}-{mtime}.partial.m4a", track.id));
+        let (source, output, scratch) = (path.to_path_buf(), tmp.clone(), cache_dir.to_path_buf());
+        let copied_ok = tokio::task::spawn_blocking(move || {
+            let job = kdj_media::remux::Job { output: &output, scratch: &scratch, offset_ms: 0, cancelled: &|| false };
+            kdj_media::remux::extract_audio(&source, &job).is_ok()
+        })
+        .await
+        .unwrap_or(false);
+        if copied_ok && std::fs::metadata(&tmp).map(|meta| meta.len() > 0).unwrap_or(false) && std::fs::rename(&tmp, &copied).is_ok() {
+            return Ok(VideoSound::File(copied));
+        }
+        let _ = std::fs::remove_file(&tmp);
     }
-    let _ = std::fs::remove_file(&tmp);
-    Err(ApiError::new(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        match result {
-            Err(error) if !kdj_providers::ffmpeg::available() => format!("抽不出音轨：{error:#}"),
-            _ => "抽不出音轨（文件可能损坏或没有音频流）".to_string(),
-        },
-    ))
+    let source = path.to_path_buf();
+    if tokio::task::spawn_blocking(move || sound_decodes(&source)).await.unwrap_or(false) {
+        return Ok(VideoSound::File(path.to_path_buf()));
+    }
+    let seconds = track.duration
+        .or_else(|| kdj_media::remux::duration_secs(path))
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.)
+        .ok_or_else(|| ApiError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "读不出这个视频的音轨，也不知道它有多长"))?;
+    let tmp = cache_dir.join(format!("{}-{mtime}.partial.wav", track.id));
+    std::fs::write(&tmp, silent_wav(seconds))
+        .and_then(|()| std::fs::rename(&tmp, &silent))
+        .map_err(|err| {
+            let _ = std::fs::remove_file(&tmp);
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("写静音音轨失败：{err}"))
+        })?;
+    Ok(VideoSound::Silent(silent))
+}
+
+/// `seconds` of silence: 8 kHz mono 16-bit PCM, 16 kB a second.
+fn silent_wav(seconds: f64) -> Vec<u8> {
+    const RATE: u32 = 8000;
+    let bytes = (seconds * RATE as f64).ceil() as u32 * 2;
+    let mut out = Vec::with_capacity(44 + bytes as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + bytes).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&RATE.to_le_bytes());
+    out.extend_from_slice(&(RATE * 2).to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&bytes.to_le_bytes());
+    out.resize(44 + bytes as usize, 0);
+    out
+}
+
+/// Whether a library video's sound plays, for the window to say so when it does not.
+async fn library_video_sound(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let track = state.library.get(id)?.ok_or_else(|| ApiError::not_found("曲目不存在"))?;
+    let path = PathBuf::from(&track.path);
+    if !path.is_file() || !is_video_container(&path) {
+        return Err(ApiError::bad_request("这不是视频曲目"));
+    }
+    let sound = video_sound(&path, &track, &state.config.data_dir.join("audio-cache")).await?;
+    Ok(Json(serde_json::json!({ "sound": matches!(sound, VideoSound::File(_)) })))
 }
 
 /// 音频流。**必须支持 Range**，否则播放器拖不动进度条。
@@ -7963,11 +7943,11 @@ async fn library_audio(
     if !path.is_file() {
         return Err(ApiError::not_found("音频文件已丢失"));
     }
-    if let Some(sound) = kdjv_sound_for(&path)? {
-        path = sound;
-    }
+    refuse_project(&path)?;
     if is_video_container(&path) {
-        path = extracted_audio(&path, track.id, &state.config.data_dir.join("audio-cache")).await?;
+        path = match video_sound(&path, &track, &state.config.data_dir.join("audio-cache")).await? {
+            VideoSound::File(path) | VideoSound::Silent(path) => path,
+        };
     }
     let total = tokio::fs::metadata(&path)
         .await
@@ -7982,110 +7962,24 @@ async fn library_audio(
     audio_response(&path, total, mime_for(&path), raw_range.as_deref()).await
 }
 
-#[derive(Default, Deserialize)]
-struct LibraryVideoParams {
-    /// WebView 明确拒绝原文件后，转为所有平台都能解的 H.264/AAC MP4。
-    #[serde(default)]
-    compat: bool,
-}
-
-/// WebView 兼容视频缓存。普通 MP4/MOV 仍直接 Range 原文件；只有媒体元素明确报
-/// NotSupportedError 后才走这里，避免每次播放都无谓重编码。
-async fn compatible_video(path: &Path, track_id: i64, cache_dir: &Path) -> ApiResult<PathBuf> {
-    use std::collections::HashMap;
-    use std::sync::OnceLock;
-
-    type CompatLocks = std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>;
-    static LOCKS: OnceLock<CompatLocks> = OnceLock::new();
-
-    let mtime = file_mtime(path);
-    let target = cache_dir.join(format!("{track_id}-{mtime}.mp4"));
-    let lock = {
-        let mut locks = LOCKS
-            .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        locks
-            .entry(target.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
-    };
-    let _guard = lock.lock().await;
-    if std::fs::metadata(&target)
-        .map(|meta| meta.len() > 0)
-        .unwrap_or(false)
-    {
-        return Ok(target);
-    }
-    if !kdj_providers::ffmpeg::available() {
-        return Err(ApiError::new(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "系统 WebView 不支持这个视频编码，且没有找到 FFmpeg 用于兼容转换",
-        ));
-    }
-    std::fs::create_dir_all(cache_dir).map_err(|err| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("建立视频兼容缓存失败：{err}"),
-        )
-    })?;
-    let tmp = cache_dir.join(format!("{track_id}-{mtime}.partial.mp4"));
-    let log = cache_dir.join(format!("{track_id}-{mtime}.log"));
-    let cancel = tokio_util::sync::CancellationToken::new();
-    // 统一到 H.264/AAC + yuv420p，并把 moov 移到文件头；这是 WKWebView、Chromium
-    // WebView 和系统画中画共同支持的最小交集。4K 素材降到 2160p，普通素材不放大。
-    let args = kdj_providers::ffmpeg::mux_args(&[path.to_path_buf()], &tmp, true, 2160, 0);
-    if let Err(err) = kdj_providers::ffmpeg::run(&args, &log, &cancel).await {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("视频兼容转换失败：{err}"),
-        ));
-    }
-    if !std::fs::metadata(&tmp)
-        .map(|meta| meta.len() > 0)
-        .unwrap_or(false)
-    {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "视频兼容转换没有产生有效文件",
-        ));
-    }
-    std::fs::rename(&tmp, &target).map_err(|err| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("保存视频兼容缓存失败：{err}"),
-        )
-    })?;
-    let _ = std::fs::remove_file(&log);
-    Ok(target)
-}
-
-/// 本地视频流。默认 Range 原文件；WebView 不支持其容器/编码时由前端以
-/// `compat=true` 重试，后端一次性生成通用 MP4 缓存。
+/// 本地视频流：Range 原文件。WebView 解不了的画面由窗口说明，并提供用系统播放器打开；
+/// KDJ 没有 FFmpeg，不做兼容转码。
 async fn library_video(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<i64>,
-    Query(params): Query<LibraryVideoParams>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     let track = state
         .library
         .get(id)?
         .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
-    let mut path = PathBuf::from(&track.path);
+    let path = PathBuf::from(&track.path);
     if !path.is_file() {
         return Err(ApiError::not_found("视频文件已丢失"));
     }
-    if let Some(render) = kdjv_render_for(&path)? {
-        path = render;
-    }
+    refuse_project(&path)?;
     if !is_video_container(&path) {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "这不是视频曲目"));
-    }
-    if params.compat {
-        path =
-            compatible_video(&path, track.id, &state.config.data_dir.join("video-cache")).await?;
     }
     let total = tokio::fs::metadata(&path)
         .await
@@ -8241,12 +8135,6 @@ async fn library_cover(
         // A row still showing a song that has just left the library asks once more.
         .ok_or_else(|| ApiError::not_found("曲目不存在").expected())?;
     let path = PathBuf::from(&source.path);
-    if kdj_providers::workshop_images::is_image_path(&path) {
-        let width = params.size.unwrap_or(960).clamp(32, 1920);
-        let animated = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("gif"));
-        let data = run_library_cover_read(move || kdj_providers::workshop_images::frame_png(&path, animated, 0, width)).await?;
-        return Ok((StatusCode::OK, cover_headers("image/png".into()), data).into_response());
-    }
     if let Some(size) = params.size {
         if let Some(data) =
             cover_thumbnail(&source, &state.config.data_dir.join("covers"), size).await
@@ -8264,19 +8152,8 @@ async fn library_cover(
     }
     // VJ 素材和 MV 是没有内嵌封面的，一律 404 的话曲库里那一批视频
     // 全是空白占位。抽一帧当封面——播放器就是这么做的。
-    if kdj_providers::tags::is_project_path(&path) {
-        if let Some(data) = project_cover(&path, source.id, &state.config.data_dir.join("covers")).await {
-            return Ok((StatusCode::OK, cover_headers(JPEG_MIME.into()), data).into_response());
-        }
-    } else if is_video_container(&path) {
-        if let Some(data) = video_cover(
-            &path,
-            source.id,
-            source.duration,
-            &state.config.data_dir.join("covers"),
-        )
-        .await
-        {
+    if is_video_container(&path) {
+        if let Some(data) = video_cover(&path, source.id, &state.config.data_dir.join("covers")).await {
             return Ok((StatusCode::OK, cover_headers(JPEG_MIME.into()), data).into_response());
         }
     }
@@ -8313,15 +8190,12 @@ async fn cover_thumbnail(
     let thumb_dir = cache_dir.join("thumbs");
     let target = thumb_dir.join(format!("{}-{mtime}-{size}.jpg", source.id));
     let negative = thumb_dir.join(format!("{}-{mtime}-{size}.none2", source.id));
-    // A project's frame comes from its sources, which can appear after the project did; and
-    // builds before projects had covers left a negative mark for every one of them.
-    let project = kdj_providers::tags::is_project_path(Path::new(&source.path));
     if let Ok(data) = tokio::fs::read(&target).await {
         if !data.is_empty() {
             return Some(data);
         }
     }
-    if !project && tokio::fs::metadata(&negative).await.is_ok() {
+    if tokio::fs::metadata(&negative).await.is_ok() {
         return None;
     }
 
@@ -8333,7 +8207,7 @@ async fn cover_thumbnail(
             return Some(data);
         }
     }
-    if !project && tokio::fs::metadata(&negative).await.is_ok() {
+    if tokio::fs::metadata(&negative).await.is_ok() {
         return None;
     }
     tokio::fs::create_dir_all(&thumb_dir).await.ok()?;
@@ -8353,10 +8227,8 @@ async fn cover_thumbnail(
         return embedded;
     }
 
-    let frame = if project {
-        project_cover(Path::new(&source.path), source.id, cache_dir).await
-    } else if is_video_container(Path::new(&source.path)) {
-        video_cover(Path::new(&source.path), source.id, source.duration, cache_dir).await
+    let frame = if is_video_container(Path::new(&source.path)) {
+        video_cover(Path::new(&source.path), source.id, cache_dir).await
     } else {
         None
     };
@@ -8375,7 +8247,10 @@ async fn cover_thumbnail(
         }
     }
 
-    let _ = tokio::fs::write(negative, []).await;
+    // A video's frame comes later, from a window (save_video_cover): it is asked again.
+    if !is_video_container(Path::new(&source.path)) {
+        let _ = tokio::fs::write(negative, []).await;
+    }
     None
 }
 
@@ -8387,115 +8262,39 @@ fn store_thumbnail_atomically(target: &Path, data: &[u8]) {
     let _ = std::fs::remove_file(partial);
 }
 
-/// A `.kdjv` project's cover: one frame of the video it plays a third of the way in
-/// (`kdjv::cover_frame`), cached by the project's id and mtime like a video's. None when the
-/// project plays no video or its source cannot be read.
-async fn project_cover(path: &Path, track_id: i64, cache_dir: &Path) -> Option<Vec<u8>> {
+/// A video's cover when it has no picture of its own: a frame a KDJ window decoded and sent
+/// (`save_video_cover`, src/lib/videoCover.ts), cached by `(id, mtime)` in `data/covers/`.
+/// KDJ has no FFmpeg; until a window has sent one there is none, and the list asks a window.
+async fn video_cover(path: &Path, track_id: i64, cache_dir: &Path) -> Option<Vec<u8>> {
     let target = cover_cache_file(cache_dir, track_id, file_mtime(path));
-    if let Ok(data) = std::fs::read(&target) {
-        if !data.is_empty() {
-            return Some(data);
-        }
-    }
-    let (source, at) = crate::compositions::workshop::kdjv::cover_frame(path)?;
-    if !source.is_file() || !kdj_providers::ffmpeg::available() {
-        return None;
-    }
-    std::fs::create_dir_all(cache_dir).ok()?;
-    let _slot = FRAME_SLOTS.acquire().await.ok()?;
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|delta| delta.subsec_nanos())
-        .unwrap_or(0);
-    let tmp = cache_dir.join(format!("{track_id}-{nonce}.partial.jpg"));
-    let log = cache_dir.join(format!("{track_id}-{nonce}.log"));
-    let extracted = kdj_providers::ffmpeg::extract_frame(&source, &tmp, at, &log, &cancel).await.is_ok();
-    let _ = std::fs::remove_file(&log);
-    let data = extracted.then(|| std::fs::read(&tmp).ok()).flatten().filter(|data| !data.is_empty());
-    if data.is_none() || std::fs::rename(&tmp, &target).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    data
+    tokio::fs::read(&target).await.ok().filter(|data| !data.is_empty())
 }
 
-/// 同时最多几个抽帧进程。曲库列表一屏几十行，滚一下就是几十个封面请求同时进来，
-/// 不设闸等于一次 fork 出几十个视频解码进程，机器直接卡住（4K 素材尤其明显）。
-/// 抽一帧本身很快，排队基本察觉不到，而且只有第一次要排——之后全走缓存。
-static FRAME_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
-
-/// 视频没有内嵌封面时抽一帧当封面，结果按 `(id, mtime)` 缓存到 `data/covers/`。
-///
-/// **任何一步失败都只返回 `None`**（上层照旧 404，前端显示占位图）。
-/// 安卓上根本没有 ffmpeg，这条路径要是能冒出 500，整个曲库列表会红一片；
-/// 抽不出封面本来也不是错误，只是"这首没有图"。
-async fn video_cover(
-    path: &Path,
-    track_id: i64,
-    duration: Option<f64>,
-    cache_dir: &Path,
-) -> Option<Vec<u8>> {
-    let mtime = file_mtime(path);
-    let target = cover_cache_file(cache_dir, track_id, mtime);
-    if let Ok(data) = std::fs::read(&target) {
-        if !data.is_empty() {
-            return Some(data);
-        }
+/// A frame a window decoded from a library video with no cover of its own (videoCover.ts).
+async fn save_video_cover(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i64>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<serde_json::Value>> {
+    let track = state.library.get(id)?.ok_or_else(|| ApiError::not_found("曲目不存在"))?;
+    let path = PathBuf::from(&track.path);
+    if !is_video_container(&path) {
+        return Err(ApiError::bad_request("这不是视频曲目"));
     }
-    if !kdj_providers::ffmpeg::available() {
-        return None;
+    if !body.starts_with(b"\xff\xd8\xff") {
+        return Err(ApiError::bad_request("不是 JPEG"));
     }
-    std::fs::create_dir_all(cache_dir).ok()?;
-    let _slot = FRAME_SLOTS.acquire().await.ok()?;
-
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let log = cache_dir.join(format!("{track_id}-{mtime}.log"));
-    // 同一首歌可能被好几个请求同时撞上（列表和详情面板各要一次），
-    // 半成品的文件名带上纳秒，免得两个进程往同一个文件里写出一份花的 JPEG
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|delta| delta.subsec_nanos())
-        .unwrap_or(0);
-
-    let mut best: Option<(PathBuf, Vec<u8>)> = None;
-    for (index, at) in kdj_providers::ffmpeg::frame_positions(duration)
-        .into_iter()
-        .enumerate()
-    {
-        let tmp = cache_dir.join(format!("{track_id}-{mtime}-{nonce}-{index}.partial.jpg"));
-        let extracted = kdj_providers::ffmpeg::extract_frame(path, &tmp, at, &log, &cancel)
-            .await
-            .is_ok();
-        let data = extracted
-            .then(|| std::fs::read(&tmp).ok())
-            .flatten()
-            .filter(|data| !data.is_empty());
-        let Some(data) = data else {
-            let _ = std::fs::remove_file(&tmp);
-            continue;
-        };
-        let black = kdj_providers::ffmpeg::frame_is_mostly_black(&data);
-        if black && best.is_some() {
-            let _ = std::fs::remove_file(&tmp);
-        } else if let Some((stale, _)) = best.replace((tmp, data)) {
-            // 手上这张不黑，之前那张黑的可以扔了
-            let _ = std::fs::remove_file(&stale);
-        }
-        // 全黑的先留着：后面的位置可能压根抽不出来（时长未知时会挪过文件末尾），
-        // 那时候一张黑图仍然比 404 强
-        if !black {
-            break;
-        }
-    }
-    let _ = std::fs::remove_file(&log);
-
-    let (tmp, data) = best?;
-    // 先写临时名再改名，中途被打断也不会在缓存里留下一个半截的 JPEG
-    // 被下一次请求当成好图返回。改名失败不影响这次的结果，下次重抽一遍就是
-    if std::fs::rename(&tmp, &target).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    Some(data)
+    let cache_dir = state.config.data_dir.join("covers");
+    std::fs::create_dir_all(&cache_dir).map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("建立封面缓存失败：{err}")))?;
+    let target = cover_cache_file(&cache_dir, id, file_mtime(&path));
+    let partial = target.with_extension(format!("jpg.partial-{:016x}", rand::random::<u64>()));
+    std::fs::write(&partial, &body)
+        .and_then(|()| std::fs::rename(&partial, &target))
+        .map_err(|err| {
+            let _ = std::fs::remove_file(&partial);
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("保存封面失败：{err}"))
+        })?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// 抽帧封面的缓存文件名。带 mtime，文件换掉之后旧图自动作废。
@@ -8582,9 +8381,7 @@ async fn library_waveform(
         .get(id)?
         .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
     if kdj_providers::workshop_images::is_image_path(Path::new(&track.path)) { return Err(ApiError::bad_request("图片没有音频波形")); }
-    // A project's sound is its render's or its live preview's mix (kdjv.rs), there once it has
-    // been played.
-    let project_render = kdjv_sound_for(Path::new(&track.path))?;
+    refuse_project(Path::new(&track.path))?;
     let release_intent = crate::waveform::ReleaseOverviewIntent::from(params.intent);
     if params.profile == WaveformRequestProfile::ReleaseOverview && params.intent_only {
         state
@@ -8592,7 +8389,7 @@ async fn library_waveform(
             .note_release_overview_intent(id, release_intent, params.request_id);
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
-    let path = project_render.unwrap_or_else(|| PathBuf::from(&track.path));
+    let path = PathBuf::from(&track.path);
     if !path.is_file() {
         return Err(ApiError::not_found("音频文件已丢失"));
     }
@@ -9610,113 +9407,15 @@ https://rr1---sn.example.googlevideo.com/api/manifest/hls_playlist/id/high/playl
     }
 
     #[tokio::test]
-    async fn a_file_that_cannot_be_read_as_video_degrades_to_no_cover() {
-        // 没装 ffmpeg（安卓）、文件坏了、根本没有视频流——三种情况都得是
-        // "这首没有图"而不是 500，否则曲库列表会红一片
-        let base = scratch("cover-broken");
-        let fake = base.join("broken.mp4");
-        std::fs::write(&fake, b"this is not a video").unwrap();
-        let cache = base.join("covers");
-
-        let cover = video_cover(&fake, 1, Some(180.0), &cache).await;
-        assert!(cover.is_none(), "抽不出来就是没有，不该 panic 也不该报错");
-        // 失败不能在缓存里留下空文件，否则下一次会把它当成好图返回
-        let leftovers: Vec<_> = std::fs::read_dir(&cache)
-            .map(|entries| entries.flatten().map(|e| e.path()).collect())
-            .unwrap_or_default();
-        assert!(leftovers.is_empty(), "留下了半成品：{leftovers:?}");
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// 用 ffmpeg 自己造一段测试视频。没装 ffmpeg 就返回 None，这条用例整个跳过——
-    /// 安卓和干净的 CI 机器上本来就没有 ffmpeg。
-    async fn make_test_video(path: &Path, filter: &str, seconds: u32) -> bool {
-        if !kdj_providers::ffmpeg::available() {
-            return false;
-        }
-        let args = [
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            filter,
-            "-t",
-            &seconds.to_string(),
-            "-pix_fmt",
-            "yuv420p",
-            path.to_str().unwrap(),
-        ]
-        .map(str::to_string);
-        let log = path.with_extension("log");
-        let ok =
-            kdj_providers::ffmpeg::run(&args, &log, &tokio_util::sync::CancellationToken::new())
-                .await
-                .is_ok();
-        let _ = std::fs::remove_file(&log);
-        ok
-    }
-
-    #[tokio::test]
-    async fn a_video_without_embedded_art_gets_a_frame_and_caches_it() {
-        let base = scratch("cover-frame");
+    async fn a_video_cover_is_only_what_a_window_sent() {
+        let base = scratch("cover-sent");
         let video = base.join("clip.mp4");
-        if !make_test_video(&video, "testsrc=size=640x360:rate=10", 4).await {
-            let _ = std::fs::remove_dir_all(&base);
-            return;
-        }
+        std::fs::write(&video, b"not decoded here").unwrap();
         let cache = base.join("covers");
-
-        let cover = video_cover(&video, 7, Some(4.0), &cache).await.unwrap();
-        assert!(cover.starts_with(b"\xff\xd8\xff"), "得是一张真的 JPEG");
-        let cached = cover_cache_file(&cache, 7, file_mtime(&video));
-        assert_eq!(std::fs::read(&cached).unwrap(), cover, "第二次要走缓存");
-        // 半成品不能留在缓存目录里
-        let names: Vec<String> = std::fs::read_dir(&cache)
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names.len(), 1, "缓存目录里应该只剩成品：{names:?}");
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[tokio::test]
-    async fn an_all_black_opening_makes_it_try_a_later_position() {
-        // VJ 素材常常黑好几秒。第一个位置全黑时要往后挪，
-        // 不然列表里排出来一列黑方块，和没有封面看着一样
-        let base = scratch("cover-black");
-        let video = base.join("fade.mp4");
-        // 前 6 秒纯黑，之后是彩色测试图；时长 12 秒 → 第一枪落在 1.2 秒（黑），
-        // 重试落在 4.2 / 7.2 秒，后者能抽到画面
-        let filter = "color=c=black:size=320x240:rate=10:duration=6[a];\
-testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
-        if !make_test_video(&video, filter, 12).await {
-            let _ = std::fs::remove_dir_all(&base);
-            return;
-        }
-        // 先确认第一枪确实打在黑场上，否则这条用例是白跑的
-        let first = base.join("first.jpg");
-        kdj_providers::ffmpeg::extract_frame(
-            &video,
-            &first,
-            kdj_providers::ffmpeg::frame_position(Some(12.0)),
-            &base.join("ff.log"),
-            &tokio_util::sync::CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        assert!(
-            kdj_providers::ffmpeg::frame_is_mostly_black(&std::fs::read(&first).unwrap()),
-            "样本视频开头不是黑的，这条用例没验到东西"
-        );
-
-        let cover = video_cover(&video, 8, Some(12.0), &base.join("covers"))
-            .await
-            .unwrap();
-        assert!(
-            !kdj_providers::ffmpeg::frame_is_mostly_black(&cover),
-            "挑出来的还是黑的，重试没起作用"
-        );
+        assert!(video_cover(&video, 7, &cache).await.is_none(), "nothing sent yet: no cover, no error");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cover_cache_file(&cache, 7, file_mtime(&video)), b"\xff\xd8\xffjpeg").unwrap();
+        assert_eq!(video_cover(&video, 7, &cache).await.unwrap(), b"\xff\xd8\xffjpeg");
         let _ = std::fs::remove_dir_all(&base);
     }
 

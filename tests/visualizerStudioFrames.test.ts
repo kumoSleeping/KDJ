@@ -24,6 +24,19 @@ test("I420 keeps full-resolution luma and averages each 2×2 chroma block", () =
   for (const x of [2, 3]) for (const y of [0, 1]) rgba.fill(255, (y * 4 + x) * 4, (y * 4 + x) * 4 + 3);
   assert.deepEqual([...rgbaToYuv420(rgba, 4, 2)], [16, 16, 235, 235, 16, 16, 235, 235, 128, 128, 128, 128]);
 });
+test("I420 puts every pixel's luma in place and keeps the channels apart, row pair after row pair", () => {
+  // 4 × 4: each pixel a distinct gray (luma only), then one 2×2 block of pure red for chroma.
+  const rgba = new Uint8ClampedArray(4 * 4 * 4);
+  for (let k = 0; k < 16; k++) rgba.set([k * 16, k * 16, k * 16, 255], k * 4);
+  const gray = [...rgbaToYuv420(rgba, 4, 4)];
+  // A gray's luma: 16 + 219 · v / 255, in the same fixed point (the three weights sum to 56284).
+  assert.deepEqual(gray.slice(0, 16), Array.from({ length: 16 }, (_, k) => (56284 * k * 16 + 1081344) >> 16));
+  assert.deepEqual(gray.slice(16), [128, 128, 128, 128, 128, 128, 128, 128]);
+  for (const k of [10, 11, 14, 15]) rgba.set([255, 0, 0, 255], k * 4);
+  const red = rgbaToYuv420(rgba, 4, 4);
+  assert.deepEqual([red[16 + 3], red[20 + 3]], [102, 240], "the lower right block's chroma is red's");
+  assert.deepEqual([...red.subarray(16, 19), ...red.subarray(20, 23)], [128, 128, 128, 128, 128, 128]);
+});
 test("export workers are bounded by cores and by memory", () => {
   assert.equal(studioWorkerCount(1920, 1080, 1600 * 1600, 18_000 * 68, 8), 6);
   assert.equal(studioWorkerCount(1920, 1080, 0, 0, 64), 8);

@@ -2,6 +2,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- 可视化导出在后台继续：Android 15+ 用 mediaProcessing，14 用 dataSync。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!--
@@ -9,8 +12,16 @@
         没授予时插件只是不挂窗口，不影响播放。
     -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 应用内更新：下载好的 APK 交给系统安装页（用户仍需在系统里允许并确认）。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application>
+        <!-- A platform's login page in its own process and WebView profile (WebLoginActivity.kt). -->
+        <activity android:name="app.tauri.nativeaudio.WebLoginActivity"
+            android:exported="false" android:process=":web_login"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode|density" />
         <service android:name="app.tauri.nativeaudio.YoutubeProofService"
             android:exported="false" android:process=":youtube_proof" />
         <service
@@ -22,5 +33,9 @@
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
+        <service
+            android:name="app.tauri.nativeaudio.ExportForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync|mediaProcessing" />
     </application>
 </manifest>

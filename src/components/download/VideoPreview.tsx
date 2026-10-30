@@ -458,9 +458,6 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
           max_height: settings?.video_max_height ?? 1080,
           audio_only: false,
           video_only: false,
-          // YouTube 的固定原生链路直接把 H.264/AAC 封装为 MP4，不做解码或重编码。
-          // B站继续保留原来的兼容转码及 Offset 语义。
-          transcode: mediaProductionAvailable() && req.platform !== "youtube",
           offset_ms: withOffset && req.platform !== "youtube" ? Math.round(offsetMs) : 0,
           title: req.title.trim() || undefined,
           artist: req.author.trim() || undefined,
@@ -723,8 +720,8 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
           size="sm"
           disabled={sending}
           title={nativeYoutubeDownload
-            ? "原生下载并封装为 MP4，不依赖 FFmpeg"
-            : "按原片下载（画质/格式随全局设置）"}
+            ? "原生下载并封装为 MP4"
+            : "按原片下载，封装为 MP4（画质随全局设置）"}
           onClick={() => void download(false)}
         >
           <Download size={12} />

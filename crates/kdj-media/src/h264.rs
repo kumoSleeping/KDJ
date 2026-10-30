@@ -313,6 +313,22 @@ pub fn sample_entry(sps: &[u8], pps: &[u8], width: u32, height: u32) -> Result<V
     colr.u16(1);
     colr.u16(1);
     colr.u8(0);
+    Ok(visual_entry(&avcc.0, Some(&colr.0), width, height))
+}
+
+/// The `avc1` sample entry for a stream that brings its own AVCDecoderConfigurationRecord
+/// (an FLV's sequence header): the record as it is, its first SPS giving the size. The
+/// colour description stays the stream's own, in its SPS.
+pub fn record_sample_entry(record: &[u8]) -> Result<(Vec<u8>, u32, u32)> {
+    ensure!(record.len() >= 8 && record[0] == 1, "H.264 配置记录无效");
+    ensure!(record[5] & 0x1f >= 1, "H.264 配置记录里没有 SPS");
+    let len = u16::from_be_bytes([record[6], record[7]]) as usize;
+    let sps = record.get(8..8 + len).context("H.264 配置记录被截断")?;
+    let (width, height) = sps_dimensions(sps)?;
+    Ok((visual_entry(record, None, width, height), width, height))
+}
+
+fn visual_entry(avcc: &[u8], colr: Option<&[u8]>, width: u32, height: u32) -> Vec<u8> {
     let mut entry = BoxBuf::default();
     entry.bytes(&[0; 6]);
     entry.u16(1);
@@ -326,13 +342,15 @@ pub fn sample_entry(sps: &[u8], pps: &[u8], width: u32, height: u32) -> Result<V
     entry.bytes(&[0; 32]);
     entry.u16(0x18);
     entry.u16(0xffff);
-    entry.bytes(&mp4_box(b"avcC", &avcc.0));
-    entry.bytes(&mp4_box(b"colr", &colr.0));
+    entry.bytes(&mp4_box(b"avcC", avcc));
+    if let Some(colr) = colr {
+        entry.bytes(&mp4_box(b"colr", colr));
+    }
     let mut pasp = BoxBuf::default();
     pasp.u32(1);
     pasp.u32(1);
     entry.bytes(&mp4_box(b"pasp", &pasp.0));
-    Ok(mp4_box(b"avc1", &entry.0))
+    mp4_box(b"avc1", &entry.0)
 }
 
 #[cfg(test)]

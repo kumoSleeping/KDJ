@@ -75,7 +75,7 @@ test("a list left to the WebView: it is built whole without a scroll, and a refr
     const selectedId = useLibraryStore(state => state.selectedId);
     const selectedIds = useLibraryStore(state => state.selectedIds);
     return createElement(Profiler, { id: "table", onRender: () => { commits += 1; } },
-      createElement(TrackTable, { total, loading, selectedId, selectedIds, layout: "wide", shortcutActive: true, visible: true,
+      createElement(TrackTable, { total, loading, selectedId, selectedIds, shortcutActive: true, visible: true,
         sort: "file_created_at", order: "desc", sort2: null, order2: "asc",
         onSelect: useLibraryStore.getState().select, onSort() {} }));
   }

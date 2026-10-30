@@ -34,7 +34,7 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   missing lyric sets `suspended`: the shell stays put away, while its entry and remembered
   enabled state remain. Lyrics arriving later bring the panel back; no timeout opens an empty
   shell. A queued song that is skipped is discarded, never briefly drawn. Manual close still
-  switches lyrics off. The phone's shared lyrics/downloads sheet also omits unavailable lyrics.
+  switches lyrics off. A phone has the same drawer (it is locked to landscape).
 - **An app never draws its own shell.** No head, no close button, no frame, no background, no
   entrance or exit motion. It supplies a `DrawerSpec` and a body; `DrawerHost` draws the rest.
 - **Opened from the chrome or from elsewhere.** Downloads and settings use the window chrome;
@@ -115,8 +115,7 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   to that panel. This exists for one thing: the lyrics app while the listener has switched
   歌曲色彩 on (`SongColorBackdrop`, described in `docs/task-bubbles.md`), where the panel is the
   song's colours instead of the list's. No other app gives its panel a tone; do not use the
-  slot for decoration. Where the lyrics are shown without a drawer (the sheet of a narrow
-  window) the lyrics block has the same slot (`backdrop` on `PlayingLyricsPanel`).
+  slot for decoration.
 - **No divider lines** inside a drawer (see AGENTS.md): groups are separated by spacing and type.
 - **Motion.** The panel slides in from beyond the window's right edge in one decelerating move
   and stops; it leaves the same way, accelerating. A new app waits until the one before it has
@@ -189,13 +188,12 @@ surface:
      onPage: id => setTaskView(id),
      tools: <button …/>,              // optional compact actions before the close button
      closePage: id => …,              // optional: each page word gets its own ×, long words end in
-                                      // an ellipsis (剪辑: one page per open project)
+                                      // an ellipsis (one page per open document)
      renamePage: (id, name) => …,     // optional: a double-click on a page word (or F2) writes it
                                       // in place; Enter or leaving it keeps the name, Esc the old one
      titleDrop: { label, drop },      // optional: library rows dropped on the title row, drop(ids);
                                       // dropSearch(payload) takes search results too, labelFor(ids)
-                                      // names the drop by what is dragged (剪辑: songs start another
-                                      // project, a project opens as its page);
+                                      // names the drop by what is dragged;
                                       // the row lifts a tone while it is over it, no other mark
      body: <DownloadTaskPages />,     // uses <SlidePages page={taskView} order={ids}>
      close: () => setDownloads(false),

@@ -18,8 +18,7 @@ const LONG_PRESS_SLOP = 8;
  * The menu of the lyrics panel: how tall the lyrics are (lib/lyricsExtent.ts). It opens on a
  * right click or a long press anywhere on the panel; `props` go on the panel's element.
  * `buttonProps`/`openFrom` offer the same menu from its player key, anchored above it when
- * needed; render `menu` alongside either trigger. The current choice carries a check mark. A
- * window that offers no choice (an upright phone) has no menu.
+ * needed; render `menu` alongside either trigger. The current choice carries a check mark.
  */
 export function useLyricsExtentMenu(identity?: string | number | null) {
   const stored = useLyricsExtent(state => state.extent);

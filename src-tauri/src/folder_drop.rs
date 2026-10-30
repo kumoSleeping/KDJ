@@ -32,24 +32,6 @@ fn collect_folders(paths: Vec<PathBuf>) -> FolderDrop {
     }
 }
 
-fn collect_media_files(paths: &[PathBuf]) -> Vec<PathBuf> {
-    let mut seen = HashSet::new();
-    paths
-        .iter()
-        .filter(|path| {
-            path.extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| {
-                    kdj_providers::workshop_images::is_image_extension(ext)
-                        || kdj_providers::tags::is_media_extension(ext)
-                })
-                && path.is_file()
-                && seen.insert((*path).clone())
-        })
-        .cloned()
-        .collect()
-}
-
 /// Wry 0.55: AppKit draggingLocation and GTK drag-motion use logical points.
 /// Only WebView2 reports device pixels. Tauri labels all of them PhysicalPosition
 /// without converting; dividing AppKit coordinates again misses the drop target.
@@ -111,7 +93,7 @@ fn handle_drop(label: &str, app: &tauri::AppHandle, scale: f64, drop: &DragDropE
         let _ = app.emit_to(
             label.as_str(),
             "kdj:media-drop",
-            serde_json::json!({"id":id,"phase":phase,"x":x,"y":y,"paths":paths}),
+            serde_json::json!({"id":id,"phase":phase,"x":x,"y":y}),
         );
         return;
     }
@@ -122,22 +104,17 @@ fn handle_drop(label: &str, app: &tauri::AppHandle, scale: f64, drop: &DragDropE
     tauri::async_runtime::spawn_blocking(move || {
         let folders = collect_folders(paths.clone());
         let bridge = app.state::<super::Bridge>();
-        let files = collect_media_files(&paths);
         bridge.activity_log.record_level(
             kdj_server::activity_log::ActivityCategory::User,
             kdj_server::activity_log::ActivityLevel::Info,
             "原生文件拖入",
             format!(
-                "#{id} ({x:.0}, {y:.0}) 收到 {} 项，媒体 {} 项，目录 {} 项，读取错误 {}",
+                "#{id} ({x:.0}, {y:.0}) 收到 {} 项，目录 {} 项，读取错误 {}",
                 paths.len(),
-                files.len(),
                 folders.paths.len(),
                 folders.error.is_some()
             ),
         );
-        for path in &files {
-            bridge.grant_picked_path(path);
-        }
         for path in &folders.paths {
             bridge.grant_picked_path(std::path::Path::new(path));
         }
@@ -145,7 +122,7 @@ fn handle_drop(label: &str, app: &tauri::AppHandle, scale: f64, drop: &DragDropE
             label.as_str(),
             "kdj:media-drop",
             serde_json::json!({
-                "id":id,"phase":phase,"x":x,"y":y,"paths":files,
+                "id":id,"phase":phase,"x":x,"y":y,
                 "folders":folders.paths,"error":folders.error
             }),
         );
@@ -182,14 +159,6 @@ mod tests {
         std::fs::create_dir_all(&second).unwrap();
         let file = first.join("cover.png");
         std::fs::write(&file, b"image").unwrap();
-        let archive = first.join("archive.zip");
-        std::fs::write(&archive, b"zip").unwrap();
-        let misleading_directory = first.join("folder.png");
-        std::fs::create_dir_all(&misleading_directory).unwrap();
-        assert_eq!(
-            collect_media_files(&[file.clone(), file.clone(), archive, misleading_directory]),
-            vec![file.clone()]
-        );
         let missing = fixture.0.join("missing");
         let result = collect_folders(vec![
             first.clone(),
