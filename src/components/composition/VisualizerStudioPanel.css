@@ -69,6 +69,8 @@
 .kd-viz-preview .kd-pip-float-chrome button { color: #fff; padding: 0; min-height: 0; }
 .kd-viz-preview .kd-pip-float-chrome button:hover { color: #ddd; }
 .kd-viz-preview .kd-pip-float-chrome button[aria-pressed=true] { color: var(--kd-theme); }
+/* White on the picture whether on or off (design.css, `.kd-pip-float` keys); on is heavier. */
+:root:not([data-theme-pack]) .kd-viz-preview .kd-pip-float-chrome button[aria-pressed=true] { color: #fff; }
 .kd-viz-preview[data-empty-media="true"] .kd-viz-empty > img { display: none; }
 .kd-viz-empty { position: absolute; inset: 0; display: grid; place-items: center; overflow: hidden; color: var(--kd-text); background: color-mix(in srgb, var(--kd-panel) 85%, var(--kd-panel-inset)); }
 .kd-viz-empty > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .25; filter: blur(12px); transform: scale(1.06); }
