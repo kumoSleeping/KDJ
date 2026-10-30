@@ -56,7 +56,9 @@ export function UpdateRow() {
                   : "点右边看看有没有新版本"
                 : info.newer
                   ? staged === info.latest
-                    ? `v${info.latest} 已下载，下次启动时自动安装`
+                    ? isAndroid
+                      ? `v${info.latest} 已下载，点「安装」更新`
+                      : `v${info.latest} 已下载，下次启动时自动安装`
                     : downloading
                       ? `正在后台下载 v${info.latest}（当前 v${info.current}）`
                       : `发现新版本 v${info.latest}（当前 v${info.current}）`
@@ -75,7 +77,7 @@ export function UpdateRow() {
             ) : canSelfUpdate ? (
               staged === info.latest ? "立即重启更新" : "下载并重启"
             ) : isAndroid && info.url.endsWith(".apk") ? (
-              "下载并安装"
+              staged === info.latest ? "安装" : "下载并安装"
             ) : isAndroid ? (
               "下载 APK"
             ) : (

@@ -190,6 +190,8 @@ class InstallUpdateApkArgs {
     var version: String? = null
     /** 没有「安装未知应用」授权时是否打开授权页；后台自动下载时为 false。 */
     var askPermission: Boolean = true
+    /** false：只下载（已下好的版本不再下），不打开安装页；安装要等用户点。 */
+    var install: Boolean = true
 }
 
 @InvokeArg
@@ -733,7 +735,10 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    /** 应用内更新：下载 Release 的 APK（进度走 [EVENT_UPDATE_PROGRESS]），再打开系统安装页。 */
+    /**
+     * 应用内更新：下载 Release 的 APK（进度走 [EVENT_UPDATE_PROGRESS]），再打开系统安装页。
+     * `install=false` 只下载，返回 downloaded=true；之后用户点安装时同一版本直接用下好的文件。
+     */
     @Command
     fun installUpdateApk(invoke: Invoke) {
         val args = invoke.parseArgs(InstallUpdateApkArgs::class.java)
@@ -747,6 +752,13 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
                     activity.runOnUiThread { trigger(EVENT_UPDATE_PROGRESS, payload) }
                 }
             }.onSuccess { apk ->
+                if (!args.install) {
+                    invoke.resolve(JSObject().apply {
+                        put("installing", false)
+                        put("downloaded", true)
+                    })
+                    return@onSuccess
+                }
                 activity.runOnUiThread {
                     runCatching { UpdateInstaller.install(activity, apk, args.askPermission) }
                         .onSuccess { installing -> invoke.resolve(JSObject().apply { put("installing", installing) }) }

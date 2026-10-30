@@ -497,7 +497,7 @@ export function SettingsPanel({ preferences = false, page }: {
                 checked={autoDownload}
                 label="自动下载更新"
                 title={getBridge().platform === "android"
-                  ? "在 Wi‑Fi 下发现新版本时自己下好并打开安装页，安装仍由系统确认；每个版本只弹一次。"
+                  ? "在 Wi‑Fi 下发现新版本时先在后台下好；不会自己打开安装页，要你在上面点「安装」。"
                   : "发现新版本后在后台下好，下次启动时自动安装；也可以点上面的「立即重启更新」马上装。"}
                 onChange={() => setAutoDownload(!autoDownload)}
               />

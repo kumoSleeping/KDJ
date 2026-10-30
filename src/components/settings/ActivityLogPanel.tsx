@@ -47,7 +47,10 @@ export function ActivityLogPanel() {
       <Button variant="ghost" size="sm" disabled={opening} onClick={() => {
         setOpening(true); setError("");
         void api.diagnostics.directory().then(({ path }) => getBridge().openPath(path))
-          .catch(error => setError(error instanceof Error ? error.message : String(error)))
+          // Android's plugin rejects with a plain object ({ message }), not an Error.
+          .catch(error => setError(error instanceof Error ? error.message
+            : typeof (error as { message?: unknown })?.message === "string" ? (error as { message: string }).message
+            : String(error)))
           .finally(() => setOpening(false));
       }}><FolderOpen size={14}/>打开日志文件夹</Button>
       <Button variant="ghost" size="sm" aria-expanded={reporting} onClick={() => {

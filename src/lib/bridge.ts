@@ -201,12 +201,12 @@ async function createTauriBridge(): Promise<KdjBridge> {
       : null,
     downloadUpdate: desktop ? () => tauriInvoke<string>("download_update") : null,
     installAndroidUpdate: android
-      ? async ({ url, version, askPermission, onProgress }) => {
+      ? async ({ url, version, askPermission, install = true, onProgress }) => {
           const listener = await addUpdateProgressListener(({ downloaded, total }) =>
             onProgress?.({ stage: "downloading", downloaded, total: total ?? null, message: "" }));
           try {
-            const { installing } = await installUpdateApk({ url, version, askPermission });
-            return installing ? "installing" : "permission";
+            const { installing, downloaded } = await installUpdateApk({ url, version, askPermission, install });
+            return downloaded ? "downloaded" : installing ? "installing" : "permission";
           } finally {
             void listener.unregister().catch(() => {});
           }

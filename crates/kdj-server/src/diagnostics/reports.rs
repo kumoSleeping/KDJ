@@ -161,7 +161,19 @@ async fn send(body: String, expected_id: &str) -> anyhow::Result<String> {
         .body(body)
         .send()
         .await
-        .map_err(|_| anyhow::anyhow!("上报连接失败或超时，未自动重试；可手动重试同一报告"))?;
+        .map_err(|error| {
+            // 带上真正的原因（DNS、TLS、被拒绝、超时……）：只说「失败或超时」时，瞬间失败和
+            // 等满 30 秒的超时看起来一样，没法判断是网络还是代理的问题。
+            let mut cause = String::new();
+            let mut source: Option<&dyn std::error::Error> = Some(&error);
+            while let Some(current) = source {
+                cause.push_str(if cause.is_empty() { "" } else { "：" });
+                cause.push_str(&current.to_string());
+                source = current.source();
+            }
+            let kind = if error.is_timeout() { "超时" } else { "连接失败" };
+            anyhow::anyhow!("上报{kind}，未自动重试；可手动重试同一报告（{cause}）")
+        })?;
     anyhow::ensure!(
         response.status().is_success(),
         "收集器返回 HTTP {}，未自动重试",

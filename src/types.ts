@@ -1121,8 +1121,10 @@ export interface KdjBridge {
     url: string;
     version: string;
     askPermission: boolean;
+    /** false：只下载，不打开安装页（后台自动下载）；结果是 "downloaded"。 */
+    install?: boolean;
     onProgress?: (progress: UpdateProgress) => void;
-  }) => Promise<"installing" | "permission">;
+  }) => Promise<"installing" | "permission" | "downloaded">;
   windowControl: (action: "minimize" | "maximize" | "close" | "drag") => void;
   /** 主窗口收成迷你播放器再放回来（src/lib/miniPlayer.ts）。只有桌面壳的主窗口有。 */
   miniPlayer?: MiniPlayerBridge;
