@@ -11,7 +11,7 @@ import { api, visualizerApi } from "../../lib/api";
 import { createVisualizerProject, loadVisualizerDraft, saveVisualizerDraft, studioBeatGrid, studioDuration, studioLyricText, hasStudioLyrics, syncVisualizerImages, validateVisualizerProject, STUDIO_IMAGE_LIMIT, clamp, type VisualizerDraft, type VisualizerProject } from "../../lib/visualizerStudio";
 import { drawStudioFrame, loadStudioImages, prepareStudio, studioPictureSideAt } from "../../lib/visualizerStudioRenderer";
 import { studioExportBytes } from "../../lib/visualizerStudioFrames";
-import { formatBytes } from "../../lib/format";
+import { formatBytes, formatDuration } from "../../lib/format";
 import { visualizerCropExtent } from "../../lib/audioVisualizerScene";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import { tossToDownloads } from "../../lib/downloadToss";
@@ -289,7 +289,10 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     const controller = new AbortController(); setAnalyzing(true);
     const timer = window.setTimeout(() => {
       void visualizerApi.analyze(track.id, p.scene.spectrum, controller.signal).then(result => {
-        if (!controller.signal.aborted) { analyzedSpectrum.current = spectrumKey; setAnalysis(result); }
+        if (controller.signal.aborted) return;
+        analyzedSpectrum.current = spectrumKey; setAnalysis(result);
+        // A file that ends before the length it states: everything it holds is drawn and exported.
+        if (result.missing_tail) setNotice(`这首歌的文件末尾缺了约 ${result.missing_tail.toFixed(1)} 秒（文件不完整，可能是下载或拷贝时没写完），可视化和导出到 ${formatDuration(studioDuration(result.timeline))} 为止`);
       }).catch(e => { if (!controller.signal.aborted) { setNotice(message(e)); } }).finally(() => { if (!controller.signal.aborted) setAnalyzing(false); });
     }, 250);
     return () => { window.clearTimeout(timer); controller.abort(); };
