@@ -86,16 +86,14 @@ function youtubeNativePoDevBundle(): Plugin {
 }
 
 /** Production panels are absent from the mobile module graph, not merely invisible. The song
- * visualizer (its panel, its floating window, colour extraction and analysis) is not production
- * and stays. Runtime actions and the Rust route table enforce the same product boundary for stale
+ * visualizer (its panel, its floating window, its export and the export list, colour extraction
+ * and analysis) is not production and stays. Runtime actions and the Rust route table enforce the same product boundary for stale
  * state or direct calls. */
 function mobileMediaPanels(): Plugin {
   const mobile = ["android", "androideabi", "ios"].includes(tauriPlatform ?? "");
   const panels: Record<string, string> = {
-    LaneEditor: "LaneEditor", KdjvLivePicture: "KdjvLivePicture",
-    ExportQueuePanel: "ExportQueuePanel", KvjApp: "KvjApp",
+    LaneEditor: "LaneEditor", KdjvLivePicture: "KdjvLivePicture", KvjApp: "KvjApp",
     AiPanel: "AiPanel", AiDrawer: "AiDrawer,AiDrawerTools", FfmpegPanel: "FfmpegPanel",
-    visualizerStudioExport: "runStudioExport,createStudioExportFrames",
   };
   const prefix = "\0kdj-mobile-panel:";
   return {
@@ -108,10 +106,7 @@ function mobileMediaPanels(): Plugin {
     load(id) {
       if (!id.startsWith(prefix)) return null;
       const name = panels[id.slice(prefix.length)];
-      if (id === prefix + "visualizerStudioExport") return name.split(",")
-        .map(symbol => `export async function ${symbol}() { throw new Error("移动版不提供视频导出"); }`).join("\n");
-      return name === "default" ? "export default function MobileOmittedPanel() { return null; }"
-        : name.split(",").map(symbol => `export function ${symbol}() { return null; }`).join("\n");
+      return name.split(",").map(symbol => `export function ${symbol}() { return null; }`).join("\n");
     },
   };
 }

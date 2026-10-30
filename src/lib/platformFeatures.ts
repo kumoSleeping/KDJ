@@ -3,9 +3,12 @@ export function mediaProductionAvailable(platform = currentPlatform()): boolean 
   return platform !== "android" && platform !== "ios";
 }
 
-/** Exporting a song's visualizer as a video. Its picture and configuration are on every platform. */
+/**
+ * Exporting a song's visualizer as a video; its picture and configuration are on every platform.
+ * Android encodes with the WebView's hardware H.264 and the system's AAC (MediaCodec), no FFmpeg.
+ */
 export function visualizerExportAvailable(platform = currentPlatform()): boolean {
-  return mediaProductionAvailable(platform);
+  return mediaProductionAvailable(platform) || platform === "android";
 }
 
 /**
