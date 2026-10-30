@@ -1204,6 +1204,7 @@ fn publishes_control_snapshot(command: &PlaybackCommand) -> bool {
             | PlaybackCommand::ControlDeckPlatter { .. }
             | PlaybackCommand::SetDeckStems { .. }
             | PlaybackCommand::SetDeckFx { .. }
+            | PlaybackCommand::SetDeckMixer { .. }
     )
 }
 

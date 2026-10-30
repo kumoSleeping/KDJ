@@ -872,6 +872,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private rateTails: [Promise<void>, Promise<void>] = [Promise.resolve(), Promise.resolve()];
   /** Jog 边缘缓动同样走最新值控制通道；旧 tick 不得积压到下一次表演。 */
   private nudgeTails: [Promise<void>, Promise<void>] = [Promise.resolve(), Promise.resolve()];
+  private mixerTails: [Promise<void>, Promise<void>] = [Promise.resolve(), Promise.resolve()];
   /** At most one platter velocity per Deck enters IPC; queued samples collapse to the latest. */
   private platterTails: [Promise<void>, Promise<void>] = [Promise.resolve(), Promise.resolve()];
   private platterRevisions: [number, number] = [0, 0];
@@ -1479,10 +1480,20 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   setDeckMixer(deck: 0 | 1, mixer: UnifiedDeckMixer): Promise<UnifiedPlayerState> {
     const revision = this.deckMixerRevisions[deck] + 1;
     this.deckMixerRevisions[deck] = revision;
-    return this.command(
-      { type: "setDeckMixer", deck, ...mixer },
-      () => this.deckMixerRevisions[deck] === revision,
+    // A knob is a continuous control like TEMPO: behind a load or a preparing next song on
+    // `commandTail` its moves were heard seconds late on Android. One move in flight per Deck;
+    // the ones it overtook are dropped, and the coordinator gives a loading Deck the latest strip.
+    const operation = this.mixerTails[deck].then(() =>
+      this.control(
+        { type: "setDeckMixer", deck, ...mixer },
+        () => this.deckMixerRevisions[deck] === revision,
+      ),
     );
+    this.mixerTails[deck] = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
   }
 
   setDeckFx(deck: 0 | 1, fx: UnifiedDeckFx): Promise<UnifiedPlayerState> {
