@@ -53,6 +53,10 @@ pub struct SessionState {
     /// MUSIC_U 到期的时刻（Unix 秒），取自网易云发来它的那条 Set-Cookie；导入的登录在第一次续期前不知道。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_expires_at: Option<i64>,
+    /// 上次续上登录的时刻（Unix 秒）。记在盘上，重启不算到期：安卓的进程常被系统收走，
+    /// 只记在内存里就成了每次打开都续一次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_refreshed_at: Option<i64>,
 }
 
 impl SessionState {
@@ -104,6 +108,14 @@ impl NeteaseClient {
     /// 复用来的登录都一样续。至多每 [`LOGIN_REFRESH_INTERVAL`] 一次；返回是否续上了。
     pub async fn refresh_login_if_due(&self) -> Result<bool> {
         let mut refreshed = self.login_refreshed.lock().await;
+        if refreshed.is_none() {
+            // 这个进程还没续过：从盘上记的时刻接着算。
+            let saved = self.state.read().unwrap().login_refreshed_at;
+            *refreshed = saved.and_then(|at| {
+                let ago = std::time::Duration::from_secs(u64::try_from(unix_now() - at).ok()?);
+                std::time::Instant::now().checked_sub(ago)
+            });
+        }
         if !self.logged_in() || refreshed.is_some_and(|at| at.elapsed() < LOGIN_REFRESH_INTERVAL) {
             return Ok(false);
         }
@@ -111,6 +123,13 @@ impl NeteaseClient {
         let body = self.weapi("/weapi/login/token/refresh", Map::new()).await?;
         let code = body.get("code").and_then(Value::as_i64).unwrap_or(0);
         anyhow::ensure!(code == 200, "网易云续登录返回 code={code}");
+        let mut current = self.state.write().unwrap();
+        let mut next = current.clone();
+        next.login_refreshed_at = Some(unix_now());
+        if let Err(error) = self.persist_state(&next) {
+            tracing::warn!("记下网易云续登录的时刻失败：{error:#}");
+        }
+        *current = next;
         Ok(true)
     }
 
@@ -179,6 +198,7 @@ impl NeteaseClient {
             cookies,
             profile: None,
             login_expires_at: None,
+            login_refreshed_at: None,
         };
         self.persist_state(&next)?;
         *current = next;
@@ -371,6 +391,12 @@ impl NeteaseClient {
     }
 }
 
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
+
 /// 响应偶尔带 `\x10` 之类的尾巴，pyncm 是 `payload.strip("\x10")` 之后再解析。
 fn parse_json_body(text: &str) -> Result<Value> {
     let trimmed = text.trim_matches(|c: char| c == '\u{10}' || c.is_whitespace());
@@ -432,6 +458,7 @@ fn parse_pyncm_dump(dump: &str) -> Result<SessionState> {
         csrf_token,
         profile,
         login_expires_at: None,
+        login_refreshed_at: None,
     })
 }
 
@@ -520,6 +547,24 @@ mod tests {
         assert!(!header.contains("NMTID"), "Max-Age=0 是删除：{header}");
         assert!(header.contains("MUSIC_U=new"), "登录 Cookie 留给账号接口判断：{header}");
         assert!(NeteaseClient::new(&dir).unwrap().cookie_header().contains("MUSIC_U=new"));
+    }
+
+    #[tokio::test]
+    async fn a_restart_does_not_refresh_the_login_again_within_a_day() {
+        let dir = scratch("refresh-saved");
+        let client = NeteaseClient::new(&dir).unwrap();
+        client
+            .replace_login(BTreeMap::from([("MUSIC_U".to_string(), "u".to_string())]))
+            .unwrap();
+        {
+            let mut state = client.state.write().unwrap();
+            state.login_refreshed_at = Some(unix_now() - 60 * 60);
+            client.persist_state(&state).unwrap();
+        }
+        // 一小时前续过：重新打开后不发请求（这里发了就会连网失败、返回 Err）。
+        let reopened = NeteaseClient::new(&dir).unwrap();
+        assert!(!reopened.refresh_login_if_due().await.unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

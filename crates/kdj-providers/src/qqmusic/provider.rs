@@ -990,13 +990,10 @@ impl MusicProvider for QqMusicProvider {
         if !credential.is_present() {
             return Account::new(Platform::Qqm, LABEL, AccountState::Missing, "未登录");
         }
-        if self.client.credential_invalid() || credential.is_expired() {
-            return Account::new(
-                Platform::Qqm,
-                LABEL,
-                AccountState::Expired,
-                "登录凭证已过期，请刷新或重新扫码",
-            );
+        // 票据到点了而扫码登录带着续期用的 refresh_key：下一次请求会先续上（account() 和
+        // ensure_valid_credential），这时还说不上失效。启动时先挂出「重新登录」、一核验又好了，就是这里。
+        if credential.is_expired() && credential.refresh_key.is_empty() {
+            return expired_account(&credential);
         }
         let cached_profile = self
             .profile

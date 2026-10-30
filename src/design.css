@@ -2700,13 +2700,25 @@ body[data-kd-search-pointer-dragging="true"] * {
   display: grid;
   /* 旋钮那一排（五颗旋钮 + Tempo）的宽度。 */
   --kd-player-eq-w: clamp(264px, 26vw, 336px);
-  /* 走带右边那一块（工具键 / 旋钮，一次一面）至少留出的宽度：窗口够宽时旋钮那面一行排得下，
-     窄了旋钮先收到最小，再窄那一面自己横向滚，不把左边的歌名挤没。两面共用同一个数，
-     换面时别的都不动。 */
+  /* 走带右边那一块（工具键 / 旋钮，一次一面）想留出的宽度：窗口够宽时旋钮那面一行排得下，
+     窄了旋钮先收到最小，再窄那一面自己横向滚。两面共用同一个数，换面时别的都不动。 */
   --kd-player-side-w: clamp(14rem, 42vw, 26.5rem);
+  /* 左边那一列（唱盘和歌名）至少留下的宽度。右边那块的宽度只从这之外让出来：歌名优先。 */
+  --kd-player-now-min: 13rem;
+  /* 走带组大约的宽度（音量、三颗键、时间）加两道列间距，只用来算右边还能留多少。 */
+  --kd-player-transport-room: 19.25rem;
   /* 行列结构由应用统一控制，主题只负责外观，不能用独立断点把桌面底栏拆成三行。
-     中间控制组按内容取宽，两侧均分余量，但右列不小于上面那个数；只有竖长窗口在下方改成三行。 */
-  grid-template-columns: minmax(0, 1fr) auto minmax(var(--kd-player-side-w), 1fr) !important;
+     中间控制组按内容取宽，两侧均分余量；右列想留上面那个数，可只留到左列还剩
+     --kd-player-now-min 为止，再窄两侧就均分。以前右列硬留 42vw，接近方形的窗口
+     （展开的折叠屏）里歌名那一列就只剩唱盘，歌名和艺人整个没了，右边却空着一大片。
+     只有竖长窗口在下方改成三行。 */
+  grid-template-columns:
+    minmax(0, 1fr)
+    auto
+    minmax(
+      clamp(0px, 100% - var(--kd-player-now-min) - var(--kd-player-transport-room), var(--kd-player-side-w)),
+      1fr
+    ) !important;
   grid-template-rows: auto auto !important;
   grid-template-areas:
     "now controls next"
@@ -2877,9 +2889,10 @@ body[data-kd-search-pointer-dragging="true"] * {
   flex: none;
   margin-bottom: 0;
 }
+/* 歌名在状态后面放不下七个字左右时，自己换到下一行，整行都给它（状态、歌名、艺人三行）。 */
 .kd-app:not([data-tall="true"]) .kd-player-deck-copy .kd-player-title {
   flex: 1 1 0;
-  min-width: 0;
+  min-width: min(7rem, 100%);
   max-width: max-content;
 }
 .kd-app:not([data-tall="true"]) .kd-player-deck-copy .kd-player-artist {
