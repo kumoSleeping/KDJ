@@ -144,3 +144,12 @@ export declare const startFileDrag: (
 ) => Promise<{ started: true }>;
 /** 安卓：系统文件夹选择器；取消返回 null。 */
 export declare const pickLibraryFolder: () => Promise<string | null>;
+/** 安卓：下载 Release 的 APK 并打开系统安装页；installing=false 表示还没有安装授权。 */
+export declare const installUpdateApk: (payload: {
+  url: string;
+  version: string;
+  askPermission?: boolean;
+}) => Promise<{ installing: boolean }>;
+export declare const addUpdateProgressListener: (
+  handler: (progress: { downloaded: number; total?: number }) => void,
+) => Promise<{ unregister(): Promise<void> }>;

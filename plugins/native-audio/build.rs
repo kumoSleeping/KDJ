@@ -23,6 +23,7 @@ const COMMANDS: &[&str] = &[
     "open_local_path",
     "start_file_drag",
     "pick_library_folder",
+    "install_update_apk",
 ];
 
 fn main() {

@@ -4,7 +4,9 @@
 
 import {
   addOverlayMovedListener,
+  addUpdateProgressListener,
   checkOverlayPermission,
+  installUpdateApk,
   openLocalPath,
   pickLibraryFolder,
   requestOverlayPermission,
@@ -193,6 +195,18 @@ async function createTauriBridge(): Promise<KdjBridge> {
           }
         }
       : null,
+    installAndroidUpdate: android
+      ? async ({ url, version, askPermission, onProgress }) => {
+          const listener = await addUpdateProgressListener(({ downloaded, total }) =>
+            onProgress?.({ stage: "downloading", downloaded, total: total ?? null, message: "" }));
+          try {
+            const { installing } = await installUpdateApk({ url, version, askPermission });
+            return installing ? "installing" : "permission";
+          } finally {
+            void listener.unregister().catch(() => {});
+          }
+        }
+      : undefined,
     installMediaTools: ["darwin", "win32"].includes(info.platform) ? action => tauriInvoke("install_media_tools", { action }) : undefined,
     mediaToolsProgress: ["darwin", "win32"].includes(info.platform) ? () => tauriInvoke("media_tools_progress") : undefined,
     pickFolder: async (options) => {

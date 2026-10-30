@@ -3,6 +3,7 @@ import { addPluginListener, invoke } from '@tauri-apps/api/core';
 const PLUGIN_NAME = 'native-audio';
 const STATE_EVENT = 'native_audio_state';
 const OVERLAY_MOVED_EVENT = 'native_lyrics_overlay_moved';
+const UPDATE_PROGRESS_EVENT = 'native_update_progress';
 
 const call = async (command, payload) => {
   return await invoke(`plugin:${PLUGIN_NAME}|${command}`, payload);
@@ -44,3 +45,7 @@ export const pickLibraryFolder = async () => {
   const path = result?.path;
   return typeof path === 'string' && path ? path : null;
 };
+/** 安卓：下载 Release 的 APK 并打开系统安装页；installing=false 表示还没有安装授权。 */
+export const installUpdateApk = async (payload) => await call('install_update_apk', payload);
+export const addUpdateProgressListener = async (handler) =>
+  await addPluginListener(PLUGIN_NAME, UPDATE_PROGRESS_EVENT, handler);

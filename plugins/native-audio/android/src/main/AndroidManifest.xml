@@ -9,6 +9,8 @@
         没授予时插件只是不挂窗口，不影响播放。
     -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 应用内更新：下载好的 APK 交给系统安装页（用户仍需在系统里允许并确认）。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application>
         <service android:name="app.tauri.nativeaudio.YoutubeProofService"
