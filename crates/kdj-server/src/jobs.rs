@@ -950,6 +950,8 @@ fn spawn_analysis_target(
             stats.loudness_ms,
             stats.decoded_seconds,
         );
+        // Its timing goes into the next error report too: a slow phone is seen only there.
+        crate::diagnostics::record("info", "analysis", "analysis.batch", &summary);
         if stats.failed > 0 || stats.warnings > 0 {
             tracing::warn!("{summary}");
             write_kdj_log(&state.config.data_dir, &summary);

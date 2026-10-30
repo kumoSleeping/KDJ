@@ -16,6 +16,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -84,6 +86,26 @@ class MainActivity : TauriActivity() {
     videoView?.evaluateJavascript("document.documentElement.toggleAttribute('data-android-pip', $active);window.dispatchEvent(new CustomEvent('kdj:android-pip',{detail:$active}));", null)
   }
 
+  private var immersive = false
+
+  /** The bars come back for a moment with a swipe from the edge, and hide again by themselves. */
+  private fun applyImmersive() {
+    WindowCompat.getInsetsController(window, window.decorView).apply {
+      if (immersive) {
+        systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        hide(WindowInsetsCompat.Type.systemBars())
+      } else {
+        show(WindowInsetsCompat.Type.systemBars())
+      }
+    }
+  }
+
+  override fun onWindowFocusChanged(hasFocus: Boolean) {
+    super.onWindowFocusChanged(hasFocus)
+    // Coming back to the app (or out of a dialog) shows the bars again; a fullscreen preview hides them.
+    if (hasFocus && immersive) applyImmersive()
+  }
+
   override fun onUserLeaveHint() {
     super.onUserLeaveHint()
     if (Build.VERSION.SDK_INT < 31 && videoPipActive && videoPlaying) enterVideoPip()
@@ -148,6 +170,12 @@ class MainActivity : TauriActivity() {
         ExportForeground.finished(this@MainActivity, title, ok, message, uri)
       @JavascriptInterface
       fun exportIdle() = ExportForeground.idle(this@MainActivity)
+      /** A preview's fullscreen (src/lib/windowFullscreen.ts): the app already fills the screen, so it hides the bars. */
+      @JavascriptInterface
+      fun setImmersive(on: Boolean) = runOnUiThread {
+        immersive = on
+        applyImmersive()
+      }
       @JavascriptInterface
       fun setSystemBarsLight(light: Boolean) = runOnUiThread {
         WindowCompat.getInsetsController(window, window.decorView).apply {

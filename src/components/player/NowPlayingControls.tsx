@@ -5,7 +5,9 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import type { KeyNotation, Track } from "../../types";
 import { camelotColor } from "../../lib/camelot";
@@ -21,6 +23,7 @@ import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { useAppStore } from "../../stores/appStore";
 import { streamAnalysisSnapshot, subscribeStreamAnalysis, trackWithStreamAnalysis } from "../../lib/streamAnalysis";
 import { ArcKnob } from "./ManagerMixerControls";
+import { usePlayerBarFace, usePlayerBarReadouts } from "../../lib/playerBarFace";
 import "./PlayerEq.css";
 
 function clamp(value: number, min: number, max: number): number {
@@ -128,10 +131,13 @@ function NowPlayingControls({
   track,
   keyNotation,
   onError,
+  readoutsTo,
 }: {
   track: Track;
   keyNotation: KeyNotation;
   onError(message: string): void;
+  /** Where the readouts go instead of ending the knobs' row (a tall window's title row). */
+  readoutsTo: HTMLElement | null;
 }) {
   const subscribeAnalysis = useCallback((listener: () => void) => subscribeStreamAnalysis(track.id, listener), [track.id]);
   const readAnalysis = useCallback(() => streamAnalysisSnapshot(track.id), [track.id]);
@@ -212,10 +218,12 @@ function NowPlayingControls({
   const confidence = analyzedTrack.bpm_confidence;
   const analysisWarning = analyzedTrack.analysis_error || analysis.error || analysis.result?.errors.join("；") || "";
   const effectiveBpm = baseBpm ? baseBpm * tempoDraft : null;
+  const readouts = (node: ReactNode) => readoutsTo ? createPortal(node, readoutsTo) : node;
 
   return (
     <div className="kd-manager-control" data-side={side === null ? undefined : side === 0 ? "a" : "b"} aria-busy={!ready}>
-      {/* Controls first, readouts after: beside them on a wide window, beneath on a tall one. */}
+      {/* Controls first, readouts after on the same row; a tall window draws the readouts in the
+          title row instead (readoutsTo, PlayerBar's BarNowKeys). */}
       <div className="kd-manager-knob-stack">
         <ArcKnob size="xs" label="GAIN" value={mixer.gain} onChange={(gain) => setMixer({ gain })} onReset={() => setMixer({ gain: 0 })}
           format={value => { const db = value < 0 ? value * 24 : value * 6; return `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`; }} />
@@ -227,7 +235,7 @@ function NowPlayingControls({
         <TempoControl rate={tempoDraft} range={tempoRange} onRate={setRate} disabled={!ready} />
       </div>
 
-      <div className="kd-eq-readouts">
+      {readouts(<div className="kd-eq-readouts">
         {/* The readout with its two steps as a small vertical pair on its right: raise above,
             lower below (placed by PlayerEq.css; the order here is the keyboard's). */}
         <div className="kd-eq-key" role="group" aria-label="音调">
@@ -253,7 +261,7 @@ function NowPlayingControls({
           <small>BPM</small>
           <strong>{effectiveBpm ? effectiveBpm.toFixed(1) : "—"}</strong>
         </span>
-      </div>
+      </div>)}
     </div>
   );
 }
@@ -262,7 +270,11 @@ function NowPlayingControls({
 export function PlayerEq({ onError }: { onError(message: string): void }) {
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   const keyNotation = useAppStore(state => state.settings?.key_notation ?? "camelot");
+  // The face that is not shown is still mounted; only the face on screen sends its readouts up.
+  const face = usePlayerBarFace(state => state.face);
+  const slot = usePlayerBarReadouts(state => state.slot);
+  const readoutsTo = face === "eq" ? slot : null;
   return <div className="kd-player-eq" role="group" aria-label="EQ / 播放控制">
-    {track && <NowPlayingControls track={track} keyNotation={keyNotation} onError={onError} />}
+    {track && <NowPlayingControls track={track} keyNotation={keyNotation} onError={onError} readoutsTo={readoutsTo} />}
   </div>;
 }

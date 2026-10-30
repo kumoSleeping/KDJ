@@ -1355,6 +1355,20 @@ fn compute_profile_waveforms(
         reused_evidence,
         "整曲波形分段计时"
     );
+    // The waveform a listener is waiting for: its timing goes into the next error report, since
+    // only a phone shows where a phone spends its time (the same as a visualizer export's).
+    if matches!(work_class, WorkClass::VisibleWaveform) {
+        crate::diagnostics::record(
+            "info",
+            "analysis",
+            "waveform.timing",
+            &format!(
+                "profile={profile_name} audio_s={:.1} sample_rate={} decode_ms={decode_ms:.0} resample_ms={evidence_resample_ms:.0} evidence_ms={evidence_ms:.0} reused={reused_evidence} playing={realtime_yielding}",
+                decoded.samples.len() as f64 / f64::from(decoded.sample_rate).max(1.0),
+                decoded.sample_rate,
+            ),
+        );
+    }
     if !realtime_yielding {
         ensure_waveform_may_continue()?;
     }

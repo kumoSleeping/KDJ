@@ -57,6 +57,22 @@ test("desktop player lanes: volume never waits for a Load ACK, and a seek only w
   assert.equal(calls.length, 3);
   assert.deepEqual(calls[2].args.command, { type: "setVolume", volume: 0.3 });
   calls[2].resolve({ acceptedSequence: 2 });
+  // The EQ / FILTER knobs are the same kind of control: not queued behind the Load either.
+  const strip = (filter: number) => ({ channelGain: 1, trimDb: 0, lowDb: 0, midDb: 0, highDb: 0, filter });
+  void player.setDeckMixer(0, strip(0.1)).catch(() => undefined);
+  await tick();
+  assert.deepEqual([calls[3]?.command, calls[3]?.args.command], ["playback_control", { type: "setDeckMixer", deck: 0, ...strip(0.1) }],
+    "a knob goes out at once on the control lane");
+  void player.setDeckMixer(0, strip(0.2)).catch(() => undefined);
+  void player.setDeckMixer(0, strip(0.3)).catch(() => undefined);
+  await tick();
+  assert.equal(calls.length, 4);
+  calls[3].resolve({ acceptedSequence: 2 });
+  await tick();
+  assert.equal(calls.length, 5);
+  assert.deepEqual(calls[4].args.command, { type: "setDeckMixer", deck: 0, ...strip(0.3) }, "only the latest turn follows");
+  calls[4].resolve({ acceptedSequence: 2 });
+  calls.splice(3, 2);
 
   load.resolve({ commandId: load.args.commandId, acceptedSequence: 3, snapshot: snapshot(load.args.commandId!, 7) });
   assert.equal((await loaded).trackId, 7);

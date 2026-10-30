@@ -84,6 +84,7 @@ import {
   FOLDER_DROP_PATH_ATTR,
 } from "../../lib/folderDrop";
 import { pointerAccepts } from "../../lib/dragRefusal";
+import { startLongPress } from "../../lib/longPress";
 import { pointerTrackDropAt, type PointerTrackDrop } from "../../lib/pointerTrackDrop";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
@@ -1048,7 +1049,8 @@ export const TrackTable = memo(function TrackTable({
     [downloadTasks, filterFolder, indexById],
   );
   const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const pressTimerRef = useRef<number | null>(null);
+  /** Abandons the touch or pen press being watched for a long press (lib/longPress.ts). */
+  const pressRef = useRef<(() => void) | null>(null);
   const suppressClickRef = useRef<number | null>(null);
   /**
    * The second click is the earliest reliable double-click edge. Submit playback there, before
@@ -1119,60 +1121,30 @@ export const TrackTable = memo(function TrackTable({
     [],
   );
 
-  /** 触屏长按整行后启动系统文件拖动；明显纵向移动时优先让列表滚动。 */
-  const beginTrackSystemFileDrag = (
+  /**
+   * 触屏按住整行不动、菜单出来之后继续按住（长按的第二段，见 lib/longPress.ts）：把曲目文件或
+   * 分享链接交给系统的跨应用拖放。按下时就备好拖动图和链接，第二段到时直接起拖，仍在这次触摸里。
+   */
+  const prepareTrackSystemDrag = (
     event: React.PointerEvent<HTMLDivElement>,
     track: TrackSummary,
-  ): boolean => {
+  ): (() => void) | undefined => {
     const startFileDrag = window.kdj?.startFileDrag;
     const startLinkDrag = window.kdj?.startLinkDrag;
     const canStart = localExternalDragMode === "share_link" ? startLinkDrag : startFileDrag;
-    if (!canStart || event.button !== 0 || event.pointerType === "mouse") return false;
-    if ((event.target as HTMLElement).closest("button, input, select, textarea, a, label")) return false;
-
-    pointerDragCleanupRef.current?.();
-    const sourceRow = event.currentTarget;
-    const pointerId = event.pointerId;
-    const startX = event.clientX;
-    const startY = event.clientY;
-    const sourceScroller = sourceRow.closest<HTMLElement>(".kd-scroll");
+    if (!canStart) return undefined;
+    const sourceScroller = event.currentTarget.closest<HTMLElement>(".kd-scroll");
     const sourceScrollTop = sourceScroller?.scrollTop ?? 0;
     const sourceScrollLeft = sourceScroller?.scrollLeft ?? 0;
     const dragImage = systemDragPreview(track);
     const shareLink = localExternalDragMode === "share_link"
       ? resolveLocalTrackShareLink(track)
       : Promise.resolve<string | null>(null);
-    let timer: number | null = null;
-    let launched = false;
-
-    try {
-      sourceRow.setPointerCapture(pointerId);
-    } catch {
-      // WebView 已取消指针时，window 监听仍会完成清理。
-    }
-
-    const cleanup = () => {
-      if (timer !== null) window.clearTimeout(timer);
-      timer = null;
-      window.removeEventListener("pointermove", onMove, true);
-      window.removeEventListener("pointerup", onEnd, true);
-      window.removeEventListener("pointercancel", onEnd, true);
-      try {
-        if (sourceRow.hasPointerCapture(pointerId)) sourceRow.releasePointerCapture(pointerId);
-      } catch {
-        // 原生拖动接管触摸序列后 capture 会自动释放。
-      }
-      if (pointerDragCleanupRef.current === cleanup) pointerDragCleanupRef.current = null;
-    };
-    const launch = () => {
-      if (launched) return;
-      launched = true;
+    return () => {
       const dragIds = selected.has(track.id) ? [...selectedIds] : [track.id];
-      cleanup();
+      setRowMenu(null);
       clearTextSelection();
-      cancelPress();
       suppressClickRef.current = track.id;
-      suppressContextMenuUntilRef.current = Date.now() + 1_000;
       if (!selected.has(track.id)) onSelect(track.id, "replace");
       const releaseScroll = lockTrackPointerDragScroll(
         sourceScroller,
@@ -1211,24 +1183,6 @@ export const TrackTable = memo(function TrackTable({
         })
         .finally(() => releaseScroll(EXTERNAL_DRAG_SCROLL_SETTLE_MS));
     };
-    const onMove = (move: PointerEvent) => {
-      if (move.pointerId !== pointerId) return;
-      const distance = Math.hypot(move.clientX - startX, move.clientY - startY);
-      if (distance > 10) {
-        // 手指明显移动就是滚列表，不抢成系统拖动。
-        cleanup();
-      }
-    };
-    const onEnd = (end: PointerEvent) => {
-      if (end.pointerId === pointerId) cleanup();
-    };
-
-    pointerDragCleanupRef.current = cleanup;
-    window.addEventListener("pointermove", onMove, { capture: true, passive: false });
-    window.addEventListener("pointerup", onEnd, true);
-    window.addEventListener("pointercancel", onEnd, true);
-    timer = window.setTimeout(launch, 420);
-    return true;
   };
 
   /**
@@ -1544,16 +1498,8 @@ export const TrackTable = memo(function TrackTable({
   };
 
   const cancelPress = () => {
-    if (pressTimerRef.current !== null) window.clearTimeout(pressTimerRef.current);
-    pressTimerRef.current = null;
-  };
-  const beginLongPress = (track: TrackSummary, x: number, y: number) => {
-    cancelPress();
-    pressTimerRef.current = window.setTimeout(() => {
-      setRowMenu({ x, y, track });
-      suppressClickRef.current = track.id;
-      pressTimerRef.current = null;
-    }, 480);
+    pressRef.current?.();
+    pressRef.current = null;
   };
 
   // 菜单开合都退膛：残留的"已确认"状态比误删只差一次点击
@@ -2293,16 +2239,25 @@ export const TrackTable = memo(function TrackTable({
       onSelect(track.id, mode, event.detail);
     },
     pointerDown(event, track) {
+      if (event.pointerType !== "mouse") {
+        // A finger or a pen: held still, the right-click menu; held on, the system drag out.
+        if ((event.target as HTMLElement).closest("button, input, select, textarea, a, label")) return;
+        cancelPress();
+        const hold = event.button === 0 ? prepareTrackSystemDrag(event, track) : undefined;
+        pressRef.current = startLongPress(event.nativeEvent, {
+          open: (x, y) => {
+            setPendingMenu(null);
+            setRowMenu({ x, y, track });
+          },
+          hold,
+        });
+        return;
+      }
       if (htmlExternalLinkDrag) {
         void resolveLocalTrackShareLink(track);
         return;
       }
-      if (beginTrackSystemFileDrag(event, track)) return;
-      if (event.pointerType === "mouse") {
-        beginTrackPointerDrag(event, track);
-      } else {
-        beginLongPress(track, event.clientX, event.clientY);
-      }
+      beginTrackPointerDrag(event, track);
     },
     cancelPress,
     doubleClick(track) {

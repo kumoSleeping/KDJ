@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { fullscreenErrorText, isWindowFullscreen, setWindowFullscreen } from "../../lib/windowFullscreen";
 import { FloatingVideoControls, FloatingVideoScrub } from "../player/FloatingVideoControls";
 import { api } from "../../lib/api";
 import {
@@ -63,10 +64,10 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     if (fullscreenPending.current) return;
     fullscreenPending.current = true;
     try {
-      await getCurrentWindow().setFullscreen(next);
+      await setWindowFullscreen(next);
       fullscreenRef.current = next;
       setFullscreen(next);
-    } catch (reason) { setError(String(reason)); }
+    } catch (reason) { setError(fullscreenErrorText(reason)); }
     finally { fullscreenPending.current = false; }
   };
   useEffect(() => {
@@ -74,7 +75,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     let unlistenResize: (() => void) | undefined;
     void getCurrentWindow().onResized(() => {
       if (!fullscreenRef.current || fullscreenPending.current) return;
-      void getCurrentWindow().isFullscreen().then(value => {
+      void isWindowFullscreen().then(value => {
         if (alive && !value) { fullscreenRef.current = false; setFullscreen(false); }
       }).catch(() => {});
     }).then(stop => { if (alive) unlistenResize = stop; else stop(); }).catch(() => {});
@@ -88,7 +89,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
       alive = false;
       unlistenResize?.();
       window.removeEventListener("keydown", escape);
-      if (fullscreenRef.current) void getCurrentWindow().setFullscreen(false).catch(() => {});
+      if (fullscreenRef.current) void setWindowFullscreen(false).catch(() => {});
     };
   }, []);
   useEffect(() => {

@@ -1,6 +1,8 @@
 /* EQ / 播放控制 docked in the player bar, as one of the two faces to the right of the transport
-   (src/lib/playerBarFace.ts). A wide window: one row, knobs and the tempo slider, then the KEY
-   and BPM readouts; the waveform has the whole row below. A tall window: the readouts beneath. */
+   (src/lib/playerBarFace.ts). One row, knobs and the tempo slider, then the KEY and BPM readouts;
+   the waveform has the whole row below. A tall window (a phone held upright) draws the readouts
+   at the end of the title row instead (PlayerBar's kd-player-now-keys): on a row of their own
+   the key's steps sat on the waveform, and a tap meant for them sought the song. */
 .kd-app .kd-player { --kd-player-eq-w: clamp(236px, 19vw, 268px); }
 .kd-player-eq {
   position: relative;

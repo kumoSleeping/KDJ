@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { fullscreenErrorText, isWindowFullscreen, setWindowFullscreen } from "./windowFullscreen";
 import { useToastStore } from "../stores/toastStore";
 
 /** Native window fullscreen with a preview overlay; never substitute CSS-only expansion. */
@@ -15,21 +15,20 @@ export function usePreviewFullscreen() {
     if (current.active === next) return Promise.resolve(true);
     const operation = (async () => {
       try {
-        const window = getCurrentWindow();
         if (next) {
-          current.restore = await window.isFullscreen();
+          current.restore = await isWindowFullscreen();
           if (current.disposed) return false;
           // Cover the editor before the native transition; uncover only after exit.
           setFullscreen(true);
         }
-        await window.setFullscreen(next || current.restore);
+        await setWindowFullscreen(next || current.restore);
         current.active = next;
         if (!current.disposed) setFullscreen(next);
         return true;
       } catch (error) {
         if (!current.disposed) {
           setFullscreen(current.active);
-          useToastStore.getState().show(`无法切换全屏：${error instanceof Error ? error.message : String(error)}`);
+          useToastStore.getState().show(`无法切换全屏：${fullscreenErrorText(error)}`);
         }
         return false;
       }
@@ -47,7 +46,7 @@ export function usePreviewFullscreen() {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         if (!current.active || current.disposed || pending.current) return;
-        void getCurrentWindow().isFullscreen().then(nativeFullscreen => {
+        void isWindowFullscreen().then(nativeFullscreen => {
           if (!nativeFullscreen && current.active && !current.disposed && !pending.current) {
             current.active = false;
             setFullscreen(false);
@@ -73,8 +72,8 @@ export function usePreviewFullscreen() {
       window.removeEventListener("keydown", escape, true);
       // Also cover unmount while the native enter request is still in flight.
       void Promise.resolve(pending.current).then(async () => {
-        if (current.active) await getCurrentWindow().setFullscreen(current.restore);
-      }).catch(error => useToastStore.getState().show(`无法还原全屏：${String(error)}`));
+        if (current.active) await setWindowFullscreen(current.restore);
+      }).catch(error => useToastStore.getState().show(`无法还原全屏：${fullscreenErrorText(error)}`));
     };
   }, [applyFullscreen]);
 

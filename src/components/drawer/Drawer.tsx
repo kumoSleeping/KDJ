@@ -9,6 +9,7 @@ import { SONG_SWAP_IN_EASE, SONG_SWAP_OUT_EASE } from "../../lib/songSwapMotion"
 import { removeLocalStorage } from "../../lib/storageWrite";
 import { noteAction } from "../../lib/diagnostics";
 import { raiseSurface } from "../../lib/surfaceOrder";
+import { useSidePanels } from "../../lib/sidePanels";
 import { useWindowTaken } from "../../lib/windowTaken";
 import type { DrawerEntry, DrawerSpec } from "./drawerSchema";
 import "./Drawer.css";
@@ -449,6 +450,10 @@ export function DrawerHost({ spec, entries = [], hostRef, onResizeStart }: {
   // A panel that comes out is in front of the other floating surfaces.
   const frontKey = front?.key;
   useLayoutEffect(() => { if (frontKey !== undefined && !waiting) raiseSurface(sheets.current); }, [frontKey, waiting]);
+  // So does the open app asked for again: the floating picture's settings key is pressed on the
+  // picture, which that press has just brought in front of this panel.
+  const asked = useSidePanels(state => state.raised.id !== null && state.raised.id === panel?.id ? state.raised.token : 0);
+  useLayoutEffect(() => { if (asked && !waiting) raiseSurface(sheets.current); }, [asked, waiting]);
   const panels = out ? <div ref={sheets} className="kd-drawer-sheets"
     onPointerDownCapture={() => raiseSurface(sheets.current)}>
     {layers.map(layer => {

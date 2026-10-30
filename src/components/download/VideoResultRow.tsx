@@ -7,6 +7,7 @@ import {
   Link2,
   ListMinus,
 } from "lucide-react";
+import { startLongPress } from "../../lib/longPress";
 import { api, ApiError } from "../../lib/api";
 import { copyText } from "../../lib/copyText";
 import { copyShareContent, remoteArtwork } from "../../lib/shareClipboard";
@@ -256,7 +257,8 @@ export function VideoResultRow({
   const pointerDragCleanupRef = useRef<(() => void) | null>(null);
   const suppressClickRef = useRef(false);
 
-  useEffect(() => () => pointerDragCleanupRef.current?.(), []);
+  const pressRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => { pointerDragCleanupRef.current?.(); pressRef.current?.(); }, []);
 
   const effectiveHeight = settings?.video_max_height ?? 1080;
   const qualityLabel = `${effectiveHeight}P`;
@@ -475,6 +477,12 @@ export function VideoResultRow({
         }}
         onPointerDown={(event) => {
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+          if (event.pointerType !== "mouse") {
+            // A finger or a pen: held still, the same menu as the right click (lib/longPress.ts).
+            pressRef.current?.();
+            pressRef.current = startLongPress(event.nativeEvent, { open: (x, y) => setRowMenu({ x, y, pageIndex: 0, part: false }) });
+            return;
+          }
           if (selectionMode || event.metaKey || event.ctrlKey || event.shiftKey) return;
           bindPointerDrag(event);
         }}
@@ -657,6 +665,11 @@ export function VideoResultRow({
               }}
               onPointerDown={(event) => {
                 if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+                if (event.pointerType !== "mouse") {
+                  pressRef.current?.();
+                  pressRef.current = startLongPress(event.nativeEvent, { open: (x, y) => setRowMenu({ x, y, pageIndex, part: true }) });
+                  return;
+                }
                 if (selectionMode || event.metaKey || event.ctrlKey) return;
                 bindPointerDrag(event, pageIndex);
               }}
