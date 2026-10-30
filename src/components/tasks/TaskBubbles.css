@@ -22,6 +22,11 @@
   overflow: hidden;
   pointer-events: none;
 }
+/* A phone draws under its gesture bar (design.css, --kd-safe-bottom): with the bar away the
+   bottom stack stands clear of it instead of on the window's very edge. */
+.kd-app[data-mobile="true"] > .kd-task-host[data-place="bottom"] {
+  bottom: max(var(--kd-task-floor, 0px), var(--kd-safe-bottom, 0px));
+}
 /* The top host hangs under the search row, where the drawer's panels have their place: it
    clips at that row's bottom edge and ends at the right edge of the list's column
    (--kd-task-ceiling and --kd-task-ceiling-right, measured by the host when a bubble comes up
@@ -492,14 +497,14 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
    the same gap on its left and on its right. The bar is put away there unless the listener
    brought it back, so the playing song's bubble is the window's usual transport and reads as
    its bar. Regular and small bubbles keep their size and stack above it at the right. A phone
-   keeps the sizes above. */
-.kd-app[data-tall="true"]:not([data-mobile="true"]) .kd-task-slot[data-size="large"] {
+   is always tall and does the same once its bar is put away. */
+.kd-app[data-tall="true"] .kd-task-slot[data-size="large"] {
   left: var(--kd-task-gap);
   width: auto;
 }
 /* A bubble that spans the window and is kept up holds its strip, as the bar does: the page ends
    above it (--kd-info-lift, the height the kept stack reaches, set by the host) instead of
    running underneath. A bubble that leaves by itself still passes over the page. */
-.kd-app[data-tall="true"]:not([data-mobile="true"]) { padding-bottom: var(--kd-info-lift, 0px); }
+.kd-app[data-tall="true"] { padding-bottom: var(--kd-info-lift, 0px); }
 /* The drawer hangs in that shortened page already; it does not keep clear of the bubble twice. */
-.kd-app[data-tall="true"]:not([data-mobile="true"]) .kd-drawer-sheets { --kd-info-lift: 0px; }
+.kd-app[data-tall="true"] .kd-drawer-sheets { --kd-info-lift: 0px; }

@@ -116,7 +116,6 @@ import {
   playTrack,
 } from "../../lib/playTrack";
 import { getPlayingTrack, setPlayingTrack } from "../../lib/playingTrack";
-import { playerBarCollapseOffered } from "../../lib/playerBarAway";
 import { usePlayerShortcuts } from "../../lib/usePlayerShortcuts";
 import {
   ARROW_KEY_LIST_STEP_EVENT,
@@ -5084,8 +5083,8 @@ export function PlayerBar() {
         {lyricsMenu && !video && lyricsMenu.trackId === (displayTrack?.id ?? null) ? (
           <LyricsButtonMenu {...lyricsMenu} track={displayTrack ?? null} onClose={() => setLyricsMenu(null)} />
         ) : null}
-        {/* Offered where the playing song's bubble can take over: on the desktop, with a song. */}
-        {track && playerBarCollapseOffered() ? <BarCollapseKey /> : null}
+        {/* Offered where the playing song's bubble can take over: with a song. */}
+        {track ? <BarCollapseKey /> : null}
       </div>
 
       <div className="kd-player-scrub">
