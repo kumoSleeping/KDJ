@@ -19,7 +19,10 @@
   top: 0;
   right: 0;
   bottom: 0;
-  width: var(--kd-drawer-w, min(var(--kd-right, 25rem), 45%));
+  /* The dragged width, from a narrow panel up to its reach: past the list's column and over the
+     sidebar, to a strip short of the window's left edge (--kd-drawer-reach, measured by
+     DrawerHost; the column's own width until then). */
+  width: max(min(var(--kd-right, 25rem), var(--kd-drawer-reach, 100%)), min(16rem, var(--kd-drawer-reach, 100%)));
   pointer-events: none;
   container: kd-drawer / inline-size;
 }
@@ -243,6 +246,10 @@
   cursor: col-resize;
   pointer-events: auto;
   touch-action: none;
+}
+/* A finger needs more than a mouse to find the edge. */
+@media (pointer: coarse) {
+  .kd-drawer-resize { width: 12px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .kd-drawer, .kd-drawer[data-leaving],

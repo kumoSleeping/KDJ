@@ -27,6 +27,25 @@ const PENDING_HOLD_MS = 600;
 /** The key a dragged height used to be kept under. A height is the system's to decide: the
  *  panel's own extent follows what it holds, so a stored value is removed, not read. */
 const LEGACY_HEIGHT_KEY = "kd-drawer-height";
+/** How far short of the window's left edge the widest panel stops: it may pass over the
+ *  sidebar, but a strip of what lies beneath stays in sight, and its left edge (the handle that
+ *  narrows it again) is never at the window's edge. */
+const DRAWER_EDGE_ROOM = 20;
+
+/**
+ * The widest the drawer's host may be: from the right of the column it is mounted in to
+ * DRAWER_EDGE_ROOM short of the window's left edge (the left of the page under the title bar),
+ * less the panel's own gap inside the host. The host's CSS width is capped at this
+ * (`--kd-drawer-reach`) and a drag of its edge stops here, so a width remembered in a wider
+ * window simply comes in to it.
+ */
+export function drawerReach(host: HTMLElement): number {
+  const column = host.parentElement?.getBoundingClientRect();
+  if (!column) return 0;
+  const page = host.closest(".kd-stage")?.getBoundingClientRect().left ?? 0;
+  const gap = parseFloat(getComputedStyle(host).getPropertyValue("--kd-drawer-gap")) || 0;
+  return Math.max(0, Math.floor(column.right - page - Math.max(0, DRAWER_EDGE_ROOM - gap)));
+}
 const DrawerContext = createContext<string | null>(null);
 /** The id of the drawer a component is shown in, or null outside one. */
 export function useDrawer(): string | null { return useContext(DrawerContext); }
@@ -412,6 +431,19 @@ export function DrawerHost({ spec, entries = [], hostRef, onResizeStart }: {
     if (typeof hostRef === "function") hostRef(node);
     else if (hostRef) hostRef.current = node;
   };
+  // How wide the host may be (drawerReach): measured before the first paint and again whenever
+  // the window or the column changes size.
+  useLayoutEffect(() => {
+    const node = host.current;
+    if (!node) return;
+    const measure = () => node.style.setProperty("--kd-drawer-reach", `${drawerReach(node)}px`);
+    measure();
+    window.addEventListener("resize", measure);
+    if (typeof ResizeObserver === "undefined") return () => window.removeEventListener("resize", measure);
+    const resized = new ResizeObserver(measure);
+    if (node.parentElement) resized.observe(node.parentElement);
+    return () => { window.removeEventListener("resize", measure); resized.disconnect(); };
+  }, []);
   const panelIdPrefix = useId();
   // The width is the listener's; the height never is: each app's extent decides it. A height
   // dragged by an earlier build is dropped.

@@ -49,7 +49,7 @@ import { getPlayerSessionState, subscribePlayerSession } from "../../lib/playerS
 import { useDrawerOrder } from "../drawer/useDrawerOrder";
 import { releaseDrawerHolds, useHeldDrawer } from "../../lib/drawerHold";
 import { useDrawerApps } from "./drawerApps";
-import { DrawerHost } from "../drawer/Drawer";
+import { DrawerHost, drawerReach } from "../drawer/Drawer";
 import type { DrawerSpec } from "../drawer/drawerSchema";
 import { VisualizerPopup } from "../player/VisualizerPopup";
 import { useAppStore } from "../../stores/appStore";
@@ -1835,10 +1835,11 @@ export function Workspace() {
     const target = side === "left" ? (el.firstElementChild as HTMLElement) : drawerHostRef.current;
     if (!target) return;
     const startWidth = target.getBoundingClientRect().width;
-    const rightHostWidth = Math.max(0, (target.parentElement?.getBoundingClientRect().width ?? 0) - 1);
+    // The drawer may pass over the sidebar, up to a strip short of the window's left edge.
+    const rightReach = side === "right" ? drawerReach(target) : 0;
     const [min, max] = side === "left"
       ? LEFT_COLUMN_BOUNDS
-      : [Math.min(240, rightHostWidth), rightHostWidth] as const;
+      : [Math.min(240, rightReach), rightReach] as const;
     let treeExpanded = compactTreeExpanded;
     // 松手时和按下时比：只点了一下把手不算调整，不写。
     const sidebarBefore: SidebarState | null = side === "left"

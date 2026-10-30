@@ -744,10 +744,6 @@ textarea {
 }
 /* The top row on a wide window belongs entirely to aggregate search.
    In a tall window the search takes two rows and the head is both of them (see SearchBar.css). */
-.kd-table-wrap[data-drawer-head] {
-  /* The dragged width, from a narrow panel up to most of the list's column. */
-  --kd-drawer-w: max(min(var(--kd-right, 25rem), 88%), min(16rem, 100%));
-}
 .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top {
   box-sizing: border-box;
   min-height: var(--kd-drawer-head-h);
