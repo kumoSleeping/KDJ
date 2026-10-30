@@ -1,4 +1,4 @@
-import { mediaProductionAvailable } from "../lib/platformFeatures";
+import { visualizerExportAvailable } from "../lib/platformFeatures";
 import { create } from "zustand";
 import { captureDiagnostic } from "../lib/diagnostics";
 import { validateVisualizerProject, type VisualizerDraft } from "../lib/visualizerStudio";
@@ -9,6 +9,7 @@ import { useAppStore } from "./appStore";
 import { isEditorWindow, usesVisualizerWindow } from "../lib/windowRole";
 import { ensureFfmpegForExport } from "../lib/ffmpegRequired";
 import { requestVisualizerExports, type VisualizerExportCommand } from "../lib/kvjWindow";
+import { getBridge } from "../lib/bridge";
 
 interface State {
   tasks: VisualizerExportTask[];
@@ -80,8 +81,15 @@ async function pump(): Promise<void> {
           }
         });
         if (final.phase === "failed") captureDiagnostic("visualizer-export", "encoder", final.error, `width=${task.width} height=${task.height} fps=${task.fps}`);
-        update(task.id, { phase: final.phase, progress: final.progress, status: final.status,
-          error: final.error, outputPath: final.output_path || task.outputPath });
+        let outputPath = final.output_path || task.outputPath, error = final.error;
+        // A phone's download folder is the app's own: the video goes on to the gallery (Movies/KDJ).
+        const publish = getBridge().publishVideo;
+        if (final.phase === "done" && publish) {
+          update(task.id, { status: "正在存入相册" });
+          try { outputPath = (await publish({ path: outputPath, name: task.filename })).path; }
+          catch (failure) { error = `视频已导出到 ${outputPath}，但没能存入相册：${message(failure)}`; }
+        }
+        update(task.id, { phase: final.phase, progress: final.progress, status: final.status, error, outputPath });
       } catch (error) {
         const canceled = error instanceof DOMException && error.name === "AbortError";
         if (!canceled) captureDiagnostic("visualizer-export", "frame-producer", error, `width=${task.width} height=${task.height} fps=${task.fps}`);
@@ -100,7 +108,7 @@ async function pump(): Promise<void> {
 export const useVisualizerExportStore = create<State>((set, get) => ({
   tasks: [], error: "",
   initialize() {
-    if (!mediaProductionAvailable()) return Promise.resolve();
+    if (!visualizerExportAvailable()) return Promise.resolve();
     if (!initializing) initializing = (usesVisualizerWindow() ? fromOwner({ action: "initialize" }) : loadVisualizerExports().then(tasks => {
       // Never silently resume frame production after a WebView/app restart.
       set({ tasks: tasks.sort((a, b) => a.createdAt - b.createdAt).map(task => visualizerExportActive(task)
@@ -109,7 +117,7 @@ export const useVisualizerExportStore = create<State>((set, get) => ({
     return initializing;
   },
   async enqueue(draft) {
-    if (!mediaProductionAvailable()) throw new Error("移动版不提供视频导出");
+    if (!visualizerExportAvailable()) throw new Error("移动版不提供视频导出");
     if (usesVisualizerWindow()) {
       // The queue lives in the visualizer window. Hand it the picture exactly as it is on
       // screen here: drafts are stored per song in a database both windows share.

@@ -1,4 +1,4 @@
-import { mediaProductionAvailable } from "../../lib/platformFeatures";
+import { visualizerExportAvailable } from "../../lib/platformFeatures";
 import { startTransition, useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelStore";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
@@ -17,7 +17,7 @@ export const taskViews: { id: TaskPanelView; label: string; title?: string }[] =
   { id: "exports", label: "导出" },
   { id: "export-history", label: "成品", title: "导出历史" },
 ];
-export const shownTaskViews = () => mediaProductionAvailable() ? taskViews : taskViews.filter(item => item.id === "downloads" || item.id === "history");
+export const shownTaskViews = () => visualizerExportAvailable() ? taskViews : taskViews.filter(item => item.id === "downloads" || item.id === "history");
 
 /** Give the title and slide a painted frame before building the requested page. */
 function TaskPageBody({ view, position, onReady }: {
@@ -31,7 +31,7 @@ function TaskPageBody({ view, position, onReady }: {
     return () => cancelAnimationFrame(frame);
   }, []);
   useEffect(() => { if (ready) onReady(); }, [ready, onReady]);
-  const exportView = mediaProductionAvailable() && (view === "exports" || view === "export-history");
+  const exportView = visualizerExportAvailable() && (view === "exports" || view === "export-history");
   return <div className="kd-task-page" data-drawer-pending={!ready || undefined} aria-busy={!ready || undefined}>
     {ready && (exportView
       ? <ExportQueuePanel history={view === "export-history"} position={position} />
@@ -47,7 +47,7 @@ export function DownloadTaskPages() {
   });
   const visitedExports = useRef(false);
   const onReady = useCallback(() => {
-    if (!mediaProductionAvailable() || (view !== "exports" && view !== "export-history") || visitedExports.current) return;
+    if (!visualizerExportAvailable() || (view !== "exports" && view !== "export-history") || visitedExports.current) return;
     visitedExports.current = true;
     void useVisualizerExportStore.getState().initialize().catch(() => undefined);
     void useProjectExportStore.getState().initialize().catch(() => undefined);

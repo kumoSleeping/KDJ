@@ -17,10 +17,10 @@ export function studioWorkerCount(width: number, height: number, imagePixels: nu
 export const studioChunkFrames = (fps: number) => fps;
 
 /** H.264 High at the lowest level that holds the canvas at this frame rate (Table A-1). */
-export function studioAvcCodec(width: number, height: number, fps: number): string {
+export function studioAvcCodec(width: number, height: number, fps: number, profile: "high" | "main" | "baseline" = "high"): string {
   const blocks = Math.ceil(width / 16) * Math.ceil(height / 16), rate = blocks * fps;
   const level = blocks <= 8192 && rate <= 245760 ? "28" : blocks <= 8704 && rate <= 522240 ? "2a" : rate <= 589824 ? "32" : "33";
-  return `avc1.6400${level}`;
+  return `avc1.${{ high: "6400", main: "4d00", baseline: "4200" }[profile]}${level}`;
 }
 
 export type StudioQuality = "high" | "standard" | "low";

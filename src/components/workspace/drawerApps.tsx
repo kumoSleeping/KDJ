@@ -7,7 +7,7 @@ import { shownSettingsPages, useSettingsPage, type SettingsPage } from "../../li
 import { useSidePanels } from "../../lib/sidePanels";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { visualizerExportActive } from "../../lib/visualizerExportQueue";
-import { studioTabs, useStudioTab, type StudioTab } from "../../lib/visualizerStudioTabs";
+import { shownStudioTabs, useStudioTab, type StudioTab } from "../../lib/visualizerStudioTabs";
 import { aiOffered } from "../../stores/aiStore";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
@@ -29,7 +29,7 @@ import { TrackMetaEditorDrawer } from "../library/TrackMetaEditor";
 import { DrawerLyrics } from "../player/SidePanels";
 import { SongColorBackdrop } from "../player/SongColorBackdrop";
 import { requestPlayingLyrics } from "../player/lyricsEntry";
-import { mediaProductionAvailable } from "../../lib/platformFeatures";
+import { mediaProductionAvailable, visualizerExportAvailable } from "../../lib/platformFeatures";
 import { DownloadTaskPages, shownTaskViews } from "../player/TaskPanels";
 import { SettingsPanel } from "../settings/SettingsPanel";
 
@@ -106,7 +106,7 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
   });
   if (downloads) apps.push({
     id: "downloads",
-    title: mediaProductionAvailable() ? "下载与导出" : "下载",
+    title: visualizerExportAvailable() ? "下载与导出" : "下载",
     // Things are dropped on its blank space, so it keeps room even while it lists nothing.
     extent: "at-least-half",
     pages: shownTaskViews(),
@@ -125,11 +125,11 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
     body: <DrawerSettings />,
     close: () => useAppStore.getState().dismissOverlay(),
   });
-  if (mediaProductionAvailable() && visualizerTrack) apps.push({
+  if (visualizerTrack) apps.push({
     id: VISUALIZER_DOCK_APP,
     title: "可视化配置",
     extent: "fit",
-    pages: studioTabs,
+    pages: shownStudioTabs(),
     usePage: useStudioTabInView,
     onPage: id => useStudioTab.getState().setTab(id as StudioTab),
     body: <VisualizerDock />,
@@ -185,7 +185,7 @@ export function useDrawerEntries(): DrawerEntry[] {
     {
       id: "downloads",
       label: "下载",
-      title: mediaProductionAvailable() ? "下载与导出" : "下载",
+      title: visualizerExportAvailable() ? "下载与导出" : "下载",
       icon: <Download size={15} aria-hidden="true" />,
       count: running,
       open: () => useSidePanels.getState().setDownloads(true),

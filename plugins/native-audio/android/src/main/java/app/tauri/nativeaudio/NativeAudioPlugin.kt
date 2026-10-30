@@ -178,6 +178,12 @@ class OpenLocalPathArgs {
 }
 
 @InvokeArg
+class PublishVideoArgs {
+    var path: String? = null
+    var name: String? = null
+}
+
+@InvokeArg
 class YoutubeProofArgs {
     var operation: String = ""
     var javascript: String = ""
@@ -627,6 +633,29 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
         }.onFailure {
             invoke.reject(it.message ?: "savePngToGallery failed")
         }
+    }
+
+    /**
+     * 把导出的视频挪进系统相册（Movies/KDJ），见 [GalleryHelper.publishVideo]。
+     * 几百 MB 的拷贝不在主线程做。返回 content URI（uri）+ 用户可读路径（path）。
+     */
+    @Command
+    fun publishVideo(invoke: Invoke) {
+        val args = invoke.parseArgs(PublishVideoArgs::class.java)
+        val path = args.path?.trim().orEmpty()
+        if (path.isEmpty()) {
+            invoke.reject("path is required")
+            return
+        }
+        Thread {
+            runCatching {
+                GalleryHelper.publishVideo(activity, path, args.name?.trim().orEmpty())
+            }.onSuccess { (uri, displayPath) ->
+                invoke.resolve(JSObject().apply { put("uri", uri); put("path", displayPath) })
+            }.onFailure {
+                invoke.reject(it.message ?: "publishVideo failed")
+            }
+        }.start()
     }
 
     /** 用系统查看器打开本地文件或 content URI（登录二维码、曲库「显示所在位置」）。 */

@@ -15,8 +15,9 @@ export type StudioWorkerCommand =
   | { type: "context"; willReadFrequently: boolean }
   | { type: "time"; indices: number[] }
   | { type: "upload"; job: string; token: number; index: number }
-  /** Opens this renderer's hardware encoder and proves it on a short GOP. */
-  | { type: "encoder" }
+  /** Opens this renderer's hardware encoder and proves it on a short GOP. `anyEncoder`: where
+   * nothing else can encode (no FFmpeg), the WebView's software encoder and lower profiles do. */
+  | { type: "encoder"; anyEncoder?: boolean }
   /** As `upload`, for GOP `index` instead of frame `index`. */
   | { type: "encode"; job: string; token: number; index: number };
 export interface StudioWorkerRequest { id: number; command: StudioWorkerCommand }
@@ -55,16 +56,21 @@ function exclusive<T>(task: () => Promise<T>): Promise<T> {
 const frameCount = (s: PreparedStudio) => Math.ceil(studioDuration(s.timeline) * s.project.output.fps);
 
 /** One hardware encoder session for the whole export. Software encoders are left to
- * FFmpeg: x264 is both faster and better than what a WebView falls back to. */
-async function openEncoder(): Promise<void> {
+ * FFmpeg: x264 is both faster and better than what a WebView falls back to. Without FFmpeg
+ * (`anyEncoder`) the first encoder the WebView has is taken, High profile before Main and
+ * Baseline: some phones and emulators have only a software one, or no High profile. */
+async function openEncoder(anyEncoder = false): Promise<void> {
   if (!prepared) throw new Error("导出线程尚未准备画面");
   if (typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined") throw new Error("这个 WebView 没有 WebCodecs");
   const { width, height } = prepared.project.scene.canvas, fps = prepared.project.output.fps;
-  const config: VideoEncoderConfig = {
-    codec: studioAvcCodec(width, height, fps), width, height, framerate: fps, bitrate: studioVideoBitrate(width, height, fps, prepared.project.output.quality),
-    bitrateMode: "variable", latencyMode: "quality", hardwareAcceleration: "prefer-hardware", avc: { format: "annexb" },
-  };
-  if (!(await VideoEncoder.isConfigSupported(config)).supported) throw new Error("系统硬件编码器不支持这个画布");
+  const base = { width, height, framerate: fps, bitrate: studioVideoBitrate(width, height, fps, prepared.project.output.quality),
+    bitrateMode: "variable", latencyMode: "quality", avc: { format: "annexb" } } as const;
+  const candidates: VideoEncoderConfig[] = (anyEncoder ? ["prefer-hardware", "no-preference"] as const : ["prefer-hardware"] as const)
+    .flatMap(hardwareAcceleration => (anyEncoder ? ["high", "main", "baseline"] as const : ["high"] as const)
+      .map(profile => ({ ...base, codec: studioAvcCodec(width, height, fps, profile), hardwareAcceleration })));
+  let config: VideoEncoderConfig | undefined;
+  for (const candidate of candidates) if ((await VideoEncoder.isConfigSupported(candidate)).supported) { config = candidate; break; }
+  if (!config) throw new Error(anyEncoder ? `这台设备不能编码 ${width} × ${height} 的 H.264 视频，换一个较小的分辨率` : "系统硬件编码器不支持这个画布");
   const state: StudioEncoder = {
     gop: { parts: [], last: -1 },
     encoder: new VideoEncoder({
@@ -150,7 +156,7 @@ async function handle(command: StudioWorkerCommand): Promise<StudioWorkerResult 
     case "upload":
       return { status: await upload(command.job, command.token, command.index) };
     case "encoder": {
-      await openEncoder();
+      await openEncoder(command.anyEncoder);
       const parts = await exclusive(() => encodeGop(0, Math.min(4, frameCount(prepared!))));
       const parameters = h264ParameterSets(new Uint8Array(await new Blob(parts).arrayBuffer()));
       if (!parameters) throw new Error("硬件编码器没有输出 Annex B 关键帧");

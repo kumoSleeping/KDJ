@@ -1,4 +1,3 @@
-import { mediaProductionAvailable } from "./platformFeatures";
 import { create } from "zustand";
 import type { TrackSummary } from "../types";
 import { isImageTrack, isVideoTrack } from "./format";
@@ -16,5 +15,5 @@ export const useVisualizerPopup = create<{ open: boolean; track: TrackSummary | 
 
 /** Local audio only: videos have their own picture, streams and images have no analysis. */
 export function canVisualizeTrack<T extends TrackSummary>(track: T | null): track is T {
-  return mediaProductionAvailable() && !!track && track.id > 0 && !isVideoTrack(track.format) && !isImageTrack(track.format);
+  return !!track && track.id > 0 && !isVideoTrack(track.format) && !isImageTrack(track.format);
 }

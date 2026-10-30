@@ -1,4 +1,3 @@
-import { mediaProductionAvailable } from "../lib/platformFeatures";
 import { create } from "zustand";
 import { isEditorWindow } from "../lib/windowRole";
 import { showKvj } from "../lib/kvjWindow";
@@ -37,13 +36,11 @@ export const useVisualizerStudioStore = create<State>((set, get) => ({
   setSettingsTarget: settingsTarget => set({ settingsTarget }),
   // The floating picture keeps the picture; only its controls come up in the column.
   openInlineSettings: (track, options) => {
-    if (!mediaProductionAvailable()) return;
     set({ track: { ...track }, inlineSettings: true, editorIfNoWindow: options?.editorIfNoWindow ? track.id : null });
     useSidePanels.getState().raise(VISUALIZER_DOCK_APP);
   },
   setBeforeClose: beforeClose => set({ beforeClose }),
   open: track => {
-    if (!mediaProductionAvailable()) return;
     // A tool window has no right column: the main window hosts the configuration.
     if (isEditorWindow) { showKvj({ tab: "visualizer", track }); return; }
     set({ track: { ...track }, inlineSettings: false, editorIfNoWindow: null });

@@ -26,6 +26,7 @@ Default permissions for the plugin
 - `allow-dispose`
 - `allow-save-png-to-gallery`
 - `allow-open-local-path`
+- `allow-publish-video`
 - `allow-start-file-drag`
 - `allow-pick-library-folder`
 
@@ -320,6 +321,32 @@ Enables the play command without any pre-configured scope.
 <td>
 
 Denies the play command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:allow-publish-video`
+
+</td>
+<td>
+
+Enables the publish_video command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-publish-video`
+
+</td>
+<td>
+
+Denies the publish_video command without any pre-configured scope.
 
 </td>
 </tr>

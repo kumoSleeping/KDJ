@@ -19,6 +19,7 @@ import java.io.File
  */
 internal object GalleryHelper {
     private const val RELATIVE_DIR = "Pictures/KDJ"
+    private const val VIDEO_DIR = "Movies/KDJ"
 
     fun savePngDataUrl(activity: Activity, platform: String, label: String, image: String): Pair<String, String> {
         val png = decodePngDataUrl(image)
@@ -68,6 +69,63 @@ internal object GalleryHelper {
 
         // 给前端的 path：优先 content URI（打开时最稳），附带用户能认的目录说明。
         return uri.toString() to "/storage/emulated/0/$RELATIVE_DIR/$displayName"
+    }
+
+    /**
+     * 导出的视频从应用私有目录（Android/data/…，相册和文件管理器都看不见）挪进
+     * 系统相册 Movies/KDJ：MediaStore 写入、写完撤掉 IS_PENDING，成功后删掉私有那份。
+     * 同名时 MediaStore 自己改名，返回的是它最终用的名字。
+     * 返回 content URI + 用户可读路径。
+     */
+    fun publishVideo(activity: Activity, source: String, name: String): Pair<String, String> {
+        val file = File(source)
+        if (!file.isFile) throw IllegalStateException("成品不存在：$source")
+        val displayName = sanitizeFilename(name.ifBlank { file.name }).let { if (it.endsWith(".mp4", true)) it else "$it.mp4" }
+        val resolver = activity.contentResolver
+        val collection =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            } else {
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            }
+        val values = ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Video.Media.RELATIVE_PATH, VIDEO_DIR)
+                put(MediaStore.Video.Media.IS_PENDING, 1)
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "KDJ")
+                if (!dir.exists() && !dir.mkdirs()) {
+                    throw IllegalStateException("无法创建视频目录：${dir.absolutePath}")
+                }
+                var target = File(dir, displayName)
+                var n = 2
+                while (target.exists()) target = File(dir, displayName.removeSuffix(".mp4") + " ($n).mp4").also { n++ }
+                @Suppress("DEPRECATION")
+                put(MediaStore.Video.Media.DATA, target.absolutePath)
+            }
+        }
+        val uri = resolver.insert(collection, values)
+            ?: throw IllegalStateException("写入系统相册失败")
+        try {
+            resolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out, 1 shl 20) } }
+                ?: throw IllegalStateException("打开相册写入流失败")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
+            }
+        } catch (error: Exception) {
+            runCatching { resolver.delete(uri, null, null) }
+            throw error
+        }
+        val finalName = resolver.query(uri, arrayOf(MediaStore.Video.Media.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        } ?: displayName
+        file.delete()
+        @Suppress("DEPRECATION")
+        val root = Environment.getExternalStorageDirectory()?.absolutePath ?: "/storage/emulated/0"
+        return uri.toString() to "$root/$VIDEO_DIR/$finalName"
     }
 
     fun openLocalPath(activity: Activity, path: String) {

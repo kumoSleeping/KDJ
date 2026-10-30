@@ -122,7 +122,7 @@ import {
 } from "../../lib/tableColumnPrefs";
 import { ContextMenu, InlineNotice } from "../common";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
-import { mediaProductionAvailable } from "../../lib/platformFeatures";
+import { mediaProductionAvailable, visualizerExportAvailable } from "../../lib/platformFeatures";
 import { canVisualizeTrack, useVisualizerPopup } from "../../lib/visualizerPopup";
 import { exportVisualizerTracks, reportVisualizerExportError } from "../../lib/visualizerExportActions";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
@@ -2785,19 +2785,19 @@ export const TrackTable = memo(function TrackTable({
               {isProjectTrack(rowMenu.track.format) ? "编辑工程" : isVideoTrack(rowMenu.track.format) ? "剪辑这个视频" : "用这首歌做 VJ"}
             </button>
           )}
-          {mediaProductionAvailable() && <><button type="button" disabled={menuIds.length !== 1 || !canVisualizeTrack(rowMenu.track)} onClick={event => {
+          {visualizerExportAvailable() && <button type="button" disabled={menuIds.length !== 1 || !canVisualizeTrack(rowMenu.track)} onClick={event => {
             const track = rowMenu.track;
             const from = event.currentTarget.getBoundingClientRect();
             setRowMenu(null);
             void exportVisualizerTracks([track], from).catch(reportVisualizerExportError);
-          }}><Download size={12} />导出可视化</button>
+          }}><Download size={12} />导出可视化</button>}
           <button type="button" disabled={menuIds.length !== 1 || isImageTrack(rowMenu.track.format)} onClick={() => {
             const track = rowMenu.track;
             setRowMenu(null);
             if (isVideoTrack(track.format)) { useVisualizerStudioStore.getState().open(track); return; }
             useVisualizerPopup.getState().openTrack(track);
             useVisualizerStudioStore.getState().openInlineSettings(track, { editorIfNoWindow: true });
-          }}><BarChart3 size={12} />展开可视化</button></>}
+          }}><BarChart3 size={12} />展开可视化</button>
           {menuIds.length === 1 && (
             <button
               type="button"
