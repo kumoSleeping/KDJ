@@ -149,7 +149,26 @@ fn moov(tracks: &[OutTrack], layout: &[Chunk], offsets: &[u64], large: bool) -> 
         let own: Vec<(usize, &Chunk)> = layout.iter().enumerate().filter(|(_, c)| c.track == t).collect();
         body.extend(trak(t as u32 + 1, track, &own, offsets, large)?);
     }
+    body.extend(udta());
     Ok(mp4_box(b"moov", &body))
+}
+
+/// An iTunes metadata list naming the tool, as FFmpeg writes one. Tag writers then edit a
+/// list that exists: lofty adds `udta` to a `moov` without one but leaves the chunk offsets
+/// pointing where the media used to be.
+fn udta() -> Vec<u8> {
+    let mut hdlr = BoxBuf::default();
+    hdlr.u32(0);
+    hdlr.bytes(b"mdirappl");
+    hdlr.bytes(&[0; 9]);
+    let mut data = BoxBuf::default();
+    data.u32(1);
+    data.u32(0);
+    data.bytes(b"KDJ");
+    let ilst = mp4_box(b"ilst", &mp4_box(b"\xa9too", &mp4_box(b"data", &data.0)));
+    let mut meta = full_box(b"hdlr", 0, 0, &hdlr.0);
+    meta.extend(ilst);
+    mp4_box(b"udta", &full_box(b"meta", 0, 0, &meta))
 }
 
 fn trak(id: u32, track: &OutTrack, own: &[(usize, &Chunk)], offsets: &[u64], large: bool) -> Result<Vec<u8>> {
