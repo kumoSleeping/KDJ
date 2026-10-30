@@ -39,7 +39,7 @@ Windows 装用户级 `kdj.cmd` 并把它的目录加进用户 PATH。KDJ 更新�
 | `kdj library list [--q] [--key 8A] [--bpm 124..130] [--energy N] [--folder DIR] [--limit 50] [--offset 0]` | 查曲库，不触发分析 | `items[]{id,title,artist,duration,bpm,key,energy,rating,path,folder,analyzed}`、`total` |
 | `kdj library get --id 1,2 \| --path P \| --q TEXT [--beats]` | 曲目详情；缺分析时当场补齐（可能几十秒） | 单首为对象，多首为 `items[]`：上表字段加 `album,music_key,comment,tags,cue_points,source?{platform,key},grid{bpm,confidence,downbeat_confidence,downbeats[],segments[]{start,end,bpm},beats?[]}` |
 | `kdj library add <DIR>` | 和「添加文件夹」一样：导入其中的歌并登记为曲库根目录 | 导入结果 |
-| `kdj visualizer render <ID> --out <MP4> [--width W --height H]` | 用歌曲内嵌封面和可视化的默认样式，渲染整首歌的可视化视频（30 fps；偶数宽高，320×180–2560×1440，默认 1920×1080）。由 KDJ 的窗口用系统编码器渲染，后台运行时隐藏的主窗口也能接；不覆盖已有文件 | `path`、`duration`、`width`、`height`、`fps` |
+| `kdj visualizer render <ID> --out <MP4> [--width W --height H]` | 用歌曲内嵌封面和可视化的默认样式，渲染整首歌的可视化视频（30 fps；偶数宽高，320×180–2560×1440，默认 1920×1080）。由 KDJ 的窗口用系统的视频编码器（WebCodecs）渲染，后台运行时隐藏的主窗口也能接，30 秒内没有窗口接手就失败；系统没有可用的视频编码器（多数 Linux、macOS 10.15）时失败并说明原因；没有系统 AAC 编码器（Linux）时只能渲染原曲是 AAC 的歌；不覆盖已有文件 | `path`、`duration`、`width`、`height`、`fps` |
 
 - 截图只能核对画面内容，判断不了音画是否同步。YouTube 在线视频要先 `download` 才能 `peek`（它的流要界面里的 WebView 准备）。
 - 不提供播放控制、队列、下载管理、曲库打分和标签、歌词这类命令：这些由用户在 KDJ 里操作。

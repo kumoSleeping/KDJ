@@ -6,6 +6,7 @@ import { createVisualizerProject, loadVisualizerDraft, syncVisualizerImages, stu
 import { applyVisualizerPreferences, loadVisualizerPreferences } from "./visualizerStudioPreferences";
 import { tossToDownloads, type TossRequest } from "./downloadToss";
 import { useVisualizerExportStore } from "../stores/visualizerExportStore";
+import { checkVisualizerExportSupport } from "./visualizerExportSupport";
 
 const editors = new Map<number, () => VisualizerDraft | null>();
 
@@ -23,6 +24,8 @@ export function reportVisualizerExportError(error: unknown): void {
 export async function exportVisualizerTracks(tracks: TrackSummary[], from?: TossRequest["from"]): Promise<void> {
   if (!tracks.length) return;
   if (tracks.some(track => !canVisualizeTrack(track))) throw new Error("仅支持本地音频的可视化导出");
+  const blocked = await checkVisualizerExportSupport();
+  if (blocked) throw new Error(blocked);
   const toss = tossToDownloads({ to: "exports", from, title: tracks[0].title, count: tracks.length });
   try {
     for (const track of tracks) {

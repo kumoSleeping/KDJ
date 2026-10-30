@@ -411,10 +411,7 @@ pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) ->
         control: control.clone(),
         media: media.clone(),
     };
-    // The visualizer (analysis, export) is on every platform. On the desktop its FFmpeg runs are
-    // written down, and those an earlier run left are stopped first.
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    compositions::running::track(state.config.data_dir.join("cache").join("renders"));
+    // The visualizer (analysis, export) is on every platform.
     let router = routes::router(ctx).merge(compositions::audio_visualizer::studio::router());
     let router = router.merge(themes::router())
         .merge(diagnostics::router())

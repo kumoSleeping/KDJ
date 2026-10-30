@@ -82,8 +82,7 @@ Windows 真机、Tauri 原生 WebView 内全流程、完整桌面安装包构建
 - `src/lib/visualizerStudioRenderer.ts`：共享画面绘制。
 - `src/stores/visualizerStudioStore.ts`：固定歌曲与面板生命周期。
 - `crates/kdj-server/src/compositions/audio_visualizer/studio.rs`：分析、任务、帧协议与原生编码接入。
-- `tests/visualizerStudio.test.ts`、`tests/visualizerStudio.browser.tsx`、`scripts/test-visualizer-studio.mjs`：单元与真实端到端检查。
-- `crates/kdj-server/examples/visualizer_studio_acceptance.rs`：隔离验收服务。
+- `tests/visualizerStudio.test.ts`：单元检查。（基于 FFmpeg 的端到端验收脚本和隔离验收服务随 FFmpeg 一起移除。）
 
 已有共享文件只作接入修改：`src/App.tsx`、`src/components/library/TrackTable.tsx`、`src/lib/api.ts`、Rust 服务路由和可视化模块声明。旧音频分析和旧导出测试保留。
 

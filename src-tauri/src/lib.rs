@@ -76,8 +76,6 @@ impl ServerTask {
         {
             task.abort();
         }
-        // Aborting leaves the renders' own tasks, and the FFmpeg each runs, to outlive the app.
-        kdj_server::compositions::running::stop_all();
     }
 }
 

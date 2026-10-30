@@ -63,7 +63,7 @@ KDJ packs cross-platform search, download, local library management, and music a
   - A moving picture for any local song: cover, title and artist, spectrum and waveform
   - Previewed live in a floating window you can move and resize, with an export key at its bottom right
   - A configuration drawer with Scene, Pictures, Text and Output pages
-  - Right-click "export visualizer" or drag local songs into the export queue; finished videos appear under Finished (requires [FFmpeg](https://ffmpeg.org/download.html))
+  - Right-click "export visualizer" or drag local songs into the export queue; finished videos appear under Finished. Exports use the system's own video encoder; where there is none (most of Linux, macOS 10.15) the export keys are greyed with the reason and the preview still works
 - Playback
   - One playback flow for local and online songs, with an optional auto-advance
   - A standard player and a mini player that docks at a corner of the desktop above other windows

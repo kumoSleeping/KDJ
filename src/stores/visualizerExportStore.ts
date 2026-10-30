@@ -6,8 +6,9 @@ import { deleteVisualizerExport, loadVisualizerExports, loadVisualizerExportSnap
   visualizerExportActive, visualizerExportStartable, type VisualizerExportTask } from "../lib/visualizerExportQueue";
 import { waitForSettingsWrites } from "../lib/settingsWriteBarrier";
 import { useAppStore } from "./appStore";
-import { isEditorWindow, usesVisualizerWindow } from "../lib/windowRole";
-import { ensureFfmpegForExport } from "../lib/ffmpegRequired";
+import { usesVisualizerWindow } from "../lib/windowRole";
+import { checkVisualizerExportSupport } from "../lib/visualizerExportSupport";
+import { showTask } from "../components/tasks/taskBubbleStore";
 import { requestVisualizerExports, type VisualizerExportCommand } from "../lib/kvjWindow";
 import { getBridge } from "../lib/bridge";
 
@@ -159,9 +160,11 @@ export const useVisualizerExportStore = create<State>((set, get) => ({
     } finally { reservedPaths.delete(task.outputPath.toLowerCase()); }
   },
   start(id) {
-    // The window the user pressed in answers a missing FFmpeg (the render window has no settings).
-    if (!isEditorWindow) { void ensureFfmpegForExport().then(ready => { if (ready) startTasks(id); }).catch(report); return; }
-    startTasks(id);
+    // A system without a video encoder in its WebView cannot export: say why, start nothing.
+    void checkVisualizerExportSupport().then(blocked => {
+      if (!blocked) { startTasks(id); return; }
+      showTask({ id: "visualizer-export-blocked", kind: "export", tone: "error", title: "无法导出可视化", detail: blocked });
+    }).catch(report);
   },
   async cancel(id) {
     if (usesVisualizerWindow()) { await fromOwner({ action: "cancel", id }); return; }

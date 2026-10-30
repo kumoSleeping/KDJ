@@ -122,6 +122,7 @@ import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
 import { visualizerExportAvailable } from "../../lib/platformFeatures";
 import { canVisualizeTrack, useVisualizerPopup } from "../../lib/visualizerPopup";
 import { exportVisualizerTracks, reportVisualizerExportError } from "../../lib/visualizerExportActions";
+import { useVisualizerExportBlocked } from "../../lib/visualizerExportSupport";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { dragPreviewFromBlob, vinylDragPreview } from "../../lib/dragPreview";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
@@ -1100,6 +1101,8 @@ export const TrackTable = memo(function TrackTable({
   const backendPlatform = useAppStore((state) => state.health?.platform ?? "");
   const trashSupported = backendPlatform !== "android" && backendPlatform !== "ios";
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number; track: TrackSummary } | null>(null);
+  // 导出可视化 is greyed with the reason where this system cannot encode the video.
+  const visualizerExportBlocked = useVisualizerExportBlocked();
   const [menuShareResolution, setMenuShareResolution] = useState<{
     cacheKey: string;
     link: string | null;
@@ -2733,7 +2736,8 @@ export const TrackTable = memo(function TrackTable({
               编辑 Meta
             </button>
           )}
-          {visualizerExportAvailable() && <button type="button" disabled={menuIds.length !== 1 || !canVisualizeTrack(rowMenu.track)} onClick={event => {
+          {visualizerExportAvailable() && <button type="button" title={visualizerExportBlocked ?? undefined}
+            disabled={menuIds.length !== 1 || !canVisualizeTrack(rowMenu.track) || !!visualizerExportBlocked} onClick={event => {
             const track = rowMenu.track;
             const from = event.currentTarget.getBoundingClientRect();
             setRowMenu(null);

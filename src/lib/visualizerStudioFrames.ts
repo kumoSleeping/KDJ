@@ -6,7 +6,7 @@ const WORKER_MEMORY = 768 * 1024 * 1024;
 
 /** Each worker holds its own layers (about five frames' worth), the frame being drawn
  * and one uploading frame with its body copy, its decoded images until prepared, and
- * its parsed feature timeline. Leave two cores for FFmpeg and the editor. */
+ * its parsed feature timeline. Leave two cores for the editor and the server's muxing. */
 export function studioWorkerCount(width: number, height: number, imagePixels: number, timelineValues: number, cores: number): number {
   const perWorker = width * height * 4 * 10 + imagePixels * 4 + timelineValues * 16;
   return Math.max(1, Math.min(MAX_WORKERS, cores - 2, Math.floor(WORKER_MEMORY / perWorker)));

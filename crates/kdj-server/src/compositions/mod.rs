@@ -1,7 +1,4 @@
-//! Local media rendering: the audio visualizer export, over shared FFmpeg probing and encoder
-//! selection.
-mod acceleration;
-mod frame_pipe;
-pub mod running;
+//! Local media rendering: the song visualizer's export (encoded by the window, put into an MP4
+//! by kdj-media). `media` is what is left of the FFmpeg probing the CLI's peek still uses.
 pub mod audio_visualizer;
 pub(crate) mod media;

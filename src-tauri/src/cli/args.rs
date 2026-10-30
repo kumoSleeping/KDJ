@@ -109,7 +109,7 @@ pub enum Commands {
 
 #[derive(Debug, Subcommand)]
 pub enum VisualizerCmd {
-    /// 用歌曲内嵌封面和可视化的默认样式，给曲库里的一首歌渲染整首的可视化 MP4（30 fps）；由 KDJ 的窗口渲染（后台运行时窗口隐藏着也行），不覆盖已有文件，全部结束才返回
+    /// 用歌曲内嵌封面和可视化的默认样式，给曲库里的一首歌渲染整首的可视化 MP4（30 fps）；由 KDJ 的窗口用系统的视频编码器渲染（后台运行时隐藏的主窗口也行，30 秒内没有窗口接手就失败）；系统没有可用视频编码器（多数 Linux、macOS 10.15）时失败并说明原因；不覆盖已有文件，全部结束才返回
     #[command(after_help = AFTER_HELP)]
     Render {
         /// 曲库 id（library list / get 的 id）

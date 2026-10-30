@@ -5,6 +5,7 @@ import { useLibraryStore } from "../../stores/libraryStore";
 import { Trash2 } from "lucide-react";
 import { visualizerExportActive, visualizerExportStartable } from "../../lib/visualizerExportQueue";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
+import { useVisualizerExportBlocked } from "../../lib/visualizerExportSupport";
 import { Button, InlineNotice } from "../common";
 import { QueueFrame, QueueOverview } from "../queue/QueuePrimitives";
 import { QueueTaskList, type QueueListPosition } from "../queue/QueueTaskList";
@@ -31,7 +32,8 @@ export function ExportQueuePanel({ history = false, position }: { history?: bool
     { count: failedCount, label: "失败", tone: "failed" },
   ].filter(fact => fact.count > 0);
   const finishedCount = history ? visible.length : 0;
-  const canStart = !clearing && !canceling && visible.some(visualizerExportStartable);
+  const blocked = useVisualizerExportBlocked();
+  const canStart = !clearing && !canceling && !blocked && visible.some(visualizerExportStartable);
   const canCancel = !clearing && !canceling && visible.some(visualizerExportActive);
   const clearButton = <Button variant="ghost" size="sm" disabled={clearing || canceling || !visible.length}
     title="停止并清除当前列表全部任务，保留导出文件" onClick={() => {
@@ -52,7 +54,7 @@ export function ExportQueuePanel({ history = false, position }: { history?: bool
       void useLibraryStore.getState().resolveSummaries(ids).then(tracks => exportVisualizerTracks(tracks, from)).catch(reportVisualizerExportError);
     }}>
     {!history && <section className="kd-download-prefs" aria-label="导出队列概览"><QueueOverview facts={facts} total={visible.length} canStart={canStart}
-      extraActions={clearButton} startTitle="开始待导出任务并重试失败任务" onStart={() => useVisualizerExportStore.getState().start()}
+      extraActions={clearButton} startTitle={blocked ?? "开始待导出任务并重试失败任务"} onStart={() => useVisualizerExportStore.getState().start()}
       canSecondary={canCancel} secondaryKind="cancel" secondaryLabel={canceling ? "正在取消" : "取消"}
       secondaryTitle="取消全部未完成的导出" onSecondary={() => {
         setCanceling(true);

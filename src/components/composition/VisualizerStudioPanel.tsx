@@ -1,3 +1,4 @@
+import { useVisualizerExportBlocked } from "../../lib/visualizerExportSupport";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type ReactNode, type RefObject } from "react";
 import { X, PictureInPicture2, Undo2, Redo2, ImagePlus, ListPlus, RotateCcw, Captions, LoaderCircle, SlidersHorizontal } from "lucide-react";
 import { createPortal } from "react-dom";
@@ -105,6 +106,8 @@ export default function VisualizerStudioPanel({ onClose, inlineTrack, track: pin
   return track ? <Studio key={track.id} track={track} inline={!!inlineTrack} showDetails={showDetails} popup={popup} onClose={onClose} onContentStateChange={onContentStateChange} /> : null;
 }
 function Studio({ track, inline, showDetails, popup, onClose, onContentStateChange }: { track: TrackSummary; inline: boolean; showDetails: boolean; popup: boolean; onClose?: () => void; onContentStateChange?: (state: ContentState) => void }) {
+  // Greyed with the reason where this system cannot encode the video (visualizerExportSupport.ts).
+  const exportBlocked = useVisualizerExportBlocked();
   const dirty = useRef(false);
   const settingsOpen = useVisualizerStudioStore(state => inline && state.inlineSettings && state.track?.id === track.id);
   const settingsTarget = useVisualizerStudioStore(state => settingsOpen ? state.settingsTarget : null);
@@ -576,7 +579,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     <button type="button" disabled={!p || busy} onClick={refreshAutomaticConfiguration} aria-label="刷新自动配置"
       title="恢复默认布局、字号、特效和歌曲信息；保留图片、歌词与输出设置，可撤销"><RotateCcw size={14} /></button>
     <span className="kd-editor-spacer" />
-    {exportable && <button type="button" className="kd-viz-export" title="导出可视化" aria-label="导出可视化" disabled={!prepared || analyzing || busy} onClick={event => void enqueueExport(event.currentTarget)}><ListPlus size={14} /><span>{busy ? "加入中…" : "导出"}</span></button>}
+    {exportable && <button type="button" className="kd-viz-export" title={exportBlocked ?? "导出可视化"} aria-label="导出可视化" disabled={!prepared || analyzing || busy || !!exportBlocked} onClick={event => void enqueueExport(event.currentTarget)}><ListPlus size={14} /><span>{busy ? "加入中…" : "导出"}</span></button>}
   </div>;
   const noticeRow = notice && <div className="kd-viz-notice" role="alert">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>;
   const pickImage = (slot: number) => { imageSlot.current = slot; imageInput.current?.click(); };
@@ -724,8 +727,8 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
               onClick={event => { event.stopPropagation(); togglePreviewLyrics(); }}>
               {loadingLyrics ? <LoaderCircle size={13} className="kd-spin" /> : <Captions size={13} />}
             </button>}
-            {exportable && inline && !expanded && <button type="button" title={busy ? "正在加入导出队列…" : "导出可视化"} aria-label="导出可视化"
-              aria-busy={busy} disabled={!prepared || analyzing || busy}
+            {exportable && inline && !expanded && <button type="button" title={exportBlocked ?? (busy ? "正在加入导出队列…" : "导出可视化")} aria-label="导出可视化"
+              aria-busy={busy} disabled={!prepared || analyzing || busy || !!exportBlocked}
               onClick={event => { event.stopPropagation(); void enqueueExport(event.currentTarget); }}>
               {busy ? <LoaderCircle size={13} className="kd-spin" /> : <ListPlus size={13} />}
             </button>}

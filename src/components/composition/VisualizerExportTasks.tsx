@@ -4,6 +4,7 @@ import { folderName, formatFrameRate, formatPercent } from "../../lib/format";
 import { visualizerExportActive, visualizerExportStartable, type VisualizerExportTask } from "../../lib/visualizerExportQueue";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import { useVisualizerExportCovers } from "../../lib/useTaskCovers";
+import { useVisualizerExportBlocked } from "../../lib/visualizerExportSupport";
 import { Button } from "../common";
 import { TaskCover } from "../common/TaskCover";
 import { QueueEntry } from "../queue/QueuePrimitives";
@@ -31,6 +32,7 @@ export function VisualizerExportTasks({ heading = true, firstOrder = 1, tasks: v
 /** One row can also be mounted by the shared, windowed export list. */
 export function VisualizerExportRow({ task, order }: { task: VisualizerExportTask; order: number }) {
   const active = visualizerExportActive(task);
+  const blocked = useVisualizerExportBlocked();
   const running = active && task.phase !== "queued";
   const directory = task.outputPath.replace(/[\\/][^\\/]*$/, "");
   return <QueueEntry className="kd-export-task" data-task-id={task.id} order={String(order)} title={task.name} subtitle="可视化"
@@ -43,6 +45,7 @@ export function VisualizerExportRow({ task, order }: { task: VisualizerExportTas
     </>}
     actions={<>
       {visualizerExportStartable(task) && <Button variant="primary" size="sm" aria-label={`导出可视化 ${task.name}`}
+        disabled={!!blocked} title={blocked ?? undefined}
         onClick={() => useVisualizerExportStore.getState().start(task.id)}>
         {task.phase === "failed" ? <RotateCcw size={11} /> : <Download size={11} />}{task.phase === "failed" ? "重试" : "导出"}
       </Button>}
