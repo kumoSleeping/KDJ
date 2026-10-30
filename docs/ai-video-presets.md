@@ -50,9 +50,9 @@ remix 要问是否按 remix 的结构和 drop 重剪、要不要更强的效果�
   按 pi 的模型表，deepseek-flash 收图片，deepseek-v4-pro 不收。
 - **对齐的空档**（`kdj_align`）：每套方案多一个 `gaps`（参考曲里没有画面的段，start / end / length，0.5 秒以下的缝不算）。
 - **导出**（`kdj_project_export`）：把 .kdjv 渲染后复制成曲库文件夹里的一个 MP4，不覆盖。
-- **可视化**（`kdj_visualizer_render` → `kdj visualizer render` → `POST /api/visualizer/render`）：服务端的导出器用歌曲内嵌封面和默认场景
-  出整首的 MP4（30 fps，偶数宽高，320×180–2560×1440，仅 macOS/Windows）。它是可视化的基础样式，不是用户在编辑器里调过的样子：
-  编辑器的场景存在窗口的 IndexedDB / localStorage 里，服务端读不到。
+- **可视化**（`kdj_visualizer_render` → `kdj visualizer render` → `POST /api/visualizer/render`）：打开着的 KDJ 窗口用歌曲内嵌封面和编辑器的默认工程
+  出整首的 MP4（30 fps，偶数宽高，320×180–2560×1440），走编辑器自己的导出路径，不需要 FFmpeg；没有窗口接手时服务端用 FFmpeg 画基础样式。
+  都不是用户在编辑器里调过的样子：编辑器的场景存在窗口的 IndexedDB / localStorage 里，按曲目保存，渲染时不读。
 - **报告**：做完用 tell_user（不自动消失）；AI 抽屉的「任务」页把消息全文写在步骤下面。
 - **读网页**：web-search.json 的拒绝列表去掉 `::1`（pi-web-access 自己会拒绝回环和内网地址）。
 - **YouTube**：已登录、视频可播却没有 HLS 清单的观看页，隔 0.8 秒、2 秒再要两次（yt-dlp #17143 记录过这种时有时无）。
