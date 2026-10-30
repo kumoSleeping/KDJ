@@ -17,11 +17,19 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../../lib/api";
 import { CodecClip } from "../../lib/codecClip";
 import { MEDIA_SYNC_EVENT, type MediaSyncDetail } from "../../lib/mediaSync";
+import { SEEK_EVENT, type SeekDetail } from "../library/Waveform";
 import { clipAlpha, clipBox, heldClips, preparedClips, sourceTime, type LiveClip } from "../../lib/kdjvLive";
 import { projectTime, type Heard, type LiveTransport } from "./KdjvLivePicture";
 import type { KdjvLive } from "../../types";
 import type { VideoSample } from "mediabunny";
 
+/**
+ * After a jump the picture and the bar stay on the spot jumped to until the player's clock is
+ * near it, at most this long: while the decks swap, the clock can read the new deck at 0 for a
+ * moment, which threw the window's bar back to the start and forth again.
+ */
+const SEEK_HOLD_MS = 1_500;
+const SEEK_NEAR_SEC = 0.5;
 /** How long the picture already drawn stays while a clip jumped into has no frame yet. */
 const KEEP_PICTURE_MS = 500;
 
@@ -97,13 +105,32 @@ export function KdjvCodecPicture({ trackId, project, onTransport, sourceUrl }: {
       heard = { position: detail.position ?? heard?.position ?? 0, at: performance.now(), playing, rate: detail.rate ?? 1 };
     };
     window.addEventListener(MEDIA_SYNC_EVENT, onSync);
+    // Where a jump is going: the waveform's and the windows' seeks, and the library panel's own.
+    let hold: { position: number; until: number } | null = null;
+    const holdAt = (position: number | undefined) => {
+      if (typeof position === "number" && Number.isFinite(position)) hold = { position, until: performance.now() + SEEK_HOLD_MS };
+    };
+    const onSeek = (event: Event) => {
+      const detail = (event as CustomEvent<SeekDetail>).detail;
+      if (detail?.trackId === trackId && !detail.preview && !detail.scrubbing) holdAt(detail.position);
+    };
+    const onOwnSeek = (event: Event) => {
+      const detail = (event as CustomEvent<MediaSyncDetail>).detail;
+      if (detail.owner === "local-video" && detail.action === "seek" && detail.trackId === trackId) holdAt(detail.position);
+    };
+    window.addEventListener(SEEK_EVENT, onSeek);
+    window.addEventListener(MEDIA_SYNC_EVENT, onOwnSeek);
     // Drawn bottom first: the last track, and within a track the earlier clip under the later.
     const order = (a: number, b: number) =>
       (project.clips[b].track - project.clips[a].track) || (a - b);
     let frame = 0, lastReport = -Infinity, drawn = "", waitingSince = 0;
     const tick = (now: number) => {
       frame = requestAnimationFrame(tick);
-      const t = projectTime(trackId, heard, known);
+      let t = projectTime(trackId, heard, known);
+      if (hold) {
+        if (now > hold.until || Math.abs(t.position - hold.position) < SEEK_NEAR_SEC) hold = null;
+        else t = { ...t, position: hold.position };
+      }
       const node = canvas.current;
       const ctx = node?.getContext("2d");
 
@@ -202,6 +229,8 @@ export function KdjvCodecPicture({ trackId, project, onTransport, sourceUrl }: {
     return () => {
       cancelAnimationFrame(frame);
       window.removeEventListener(MEDIA_SYNC_EVENT, onSync);
+      window.removeEventListener(SEEK_EVENT, onSeek);
+      window.removeEventListener(MEDIA_SYNC_EVENT, onOwnSeek);
     };
   }, [trackId, project, instance]);
 

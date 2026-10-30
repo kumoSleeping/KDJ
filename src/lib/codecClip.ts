@@ -131,7 +131,8 @@ export class CodecClip {
     }
     if (this.queue.length < AHEAD) this.wakeRun();
     const late = this.current ? t - endOf(this.current) : 0;
-    if (late > LATE_SEC && performance.now() - this.lateAt > LATE_REPORT_MS) {
+    // A jump is not lateness: the frame shown is the old one until the new decode brings its own.
+    if (!why && this.currentRun === this.run?.token && late > LATE_SEC && performance.now() - this.lateAt > LATE_REPORT_MS) {
       this.lateAt = performance.now();
       tracePlayback("codec-late", { clip: this.label, ms: Math.round(late * 1000) });
     }
