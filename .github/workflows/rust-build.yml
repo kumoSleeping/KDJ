@@ -449,6 +449,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # 调度 README 体积同步：release.yml 用 GITHUB_TOKEN 调度的这次运行不会产生 workflow_run。
+      actions: write
     steps:
       - name: 下载已有平台产物
         id: download
@@ -574,3 +576,7 @@ jobs:
           # `-rc` 是版本字符串的一部分，但本项目仍把这类推送作为正式全量更新。
           gh release edit "$TAG" --repo "$REPO" --latest
           echo "已上传 latest.json 并提升 $TAG 为 Latest（version=$served）"
+          # GITHUB_TOKEN 触发的运行结束时不发 workflow_run，size-sync 等不到这一版；
+          # workflow_dispatch 是它唯一能启动的事件。
+          gh workflow run update-readme-release-sizes.yml --repo "$REPO" --ref "${{ github.event.repository.default_branch }}" \
+            || echo "::warning::README 体积同步调度失败，可手动运行 update-readme-release-sizes"

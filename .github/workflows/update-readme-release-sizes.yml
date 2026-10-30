@@ -1,5 +1,6 @@
 # 发版由 rust-build 同时构建桌面和 Android；Latest 就绪后同步真实体积和下载链接。
 # 保留手动补 APK 的完成事件与历史版本回退，不改 README 的自动生成块结构。
+# tag 构建由 release.yml 用 GITHUB_TOKEN 调度，结束时不发 workflow_run：latest-json 提升 Latest 后直接调度本工作流。
 name: update-readme-release-sizes
 
 on:

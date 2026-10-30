@@ -3085,7 +3085,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-analysis"
-version = "1.1.0-rc13"
+version = "1.1.0-rc18"
 dependencies = [
  "anyhow",
  "kdj-core",
@@ -3101,7 +3101,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-app"
-version = "1.1.0-rc13"
+version = "1.1.0-rc18"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3110,6 +3110,7 @@ dependencies = [
  "clap",
  "drag",
  "jni 0.21.1",
+ "jni 0.22.4",
  "kdj-core",
  "kdj-library",
  "kdj-playback",
@@ -3123,6 +3124,7 @@ dependencies = [
  "objc2-web-kit",
  "rand 0.10.2",
  "reqwest",
+ "rustls-platform-verifier",
  "semver",
  "serde",
  "serde_json",
@@ -3143,7 +3145,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-core"
-version = "1.1.0-rc13"
+version = "1.1.0-rc18"
 dependencies = [
  "anyhow",
  "directories",
@@ -3158,7 +3160,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-library"
-version = "1.1.0-rc13"
+version = "1.1.0-rc18"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3180,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-playback"
-version = "1.1.0-rc13"
+version = "1.1.0-rc18"
 dependencies = [
  "anyhow",
  "kdj-analysis",
@@ -3195,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-player"
-version = "1.1.0-rc13"
+version = "1.1.0-rc18"
 dependencies = [
  "anyhow",
  "cc",
@@ -3211,7 +3213,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-providers"
-version = "1.1.0-rc13"
+version = "1.1.0-rc18"
 dependencies = [
  "aes",
  "anyhow",
@@ -3263,7 +3265,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-server"
-version = "1.1.0-rc13"
+version = "1.1.0-rc18"
 dependencies = [
  "anyhow",
  "axum",
@@ -3295,7 +3297,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-stems"
-version = "1.1.0-rc13"
+version = "1.1.0-rc18"
 dependencies = [
  "anyhow",
  "kdj-core",
@@ -5205,9 +5207,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -7438,9 +7440,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.9"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -7451,14 +7453,14 @@ version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
 dependencies = [
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]

@@ -2148,6 +2148,17 @@ pub extern "system" fn Java_com_kdj_app_MainActivity_initNdkContext(
         global
     });
     tracing::info!("KDJ: ndk-context 已用 Application Context 初始化");
+    // reqwest 的 rustls 用 rustls-platform-verifier 向 Android 的 TrustManager 校验证书；
+    // 没初始化时第一条 HTTPS 请求就在 tokio worker 里 abort 整个进程（不经 panic hook）。
+    // 它用 jni 0.22，与上面的 0.21 各管各的指针。Kotlin 侧组件由 android-postinit.sh 接入。
+    let verifier_vm = unsafe { jni_verifier::JavaVM::from_raw(vm_ptr.cast()) };
+    let verifier = verifier_vm.attach_current_thread(|env| {
+        let context = unsafe { jni_verifier::objects::JObject::from_raw(env, context_ptr.cast()) };
+        rustls_platform_verifier::android::init_with_env(env, context)
+    });
+    if let Err(err) = verifier {
+        tracing::error!("KDJ: rustls-platform-verifier 初始化失败，HTTPS 请求会让应用退出：{err}");
+    }
     jni::sys::JNI_TRUE
 }
 

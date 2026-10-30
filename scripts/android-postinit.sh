@@ -7,7 +7,7 @@
 # 的东西，都只能做成 init 之后的补丁步骤，且本地和 CI 必须跑同一份——
 # 两边各写一套的下场是"我这儿能装，CI 出来的装不上"。
 #
-# 做六件事：
+# 做七件事：
 #   1. 清退并拒绝旧 ExecuTorch / NativeLoader / fbjni 生成物
 #   2. release 同时开启 R8 与资源裁剪，但保持现代 Android 的未压缩 native library 布局
 #   3. 只对 localhost / 127.0.0.1 放行明文（其余目标继续强制 TLS）
@@ -16,6 +16,7 @@
 #      曲库在共享存储里永远扫到 0 首）
 #   5. 注入签名配置（不签名的 APK 在 Android 7+ 上根本装不了）
 #   6. 把仓库里的真图标盖过模板默认图标
+#   7. 接入 rustls-platform-verifier 的 Kotlin 组件（Rust 的 HTTPS 证书校验要它）
 #
 # 签名的钥匙从环境变量来，脚本本身不含任何密码：
 #   ANDROID_KEYSTORE_BASE64   keystore 文件的 base64（CI 用；本地可省）
@@ -343,5 +344,61 @@ if os.path.exists(p):
 PY
   echo "✓ 图标同步（背景层 $(grep -o '#[0-9a-fA-F]*' "$GEN/app/src/main/res/values/ic_launcher_background.xml" | head -1)）"
 fi
+
+# ---------------------------------------------------- 7. HTTPS 证书校验组件
+# reqwest 的 rustls 在安卓上经 rustls-platform-verifier 调 Android 的 TrustManager，
+# 它的 Kotlin 类随 crate 以本地 maven 仓库发布（rustls-platform-verifier-android/maven）。
+# 少了它，lib.rs 的 JNI 初始化找不到类，第一条 HTTPS 请求就 abort 整个进程。
+# 路径和版本从 cargo metadata 取，跟着 Cargo.lock 走；release 开着 R8，只经 JNI
+# 调用的类必须 keep，否则会被裁掉。
+python3 - "$GRADLE" "$ROOT/src-tauri/Cargo.toml" "$APP_DIR/proguard/kdj-rustls-platform-verifier.pro" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+gradle_path, manifest, keep_path = sys.argv[1:]
+metadata = json.loads(subprocess.run(
+    ["cargo", "metadata", "--format-version", "1", "--filter-platform", "aarch64-linux-android",
+     "--manifest-path", manifest],
+    check=True, capture_output=True, text=True,
+).stdout)
+found = [p for p in metadata["packages"] if p["name"] == "rustls-platform-verifier-android"]
+if len(found) != 1:
+    print("::error::cargo metadata 里找不到唯一的 rustls-platform-verifier-android")
+    raise SystemExit(1)
+maven = os.path.join(os.path.dirname(found[0]["manifest_path"]), "maven")
+artifact_dir = os.path.join(maven, "rustls", "rustls-platform-verifier")
+versions = sorted(
+    name for name in (os.listdir(artifact_dir) if os.path.isdir(artifact_dir) else [])
+    if os.path.isdir(os.path.join(artifact_dir, name))
+)
+if len(versions) != 1:
+    print(f"::error::{artifact_dir} 里应当正好有一个版本，实际：{versions}")
+    raise SystemExit(1)
+
+# Replayed after every `android init` and on an already patched file: drop the old lines first.
+MARK = "// kdj: rustls-platform-verifier"
+lines = [line for line in open(gradle_path).read().splitlines(keepends=True) if MARK not in line]
+starts = [i for i, line in enumerate(lines) if line.strip() == "dependencies {"]
+if len(starts) != 1:
+    print("::error::app/build.gradle.kts 里找不到唯一的 dependencies 块，模板形状变了")
+    raise SystemExit(1)
+lines.insert(starts[0] + 1,
+    f'    implementation("rustls:rustls-platform-verifier:{versions[0]}") {MARK}\n')
+if lines and not lines[-1].endswith("\n"):
+    lines[-1] += "\n"
+lines.append(f"repositories {{ maven {{ url = uri({json.dumps(maven)}) }} }} {MARK}\n")
+open(gradle_path, "w").writelines(lines)
+
+os.makedirs(os.path.dirname(keep_path), exist_ok=True)
+open(keep_path, "w").write(
+    "# android-postinit.sh：rustls-platform-verifier 的类只经 JNI 调用\n"
+    "-keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }\n")
+print(f"  rustls-platform-verifier {versions[0]}：{maven}")
+PY
+grep -q 'implementation("rustls:rustls-platform-verifier:' "$GRADLE" \
+  || { echo "::error::rustls-platform-verifier 未接入 Gradle"; exit 1; }
+echo "✓ HTTPS 证书校验组件（rustls-platform-verifier）"
 
 echo "android-postinit 完成"

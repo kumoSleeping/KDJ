@@ -102,7 +102,7 @@ function mobileMediaPanels(): Plugin {
     name: "kdj-mobile-media-panels", enforce: "pre",
     resolveId(source) {
       if (!mobile) return null;
-      const name = source.split("/").pop()?.replace(/\\.tsx$/, "") ?? "";
+      const name = source.split("/").pop()?.replace(/\.tsx?$/, "") ?? "";
       return panels[name] ? prefix + name : null;
     },
     load(id) {

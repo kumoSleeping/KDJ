@@ -723,7 +723,7 @@ impl BilibiliProvider {
         }
         let parsed = streams::parse_playurl(&playurl);
         let is_single = matches!(parsed, PlayUrlData::Single { .. });
-        anyhow::ensure!(want_dash || is_single, "这个视频只提供分离音画，移动版不能合并下载");
+        anyhow::ensure!(want_dash || is_single, "这个视频只提供分离的音画，没有 FFmpeg 不能合并下载");
         // 位置固定的二元组：缺哪个哪个是 None，绝不会错位
         let (video_stream, audio_stream) = streams::pick_best(&parsed, max_height);
 

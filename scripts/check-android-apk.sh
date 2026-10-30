@@ -55,6 +55,13 @@ while IFS= read -r -d '' apk; do
     failed=1
   fi
 
+  # Rust 的 HTTPS 校验经 JNI 调这个类（android-postinit.sh 第 7 步接入、R8 keep）；
+  # 缺了它，应用一启动发出第一条 HTTPS 请求就 abort。
+  if ! unzip -p "$apk" 'classes*.dex' | strings | grep -Fq 'Lorg/rustls/platformverifier/CertificateVerifier;'; then
+    echo "::error::$(basename "$apk") 的 DEX 缺少 org.rustls.platformverifier.CertificateVerifier"
+    failed=1
+  fi
+
   for required in \
     lib/arm64-v8a/libkdj_app_lib.so \
     lib/arm64-v8a/libc++_shared.so; do
