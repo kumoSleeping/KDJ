@@ -13,7 +13,12 @@ cloud/virtual documents are not a Rust filesystem; selecting one is not support 
 that document. Android deletion is not the desktop recycle bin. Account login opens the desktop's ways in
 place under the account's row, except reading another browser's profile: the QR code (shown
 and saved to the album, since a phone cannot scan its own screen), a Cookie-Editor export
-pasted from a mobile browser, and pasted request headers. SoundCloud keeps its OAuth fallback.
+pasted from a mobile browser, and pasted request headers. Before them, NetEase, QQ Music,
+Bilibili and SoundCloud offer 网页登录: the site's own login page opened in the app
+(`WebLoginActivity`, its own process and WebView profile, emptied before and after); once the
+site's login cookie is set its cookies, HttpOnly included, go to the same `/login/cookies` entry as a
+Cookie-Editor export (`src-tauri/src/web_login.rs` holds the pages). Links to another app
+(`wtloginmqq://`, `weixin://`) are not followed. YouTube has none: Google refuses a WebView.
 
 Omitted: visualization production/preview/export, editing, `.kdjv` playback
 and the desktop CLI API. Existing project files, export databases and settings

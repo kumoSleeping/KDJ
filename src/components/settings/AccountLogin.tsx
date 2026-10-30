@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronLeft, ClipboardPaste, Cookie, Globe2, LoaderCircle, QrCode, RefreshCw } from "lucide-react";
+import { ChevronLeft, ClipboardPaste, Cookie, Globe2, LoaderCircle, LogIn, QrCode, RefreshCw } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
 import { exportedLoginHeaders, LOGIN_SITES } from "../../lib/cookieEditorImport";
@@ -12,9 +12,10 @@ import { Select } from "../common/Select";
 import { SlidePages } from "../drawer/SlidePages";
 import "./AccountLogin.css";
 
-type Method = "qr" | "cookies" | "browser" | "headers";
+type Method = "web" | "qr" | "cookies" | "browser" | "headers";
 
 const METHODS: Record<Method, { label: string; icon: typeof Globe2 }> = {
+  web: { label: "网页登录", icon: LogIn },
   qr: { label: "扫码", icon: QrCode },
   cookies: { label: "从 Cookie-Editor 导入", icon: Cookie },
   browser: { label: "从浏览器导入", icon: Globe2 },
@@ -31,12 +32,19 @@ const RECOMMENDED: Partial<Record<Platform, Method>> = {
   wyy: "qr", qqm: "qr", bilibili: "qr", ytm: "browser", youtube: "browser", soundcloud: "browser",
 };
 const DROPS_SOON = new Set<Platform>(["qqm", "ytm", "youtube"]);
+/**
+ * The sites whose own login page a phone opens in the app (网页登录, src-tauri/src/web_login.rs).
+ * On a phone it is 推荐 where the code to scan is not: a phone cannot scan its own screen. QQ's
+ * page leaves no key to renew its login, so the code stays 推荐 there.
+ */
+const WEB_LOGIN = new Set<Platform>(["wyy", "qqm", "bilibili", "soundcloud"]);
 
 function methodLabel(method: Method, platform: Platform): string {
   const notes: string[] = [];
-  if (RECOMMENDED[platform] === method) notes.push("推荐");
+  const webFirst = onPhone() && !!getBridge().webLogin && WEB_LOGIN.has(platform) && platform !== "qqm";
+  if (webFirst ? method === "web" : RECOMMENDED[platform] === method) notes.push("推荐");
   if (method === "browser") notes.push("部分支持");
-  if ((method === "cookies" || method === "headers") && DROPS_SOON.has(platform)) notes.push("容易掉线");
+  if ((method === "web" || method === "cookies" || method === "headers") && DROPS_SOON.has(platform)) notes.push("容易掉线");
   const label = method === "browser" ? "从浏览器导入" : METHODS[method].label;
   return notes.length ? `${label}（${notes.join("，")}）` : label;
 }
@@ -61,10 +69,15 @@ const WAYS = "ways";
 /** A phone: no other application's browser to read, no clipboard to read on return. */
 const onPhone = () => ["android", "ios"].includes(window.kdj?.platform ?? "");
 
-/** The ways one account can be logged in, in the order they are offered. A phone has every way but the browser's. */
+/**
+ * The ways one account can be logged in, in the order they are offered. A phone has every way but
+ * the browser's, and before them the site's own login page where the app can open it.
+ */
 export function loginMethods(account: Account): Method[] {
   const ways: Method[] = account.login_method === "qr" ? ["qr", "cookies", "browser", "headers"] : ["cookies", "browser", "headers"];
-  return onPhone() ? ways.filter(way => way !== "browser") : ways;
+  if (!onPhone()) return ways;
+  const web: Method[] = getBridge().webLogin && WEB_LOGIN.has(account.platform) ? ["web"] : [];
+  return [...web, ...ways.filter(way => way !== "browser")];
 }
 
 /**
@@ -100,6 +113,7 @@ export function AccountLogin({ account, sourceEnabled, onDone }: {
         <ChevronLeft size={14} aria-hidden="true" />
         <span>{methodLabel(method, account.platform)}</span>
       </button>
+      {method === "web" && <WebPanel {...panel} />}
       {method === "qr" && <QrPanel account={account} onDone={onDone} />}
       {method === "cookies" && <CookieEditorPanel {...panel} />}
       {method === "browser" && <BrowserPanel {...panel} />}
@@ -499,6 +513,54 @@ function CookieEditorPanel({ account, sourceEnabled, onBusy, onDone }: {
     {(busy || loading) && <div className="kd-account-login-actions">
       <span role="status" className="kd-account-login-status">{loading ? "正在查找浏览器" : "正在登录"}</span>
     </div>}
+  </div>;
+}
+
+/**
+ * 网页登录 (Android): the site's own login page, opened over the app. The cookies it leaves are
+ * handed in like a Cookie-Editor export; leaving the page changes nothing.
+ */
+function WebPanel({ account, sourceEnabled, onBusy, onDone }: {
+  account: Account; sourceEnabled: boolean; onBusy(busy: boolean): void; onDone(): void;
+}) {
+  const setAccount = useAppStore(state => state.setAccount);
+  const [busy, setBusyState] = useState(false);
+  const [notice, setNotice] = useState("");
+  const alive = useRef(true);
+  const setBusy = (value: boolean) => { setBusyState(value); onBusy(value); };
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; onBusy(false); };
+  }, []);
+
+  const open = async () => {
+    const webLogin = getBridge().webLogin;
+    if (!webLogin) return;
+    // SoundCloud refuses a login while its source is switched off.
+    if (account.login_method !== "qr" && !sourceEnabled) { setNotice(`请先开启 ${account.label} 下载源`); return; }
+    setBusy(true);
+    setNotice("");
+    try {
+      const headers = await webLogin(account.platform);
+      if (!alive.current) return;
+      if (!headers) { setBusy(false); return; }
+      const result = await api.exportedLogin(account.platform, headers);
+      if (alive.current) { setBusy(false); setAccount(result); onDone(); }
+    } catch (error) {
+      if (!alive.current) return;
+      setBusy(false);
+      setNotice(`登录失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  return <div className="kd-account-login-panel">
+    {notice && <InlineNotice text={notice} className="kd-account-notice" onDismiss={() => setNotice("")} />}
+    <div className="kd-account-login-actions">
+      <span role="status" className="kd-account-login-status">{busy ? "正在登录" : `在 ${account.label} 的登录页登录`}</span>
+      <Button size="sm" variant="ghost" disabled={busy} onClick={() => void open()}>
+        {busy && <LoaderCircle size={13} className="kd-spin" />}打开
+      </Button>
+    </div>
   </div>;
 }
 

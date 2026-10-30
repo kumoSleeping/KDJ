@@ -16,6 +16,12 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application>
+        <!-- A platform's login page in its own process and WebView profile (WebLoginActivity.kt). -->
+        <activity android:name="app.tauri.nativeaudio.WebLoginActivity"
+            android:exported="false" android:process=":web_login"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode|density" />
         <service android:name="app.tauri.nativeaudio.YoutubeProofService"
             android:exported="false" android:process=":youtube_proof" />
         <service

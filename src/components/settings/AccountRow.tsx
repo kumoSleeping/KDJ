@@ -207,10 +207,10 @@ export function AccountRow({
     (account.platform === "youtube" || account.platform === "ytm") && browserAccount;
   const soundcloudAccount = account.platform === "soundcloud";
   const browserMobile = ["android", "ios"].includes(String(getBridge().platform));
-  // 桌面 SoundCloud 直接读取所选浏览器 Profile；移动端无法跨应用读取，保留原有
-  // OAuth / deep-link 登录作为回退。
+  // 桌面 SoundCloud 直接读取所选浏览器 Profile；移动端无法跨应用读取。安卓在 App 里开
+  // 登录页（网页登录），没有登录页的手机保留原有 OAuth / deep-link 登录作为回退。
   const oauthAccount =
-    account.login_method === "oauth" || (soundcloudAccount && browserMobile);
+    account.login_method === "oauth" || (soundcloudAccount && browserMobile && !getBridge().webLogin);
   // The ways to log in open in place under the row (AccountLogin), on a phone as well (all but
   // reading another application's browser). The web page saves the code to scan as a picture.
   const loginInPlace = !oauthAccount && (account.login_method === "qr"

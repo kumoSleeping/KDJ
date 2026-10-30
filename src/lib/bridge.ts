@@ -164,6 +164,7 @@ async function createTauriBridge(): Promise<KdjBridge> {
           }),
     openExternal: (url: string) => tauriInvoke<void>("open_external", { url }),
     readClipboardText: desktop ? () => tauriInvoke<string>("read_clipboard_text") : undefined,
+    webLogin: android ? (platform) => tauriInvoke<string | null>("web_login", { platform }) : undefined,
     // 检查也必须走 updater 本身，不能先问 GitHub releases/latest：Release 先建、
     // 三平台包后到的窗口里，后者会谎报"可更新"，真正安装时才发现 latest.json
     // 或当前 bundle 的签名包还不存在。

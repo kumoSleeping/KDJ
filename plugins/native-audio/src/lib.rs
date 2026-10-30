@@ -37,6 +37,21 @@ pub struct ApplyPlaybackSnapshotArgs {
     pub error: String,
 }
 
+/// What [`NativeAudio::web_login`] opens and waits for.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebLoginArgs {
+    /// The login page, https only.
+    pub url: String,
+    /// The login is done once any of these cookies is set for one of `cookie_urls`.
+    pub done_cookies: Vec<String>,
+    /// The addresses whose cookies are handed back.
+    pub cookie_urls: Vec<String>,
+    /// Replaces the WebView's user agent; by default it is the phone's own without "; wv".
+    pub user_agent: Option<String>,
+    pub third_party_cookies: bool,
+}
+
 #[cfg(target_os = "android")]
 impl<R: Runtime> NativeAudio<R> {
     /// Internal transport only; deliberately absent from native-audio:default permissions.
@@ -54,6 +69,22 @@ impl<R: Runtime> NativeAudio<R> {
             .run_mobile_plugin::<Reply>("youtubeProof", Request { operation, javascript })
             .map(|reply| reply.value)
             .map_err(|error| format!("YouTube proof: {error}"))
+    }
+
+    /// Opens a platform's login page (WebLoginActivity) and waits for the user. `Ok(None)` when
+    /// they leave it; otherwise the `Cookie` value of each of `args.cookie_urls`, in that order.
+    /// Internal transport only; deliberately absent from native-audio:default permissions.
+    pub fn web_login(&self, args: &WebLoginArgs) -> Result<Option<Vec<String>>, String> {
+        #[derive(serde::Deserialize)]
+        struct Reply {
+            cancelled: bool,
+            #[serde(default)]
+            cookies: Vec<String>,
+        }
+        self.0
+            .run_mobile_plugin::<Reply>("webLogin", args)
+            .map(|reply| (!reply.cancelled).then_some(reply.cookies))
+            .map_err(|error| error.to_string())
     }
 
     pub fn apply_playback_snapshot(&self, args: &ApplyPlaybackSnapshotArgs) -> Result<(), String> {

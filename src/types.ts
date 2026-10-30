@@ -1095,6 +1095,8 @@ export interface KdjBridge {
   openExternal?: (url: string) => Promise<void>;
   /** 剪贴板里的文字；只给登录面板取回用户导出的登录。 */
   readClipboardText?: () => Promise<string>;
+  /** 安卓：在 App 里打开平台的登录页，登录后返回一行 `Cookie:`；用户离开登录页是 `null`。 */
+  webLogin?: (platform: string) => Promise<string | null>;
   /**
    * 桌面直接问 Tauri Updater 的清单；只有当前安装格式真的存在签名更新包时
    * 才会返回 newer=true。移动端/浏览器没有它，继续走 GitHub Release API。

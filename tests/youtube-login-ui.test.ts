@@ -386,6 +386,38 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     assert.ok(panel().querySelector(".kd-account-login-qr img"), "the code is shown in place");
     assert.deepEqual(albumSaves, ["wyy"], "and saved to the album, since a phone cannot scan its own screen");
     assert.equal(panel().querySelector("[role=status]")?.textContent, "已存到相册，用网易云音乐 App 扫码");
+
+    // Android opens the site's own login page first; what it leaves is handed in like an export,
+    // and leaving the page hands in nothing.
+    const opened: string[] = [];
+    let page: string | null = null;
+    phone.webLogin = async (platform: string) => { opened.push(platform); return page; };
+    const WEB = "网页登录（推荐）";
+    await render("phone-web", qrAccount("wyy"));
+    await click("登录");
+    assert.deepEqual(methods(), [WEB, "扫码", COOKIES, HEADERS], "a phone cannot scan its own screen");
+    await click(WEB);
+    const postsBefore = posts.length;
+    await click("打开", panel());
+    assert.deepEqual(opened, ["wyy"]);
+    assert.equal(posts.length, postsBefore, "leaving the page logs nothing in");
+    page = "Cookie: MUSIC_U=web-only";
+    answer = (_body, path) => path.endsWith("/wyy/login/cookies")
+      ? new Response(JSON.stringify({ ...qrAccount("wyy"), state: "valid" }), { status: 200, headers: { "content-type": "application/json" } })
+      : undefined;
+    await click("打开", panel());
+    assert.ok(posts.at(-1)!.path.endsWith("/accounts/wyy/login/cookies"));
+    assert.deepEqual(posts.at(-1)!.body, { headers: "Cookie: MUSIC_U=web-only" });
+    answer = () => undefined;
+    // QQ's page leaves no key to renew the login: the code stays 推荐.
+    await render("phone-web-qq", qrAccount("qqm"));
+    await click("登录");
+    assert.deepEqual(methods(), ["网页登录（容易掉线）", QR, named(COOKIES, "qqm"), named(HEADERS, "qqm")]);
+    // SoundCloud opens its ways in place instead of the system browser's OAuth.
+    await render("phone-web-sc", browserAccount("soundcloud"));
+    await click("登录");
+    assert.deepEqual(methods(), [WEB, COOKIES, HEADERS]);
+    delete phone.webLogin;
   } finally {
     await act(async () => root.unmount());
     await (await import("../src/lib/diagnostics")).flushDiagnostics();

@@ -43,6 +43,8 @@ mod release_version;
 mod share_clipboard;
 #[cfg(any(desktop, target_os = "android"))]
 mod youtube_proof;
+#[cfg(any(target_os = "android", test))]
+mod web_login;
 #[cfg(desktop)]
 #[cfg(desktop)]
 pub use cli::Launch;
@@ -2408,6 +2410,7 @@ pub fn run() {
         desktop_player::playback_trace,
         youtube_proof::youtube_mint_gvs_po_token,
         youtube_proof::youtube_run_player,
+        web_login::web_login,
         media_permission_granted
     ]);
     #[cfg(all(mobile, target_os = "ios"))]

@@ -36,7 +36,15 @@ YouTube 和 YouTube Music 用同一份 youtube.com 登录：登上其中一个�
 SoundCloud 是浏览器会话的到期，网易云、哔哩哔哩是平台发来登录 Cookie 时给的到期（导入的登录在
 平台第一次续发之前不知道）。YouTube 不写：它的 Cookie 名义上两年，实际由浏览器的轮换决定。
 
-手机上没有别的应用的浏览器可读：二维码存成图片，SoundCloud 走 OAuth。
+手机上没有别的应用的浏览器可读：二维码存成图片（同一台手机扫不了自己的屏幕）。安卓上网易云、
+QQ 音乐、哔哩哔哩、SoundCloud 的方式列表最前面多一种「网页登录」：在 App 里打开平台自己的登录页，
+登录 Cookie 一出现，就把这个站点的 Cookie（含 HttpOnly）交给 `/login/cookies`，和 Cookie-Editor
+导出走同一个入口。这是桌面「不开自己的登录窗口」的例外，只在手机上：那里没有用户自己的浏览器可读。
+登录页在独立进程、独立的 WebView 配置里（`WebLoginActivity`），打开前和关掉后都清空；跳去别的 App
+（QQ、微信一键登录）的链接不跟。打开哪个网址、等哪个 Cookie 只在 `src-tauri/src/web_login.rs`
+的表里。「推荐」在手机上给网页登录，QQ 音乐除外：它的网页登录没有续期用的 refresh_key（容易掉线），
+仍推荐扫码。YouTube 没有网页登录：Google 拒绝在 WebView 里登录。没有网页登录的手机（iOS）
+SoundCloud 仍走 OAuth。
 
 侧栏里没登录的平台，那一行就是「登录」：点它打开设置的「登录」页，并把**那个平台**的这一块展开
 （`useLoginRequest`，`AccountRow` 接到后展开方式列表、把自己滚进视野，不替用户选方式）。

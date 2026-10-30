@@ -199,6 +199,15 @@ class YoutubeProofArgs {
 }
 
 @InvokeArg
+class WebLoginArgs {
+    var url: String = ""
+    var doneCookies: Array<String> = arrayOf()
+    var cookieUrls: Array<String> = arrayOf()
+    var userAgent: String? = null
+    var thirdPartyCookies: Boolean = true
+}
+
+@InvokeArg
 class StartFileDragArgs {
     var paths: Array<String>? = null
     var label: String? = null
@@ -265,6 +274,45 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
     fun youtubeProof(invoke: Invoke) {
         val args = invoke.parseArgs(YoutubeProofArgs::class.java)
         YoutubeProofClient.execute(activity.applicationContext, args.operation, args.javascript, invoke)
+    }
+
+    /**
+     * A platform's login page (WebLoginActivity); resolves with the cookies of each address in
+     * `cookieUrls` once one of `doneCookies` is set, or `cancelled`. Internal transport only:
+     * called from Rust, deliberately absent from native-audio:default permissions.
+     */
+    @Command
+    fun webLogin(invoke: Invoke) {
+        val args = invoke.parseArgs(WebLoginArgs::class.java)
+        try {
+            val intent = Intent(activity, WebLoginActivity::class.java).apply {
+                putExtra(WebLoginActivity.EXTRA_URL, args.url)
+                putExtra(WebLoginActivity.EXTRA_DONE, args.doneCookies)
+                putExtra(WebLoginActivity.EXTRA_COOKIE_URLS, args.cookieUrls)
+                putExtra(WebLoginActivity.EXTRA_USER_AGENT, args.userAgent)
+                putExtra(WebLoginActivity.EXTRA_THIRD_PARTY, args.thirdPartyCookies)
+            }
+            startActivityForResult(invoke, intent, "webLoginResult")
+        } catch (error: Exception) {
+            invoke.reject(error.message ?: "无法打开登录页")
+        }
+    }
+
+    @ActivityCallback
+    fun webLoginResult(invoke: Invoke, result: ActivityResult) {
+        val data = result.data
+        if (result.resultCode != Activity.RESULT_OK) {
+            val error = data?.getStringExtra(WebLoginActivity.EXTRA_ERROR)
+            if (error != null) invoke.reject(error)
+            else invoke.resolve(JSObject().apply { put("cancelled", true) })
+            return
+        }
+        val cookies = app.tauri.plugin.JSArray()
+        data?.getStringArrayListExtra(WebLoginActivity.EXTRA_COOKIES)?.forEach { cookies.put(it) }
+        invoke.resolve(JSObject().apply {
+            put("cancelled", false)
+            put("cookies", cookies)
+        })
     }
 
     @Command
