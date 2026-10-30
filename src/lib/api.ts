@@ -1309,45 +1309,6 @@ export const visualizerApi = {
     request<{ delivered: boolean }>(`/visualizer/render/${encodeURIComponent(id)}/done`, { method: "POST", body: JSON.stringify(result) }),
 };
 
-/**
- * The AI corner (docs/ai-dock.md). Nothing here is written to the activity log: the provider key
- * and the conversation stay out of it.
- */
-export const aiApi = {
-  status: (refresh = false) => request<import("../types/ai").AiStatus>(`/ai/status${refresh ? "?refresh=1" : ""}`, {}, null),
-  models: (provider: string) =>
-    request<{ models: import("../types/ai").AiModel[] }>(`/ai/models?provider=${encodeURIComponent(provider)}`, {}, null),
-  saveProvider: (body: { provider: string; key?: string; model?: string | null }) =>
-    request<import("../types/ai").AiStatus>("/ai/provider", { method: "PUT", body: JSON.stringify(body) }, null),
-  /** `images`: paths of pictures that go with the request; the model sees them. */
-  /** A request of its own opens a new session; `follow` (a supplement) goes on in the open one. */
-  prompt: (message: string, images: string[] = [], follow = false) =>
-    request<{ disposition: string }>("/ai/prompt", { method: "POST", body: JSON.stringify({ message, images, follow }) }, null),
-  /** A picture pasted into the `/pi` field, kept in the AI's workspace. */
-  paste: (image: Blob) =>
-    request<{ path: string }>("/ai/paste", { method: "POST", headers: { "Content-Type": image.type || "image/png" }, body: image }, null),
-  abort: () => request<void>("/ai/abort", { method: "POST" }, null),
-  reset: () => request<void>("/ai/reset", { method: "POST" }, null),
-  clearQueue: () => request<{ steering: string[]; followUp: string[] }>("/ai/clear-queue", { method: "POST" }, null),
-  answer: (body: { id: string; value?: string; confirmed?: boolean; cancelled?: boolean }) =>
-    request<void>("/ai/answer", { method: "POST", body: JSON.stringify(body) }, null),
-  installAccess: () => request<import("../types/ai").AiStatus>("/ai/web/install", { method: "POST" }, null),
-  installRemotion: () => request<import("../types/ai").AiStatus>("/ai/remotion/install", { method: "POST" }, null),
-  setThinking: (level: import("../types/ai").AiThinking) =>
-    request<import("../types/ai").AiStatus>("/ai/thinking", { method: "PUT", body: JSON.stringify({ level }) }, null),
-  setWeb: (body: { mode?: import("../types/ai").AiWebMode; jina_key?: string }) =>
-    request<import("../types/ai").AiStatus>("/ai/web", { method: "PUT", body: JSON.stringify(body) }, null),
-  globalLogins: () => request<{ path?: string; logins: import("../types/ai").AiGlobalLogin[] }>("/ai/global", {}, null),
-  importLogin: (provider: string) =>
-    request<import("../types/ai").AiStatus>("/ai/import", { method: "POST", body: JSON.stringify({ provider }) }, null),
-  /** The AI's history: its sessions, newest first, and the one pi has open. */
-  sessions: () => request<{ current: string | null; sessions: import("../types/ai").AiSessionSummary[] }>("/ai/sessions", {}, null),
-  session: (path: string) =>
-    request<{ steps: import("../types/ai").AiSessionStep[] }>(`/ai/sessions/detail?path=${encodeURIComponent(path)}`, {}, null),
-  switchSession: (path: string) =>
-    request<void>("/ai/sessions/switch", { method: "POST", body: JSON.stringify({ path }) }, null),
-};
-
 /* ---------------------------------------------------------------- WebSocket */
 
 type Listener = (event: WsEvent) => void;

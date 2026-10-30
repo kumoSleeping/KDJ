@@ -29,7 +29,7 @@ test("Android module graph omits production panels, keeps the visualizer and its
     const { default: config } = await import("../vite.tauri.config");
     const plugin = (config as any).plugins.find((item: any) => item.name === "kdj-mobile-media-panels");
     assert.ok(plugin);
-    for (const name of ["LaneEditor", "KdjvLivePicture", "AiPanel", "FfmpegPanel"]) {
+    for (const name of ["LaneEditor", "KdjvLivePicture", "FfmpegPanel"]) {
       const id = plugin.resolveId(`../${name}`);
       assert.ok(id);
       assert.match(plugin.load(id), /return null/);

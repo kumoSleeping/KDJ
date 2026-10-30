@@ -53,9 +53,7 @@ import { AccountRow, linkedAccount, linkedPlatforms } from "./AccountRow";
 import { ActivityLogPanel } from "./ActivityLogPanel";
 import { UpdateRow } from "./UpdateRow";
 import { FfmpegPanel } from "./FfmpegPanel";
-import { AiPanel } from "./AiPanel";
 import { TASK_STAY_CHOICES, useTaskStayPref, type TaskStaySeconds } from "../../lib/taskStayPref";
-import { aiOffered } from "../../stores/aiStore";
 
 import "./Preferences.css";
 
@@ -545,7 +543,7 @@ export function SettingsPanel({ preferences = false, page }: {
                 label="提示停留"
                 value={taskStaySeconds}
                 options={TASK_STAY_CHOICES.map((value) => ({ id: value, text: `${value} 秒` }))}
-                title="顶部和底部的提示气泡停留多久；下载与出错的提示停两倍长，正在播放、由 AI 定时的提示按它们自己的时长。"
+                title="顶部和底部的提示气泡停留多久；下载与出错的提示停两倍长，正在播放的提示按它自己的时长。"
                 onChange={setTaskStaySeconds}
               />
               <CycleToggle<TimeDisplayMode>
@@ -775,7 +773,6 @@ export function SettingsPanel({ preferences = false, page }: {
 
         {on("ffmpeg") && ["darwin", "win32", "linux"].includes(getBridge().platform)
           ? <div ref={ffmpegSectionRef} id="kd-settings-ffmpeg"><FfmpegPanel /></div> : null}
-        {on("ai") && aiOffered() ? <div id="kd-settings-ai"><AiPanel /></div> : null}
       </div>
     </div>
   );

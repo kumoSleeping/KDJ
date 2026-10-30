@@ -1,7 +1,6 @@
 import { chord, PointerDemo, type PointerDemoScene } from "../common/PointerDemo";
 import { SlidePages } from "../drawer/SlidePages";
 import { shownTipsPages, useTipsPage, type TipsPage } from "../../lib/tipsPages";
-import { AiLessons } from "../ai/AiLessons";
 
 interface Lesson {
   scene: PointerDemoScene;
@@ -12,7 +11,7 @@ interface Lesson {
 const mod = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
 
 /** What each page teaches: a picture of the little mouse doing it, and one line. */
-const LESSONS: Record<Exclude<TipsPage, "ai">, Lesson[]> = {
+const LESSONS: Record<TipsPage, Lesson[]> = {
   search: [
     { scene: "search", caption: "输入歌名、歌手或链接，按 Enter 开始搜索~" },
     { scene: "platforms", caption: "拖动平台图标调整优先级，点一下选中或取消；不用的平台可以在设置里关掉" },
@@ -48,8 +47,6 @@ const LESSONS: Record<Exclude<TipsPage, "ai">, Lesson[]> = {
 };
 
 function Lessons({ page }: { page: TipsPage }) {
-  // The AI page is steps to follow, not the little mouse's pictures.
-  if (page === "ai") return <AiLessons />;
   return <div className="kd-tips-lessons">
     {LESSONS[page].map((lesson, index) => <figure key={`${page}-${index}`} className="kd-tips-lesson">
       <PointerDemo scene={lesson.scene} tray={lesson.tray} label={lesson.caption} />

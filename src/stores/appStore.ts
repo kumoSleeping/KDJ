@@ -22,7 +22,6 @@ import { writeLocalStorageNow } from "../lib/storageWrite";
 import type { Account, Health, SearchCapabilities, Settings, WsEvent } from "../types";
 import { useDownloadStore } from "./downloadStore";
 import { useLibraryStore } from "./libraryStore";
-import { useAiStore } from "./aiStore";
 import { useStreamBrowseStore } from "./streamBrowseStore";
 import { useSidebarVisibilityStore } from "./sidebarVisibilityStore";
 
@@ -680,7 +679,6 @@ export function connectEvents(): () => void {
     useAppStore.getState().handleEvent(event);
     useDownloadStore.getState().handleEvent(event);
     useLibraryStore.getState().handleEvent(event);
-    useAiStore.getState().handleEvent(event);
     if (event.type === "kdjv.progress") {
       const payload = event.payload;
       void import("../lib/kdjvPlay").then(module => module.handleKdjvProgress(payload));

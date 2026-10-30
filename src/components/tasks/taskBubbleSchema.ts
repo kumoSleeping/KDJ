@@ -8,7 +8,7 @@ import type { ReactNode } from "react";
  */
 export type TaskTone = "info" | "success" | "error";
 
-export type TaskSize = "small" | "regular" | "large" | "wide";
+export type TaskSize = "small" | "regular" | "large";
 
 /**
  * Where a bubble comes up. `bottom` (the default): from behind the player bar's top edge, at
@@ -77,8 +77,7 @@ export interface TaskBubbleSpec {
   /**
    * How much room the bubble takes. `small`: a one-line note as wide as its text. `regular`
    * (the default): a task with a cover and two lines. `large`: the task the listener reads and
-   * acts on most, with a big cover and a title-size name (the playing song). `wide`: a bubble that
-   * lays something out across (an AI draft's timeline); a resizable one keeps its own width.
+   * acts on most, with a big cover and a title-size name (the playing song).
    */
   size?: TaskSize;
   /**
@@ -107,11 +106,9 @@ export interface TaskBubbleSpec {
   onOpen?(): void;
   /**
    * Fuller content shown inside the bubble while it is expanded; the host draws the control
-   * that expands it. With `replacesSummary` the cover, title and lines above are hidden while
-   * the body is open, for a body that restates them.
+   * that expands it.
    */
   body?: ReactNode;
-  replacesSummary?: boolean;
   expanded?: boolean;
   onExpand?(expanded: boolean): void;
   /**
@@ -142,25 +139,6 @@ export interface TaskBubbleSpec {
    * (src/lib/songSwapMotion.ts), and it counts as a surface of that song.
    */
   song?: string | number;
-  /**
-   * The listener can make the bubble wider or narrower by dragging its inner edge (the left
-   * one: the stacks stand at the right); its height still follows what it holds. The width
-   * is kept for the kind of bubble, so the next one of that kind comes up as wide. For a bubble
-   * that is read at length (the AI's plans and messages).
-   */
-  resizable?: boolean;
-  /**
-   * The listener cannot put it away: no dismiss key, no Esc. It leaves when its caller takes it
-   * down. For work under way that must stay in sight, and that has its own key to stop it in
-   * `actions` (the AI's task).
-   */
-  held?: boolean;
-  /**
-   * The task is at work right now: the host runs a short light round the bubble's edge, which
-   * stops when this goes. For work the listener handed over and waits on, which shows no
-   * percentage (the AI's task: each task has its own light, the search row has none).
-   */
-  working?: boolean;
   /** Esc dismisses it. For a bubble the user called up; never for a transient report. */
   escape?: boolean;
   /**

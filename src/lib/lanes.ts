@@ -158,6 +158,12 @@ export function barAt(downbeats: readonly number[], t: number, songIn = 0): numb
   return bar;
 }
 
+/** Every how many bars the ruler names one, so that about a dozen names fit. */
+export function rulerStep(bars: number): number {
+  for (const step of [1, 2, 4, 8, 16, 32, 64]) if (bars / step <= 12) return step;
+  return 128;
+}
+
 /** m:ss.s of the project. */
 export function laneClock(seconds: number): string {
   const whole = Math.max(0, seconds);

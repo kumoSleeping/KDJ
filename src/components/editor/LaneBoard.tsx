@@ -21,9 +21,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { Eye, EyeOff, Volume2, VolumeX, X, Plus, ChevronDown, ChevronRight, Combine, Ungroup } from "lucide-react";
 import { api } from "../../lib/api";
-import { rulerStep } from "../../lib/aiTimeline";
 import { isImageTrack, isProjectTrack } from "../../lib/format";
-import { fileLabel, LANE_END, laneClock, snapToBar, trackName, type LaneClip, type LaneOp, type LaneTrack, type TrackKind } from "../../lib/lanes";
+import { fileLabel, LANE_END, laneClock, rulerStep, snapToBar, trackName, type LaneClip, type LaneOp, type LaneTrack, type TrackKind } from "../../lib/lanes";
 import { activeTrackDragIds, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
 import { usePointerSearchDrop, usePointerTrackDrop } from "../../lib/pointerTrackDrop";
 import { activeSearchDrag, finishSearchDrop, isSearchDownloadDrag, readSearchDrop, type ActiveSearchDrag } from "../../lib/searchDrag";

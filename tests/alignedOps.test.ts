@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { alignedOps, type AlignPlan, type LaneClip } from "../src/lib/lanes";
+import { alignedOps, rulerStep, type AlignPlan, type LaneClip } from "../src/lib/lanes";
 
 const clip: LaneClip = { id: "c2", src: "/v/op.mp4", at: 10, in: 0, out: 90, muted: true, fill: true };
 const plan: AlignPlan = {
@@ -26,4 +26,9 @@ test("a song at its own speed keeps the plan's speed to a millionth", () => {
   assert.ok(ops[1].op === "add");
   assert.equal(ops[1].clip.speed, 0.906234);
   assert.equal(ops[1].at, 37.379);
+});
+
+test("the lane ruler names about a dozen bars", () => {
+  assert.equal(rulerStep(96), 8);
+  assert.equal(rulerStep(10), 1);
 });

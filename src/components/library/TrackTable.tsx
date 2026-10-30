@@ -133,8 +133,6 @@ import { requestExploreSearch } from "../../lib/vjSearch";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, normalizeSearchPlatforms } from "../../lib/searchPlatforms";
 import { readLocalStorage } from "../../lib/storageWrite";
-import { aiDropElementAt, fromLocalTracks } from "../../lib/aiAttachments";
-import { useAiStore } from "../../stores/aiStore";
 
 /** @deprecated 请从 `lib/playTrack` 引用；保留 re-export 以免旧 import 断掉。 */
 export { PLAY_EVENT, playTrack, parsePlayRequest, type PlayRequest } from "../../lib/playTrack";
@@ -1306,24 +1304,16 @@ export const TrackTable = memo(function TrackTable({
 
     const clearTargets = () => {
       document
-        .querySelectorAll<HTMLElement>("[data-kd-pointer-track-over], [data-kd-pointer-ai-over]")
-        .forEach((node) => {
-          node.removeAttribute("data-kd-pointer-track-over");
-          node.removeAttribute("data-kd-pointer-ai-over");
-        });
+        .querySelectorAll<HTMLElement>("[data-kd-pointer-track-over]")
+        .forEach((node) => node.removeAttribute("data-kd-pointer-track-over"));
     };
     const hitAt = (x: number, y: number) => document.elementFromPoint(x, y) as HTMLElement | null;
     const paintTarget = (x: number, y: number) => {
       clearTargets();
-      const ai = aiDropElementAt(x, y);
-      ghost?.hint(ai ? "交给 AI" : null);
-      const under = ai ? null : pointerTrackDropAt(x, y);
+      ghost?.hint(null);
+      const under = pointerTrackDropAt(x, y);
       if (place !== under) place?.leave();
       place = under;
-      if (ai) {
-        ai.setAttribute("data-kd-pointer-ai-over", "");
-        return;
-      }
       if (place) {
         ghost?.hint(place.over(ids, x, y));
         return;
@@ -1501,22 +1491,13 @@ export const TrackTable = memo(function TrackTable({
       const trash = hit?.closest<HTMLElement>("[data-kd-track-trash-target]");
       const cover = hit?.closest<HTMLElement>(`[${TRACK_COVER_DROP_TARGET_ATTR}]`);
       const coverTrackId = cover ? Number(cover.dataset.kdTrackId) : NaN;
-      const ai = aiDropElementAt(up.clientX, up.clientY);
-      const taker = ai ? null : pointerTrackDropAt(up.clientX, up.clientY);
+      const taker = pointerTrackDropAt(up.clientX, up.clientY);
       cleanup();
       if (!dragging) return;
       up.preventDefault();
       if (taker) {
         finishTrackDrop();
         taker.drop(ids, up.clientX, up.clientY);
-        return;
-      }
-      // The `/pi` field: the songs become cards that go to the AI with the request.
-      if (ai) {
-        finishTrackDrop();
-        void libraryStore.getState().resolveSummaries(ids)
-          .then(tracks => useAiStore.getState().attach(fromLocalTracks(tracks)))
-          .catch(() => undefined);
         return;
       }
       if (hit?.closest("[data-kd-visualizer-export-drop]")) {
