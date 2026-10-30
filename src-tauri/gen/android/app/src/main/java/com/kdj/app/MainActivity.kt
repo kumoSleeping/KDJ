@@ -120,6 +120,9 @@ class MainActivity : TauriActivity() {
       }
       @JavascriptInterface
       fun enterVideoPip() = runOnUiThread { this@MainActivity.enterVideoPip() }
+      /** 返回键没有可收起的层时（src/lib/androidBack.ts）：像系统默认的返回一样退到后台。 */
+      @JavascriptInterface
+      fun leaveToBackground() = runOnUiThread { this@MainActivity.moveTaskToBack(true) }
       @JavascriptInterface
       fun setSystemBarsLight(light: Boolean) = runOnUiThread {
         WindowCompat.getInsetsController(window, window.decorView).apply {

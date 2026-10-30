@@ -103,6 +103,9 @@ async function bootstrap(): Promise<void> {
   } else {
     const { default: App } = await import("./App");
     render(<App />);
+    // 返回键先收起抽屉、菜单和浮窗（androidBack.ts）。
+    void import("./lib/androidBack").then(module => module.installAndroidBack())
+      .catch(error => captureDiagnostic("runtime", "android.back", error));
   }
 }
 
