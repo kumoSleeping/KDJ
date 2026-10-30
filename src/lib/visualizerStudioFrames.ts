@@ -77,21 +77,25 @@ const UR = -6596, UG = -22189, UB = 28785;
 const VR = 28784, VG = -26145, VB = -2639;
 
 /** Opaque RGBA (getImageData of an `alpha: false` canvas) to I420. Each chroma sample
- * is the mean of its 2×2 block; the canvas has even dimensions. */
+ * is the mean of its 2×2 block; the canvas has even dimensions. A pixel is read as one
+ * little-endian word (R in the low byte), a quarter of the loads of reading bytes. */
 export function rgbaToYuv420(rgba: Uint8ClampedArray, width: number, height: number): Uint8Array<ArrayBuffer> {
-  const out = new Uint8Array(yuv420Bytes(width, height)), half = width >> 1, stride = width * 4;
+  const out = new Uint8Array(yuv420Bytes(width, height)), half = width >> 1;
+  const words = new Uint32Array(rgba.buffer, rgba.byteOffset, width * height);
   let u = width * height, v = u + (u >> 2);
   for (let y = 0; y < height; y += 2) {
-    let top = y * stride, bottom = top + stride, upper = y * width, lower = upper + width;
-    for (let x = 0; x < half; x++, top += 8, bottom += 8) {
-      const r0 = rgba[top], g0 = rgba[top + 1], b0 = rgba[top + 2];
-      const r1 = rgba[top + 4], g1 = rgba[top + 5], b1 = rgba[top + 6];
-      const r2 = rgba[bottom], g2 = rgba[bottom + 1], b2 = rgba[bottom + 2];
-      const r3 = rgba[bottom + 4], g3 = rgba[bottom + 5], b3 = rgba[bottom + 6];
-      out[upper++] = (YR * r0 + YG * g0 + YB * b0 + 1081344) >> 16;
-      out[upper++] = (YR * r1 + YG * g1 + YB * b1 + 1081344) >> 16;
-      out[lower++] = (YR * r2 + YG * g2 + YB * b2 + 1081344) >> 16;
-      out[lower++] = (YR * r3 + YG * g3 + YB * b3 + 1081344) >> 16;
+    // A pixel's index is also its luma sample's.
+    let top = y * width, bottom = top + width;
+    for (let x = 0; x < half; x++, top += 2, bottom += 2) {
+      const p0 = words[top], p1 = words[top + 1], p2 = words[bottom], p3 = words[bottom + 1];
+      const r0 = p0 & 255, g0 = p0 >> 8 & 255, b0 = p0 >> 16 & 255;
+      const r1 = p1 & 255, g1 = p1 >> 8 & 255, b1 = p1 >> 16 & 255;
+      const r2 = p2 & 255, g2 = p2 >> 8 & 255, b2 = p2 >> 16 & 255;
+      const r3 = p3 & 255, g3 = p3 >> 8 & 255, b3 = p3 >> 16 & 255;
+      out[top] = (YR * r0 + YG * g0 + YB * b0 + 1081344) >> 16;
+      out[top + 1] = (YR * r1 + YG * g1 + YB * b1 + 1081344) >> 16;
+      out[bottom] = (YR * r2 + YG * g2 + YB * b2 + 1081344) >> 16;
+      out[bottom + 1] = (YR * r3 + YG * g3 + YB * b3 + 1081344) >> 16;
       const r = r0 + r1 + r2 + r3, g = g0 + g1 + g2 + g3, b = b0 + b1 + b2 + b3;
       out[u++] = (UR * r + UG * g + UB * b + 33685504) >> 18;
       out[v++] = (VR * r + VG * g + VB * b + 33685504) >> 18;

@@ -4,7 +4,8 @@ import { getBridge } from "./bridge";
 import { studioChunkFrames, studioVideoBitrate, studioWorkerCount } from "./visualizerStudioFrames";
 import { visualizerApi, type VisualizerJobStatus } from "./api";
 import { NO_BACKGROUND_DRAWING, NO_VIDEO_ENCODER } from "./visualizerExportSupport";
-import type { StudioWorkerCommand, StudioWorkerReply, StudioWorkerRequest, StudioWorkerResult } from "./visualizerStudioExport.worker";
+import type { StudioFrameTiming, StudioWorkerCommand, StudioWorkerReply, StudioWorkerRequest, StudioWorkerResult } from "./visualizerStudioExport.worker";
+import { captureDiagnostic } from "./diagnostics";
 
 const terminal = (status: VisualizerJobStatus) => ["done", "failed", "canceled"].includes(status.phase);
 /** The encoder moved past this frame, a retry replaced its pass, or the job already
@@ -203,8 +204,15 @@ async function createStudioWorkerPool(project: VisualizerProject, prepared: Prep
     signal.throwIfAborted();
     const calibrationMs = performance.now() - started;
     let frames = 0;
-    const log = (encoder: string, active: number) => console.info("[visualizer export]", { encoder, workers: active, frames, elapsedMs: performance.now() - started, calibrationMs,
-      willReadFrequently: hint, calibrationFramesPerSecond: Object.fromEntries([...rates].map(([key, rate]) => [String(key), rate * 1000])) });
+    const timings = new Map<StudioWorker, StudioFrameTiming>();
+    const log = (encoder: string, active: number) => {
+      const summary = { encoder, workers: active, frames, elapsedMs: Math.round(performance.now() - started), calibrationMs: Math.round(calibrationMs),
+        willReadFrequently: hint, calibrationFramesPerSecond: Object.fromEntries([...rates].map(([key, rate]) => [String(key), rate * 1000])),
+        ...(timings.size ? { perFrameMs: perFrame([...timings.values()]) } : {}) };
+      console.info("[visualizer export]", summary);
+      // Where a phone spends its time is only known on the phone: the report carries it.
+      if (timings.size) captureDiagnostic("visualizer-export", "timing", JSON.stringify(summary), `width=${width} height=${height} fps=${fps}`, "info");
+    };
     const idle = (pool: StudioWorker[]) => pool.reduce((a, b) => b.pending < a.pending ? b : a);
     for (const worker of workers) if (!encoders.includes(worker)) worker.terminate();
     const chunkFrames = studioChunkFrames(fps);
@@ -212,7 +220,8 @@ async function createStudioWorkerPool(project: VisualizerProject, prepared: Prep
       // One per renderer: a GOP occupies its encoder from the first frame to the flush.
       slots: encoders.length, chunkFrames,
       upload: async (job, token, index) => {
-        const { status } = await idle(encoders).call({ type: "encode", job, token, index });
+        const worker = idle(encoders), { status, timing } = await worker.call({ type: "encode", job, token, index });
+        if (timing) timings.set(worker, timing);
         frames += Math.min(chunkFrames, count - index * chunkFrames);
         return status!;
       },
@@ -228,4 +237,11 @@ async function createStudioWorkerPool(project: VisualizerProject, prepared: Prep
     window.clearTimeout(timer);
     signal.removeEventListener("abort", abort);
   }
+}
+
+/** Each step's milliseconds per frame within one renderer, averaged over the renderers. */
+function perFrame(timings: StudioFrameTiming[]): Record<string, number> {
+  const frames = timings.reduce((sum, t) => sum + t.frames, 0) || 1;
+  const step = (key: keyof StudioFrameTiming) => +(timings.reduce((sum, t) => sum + t[key], 0) / frames).toFixed(2);
+  return { draw: step("drawMs"), read: step("readMs"), convert: step("convertMs"), encode: step("encodeMs"), send: step("sendMs") };
 }
