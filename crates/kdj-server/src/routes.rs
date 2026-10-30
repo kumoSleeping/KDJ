@@ -5371,6 +5371,70 @@ fn pcm_envelope(bytes: &[u8]) -> Vec<f64> {
     values
 }
 
+/// The same envelope from a local file, decoded by symphonia (no FFmpeg) from where players
+/// start it, as FFmpeg decodes it.
+fn native_alignment_envelope(path: &Path) -> Result<Vec<f64>, String> {
+    let channels = kdj_media::pcm::inspect(path).map_err(|err| format!("{err:#}"))?.channels as usize;
+    let mut bytes = Vec::new();
+    kdj_media::pcm::decode_played(path, Some(8000), Some(210 * 8000), &|| false, &mut |pcm| {
+        for frame in pcm.chunks(channels) {
+            let value = frame.iter().sum::<f32>() / channels as f32;
+            bytes.extend_from_slice(&((value.clamp(-1., 1.) * i16::MAX as f32) as i16).to_le_bytes());
+        }
+        Ok(())
+    })
+    .map_err(|err| format!("解码失败：{err:#}"))?;
+    let envelope = pcm_envelope(&bytes);
+    if envelope.len() < 20 * 30 {
+        return Err("可用于校准的音频不足 30 秒".into());
+    }
+    Ok(envelope)
+}
+
+/// The first 210 s of a remote stream: its head is fetched (a DASH audio track holds that in
+/// a few MB) and decoded natively; FFmpeg reads the URL itself where the head is not enough.
+async fn remote_alignment_envelope(http: reqwest::Client, url: String, headers: Vec<(String, String)>) -> Result<Vec<f64>, String> {
+    const HEAD: u64 = 9 * 1024 * 1024;
+    let file = std::env::temp_dir().join(format!("kdj-align-{:016x}.m4s", rand::random::<u64>()));
+    let fetched = async {
+        let mut request = http.get(&url).header(reqwest::header::RANGE, format!("bytes=0-{}", HEAD - 1));
+        for (name, value) in &headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        let response = request.send().await.map_err(|err| format!("读取视频音轨失败：{err}"))?;
+        if !response.status().is_success() {
+            return Err(format!("读取视频音轨失败：HTTP {}", response.status().as_u16()));
+        }
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
+            body.extend_from_slice(&chunk.map_err(|err| format!("读取视频音轨失败：{err}"))?);
+            if body.len() as u64 >= HEAD {
+                body.truncate(HEAD as usize);
+                break;
+            }
+        }
+        std::fs::write(&file, &body).map_err(|err| format!("写临时文件失败：{err}"))
+    }
+    .await;
+    let native = match fetched {
+        Ok(()) => {
+            let path = file.clone();
+            tokio::task::spawn_blocking(move || native_alignment_envelope(&path)).await.map_err(|err| err.to_string())?
+        }
+        Err(error) => Err(error),
+    };
+    let _ = std::fs::remove_file(&file);
+    match native {
+        Ok(envelope) => Ok(envelope),
+        Err(error) if !kdj_providers::ffmpeg::available() => Err(error),
+        Err(_) => {
+            let headers: String = headers.iter().map(|(name, value)| format!("{name}: {value}\r\n")).collect();
+            tokio::task::spawn_blocking(move || decode_alignment_envelope(url, Some(headers))).await.map_err(|err| err.to_string())?
+        }
+    }
+}
+
 fn decode_alignment_envelope(input: String, headers: Option<String>) -> Result<Vec<f64>, String> {
     let ffmpeg = kdj_providers::ffmpeg::binary().map_err(|err| format!("{err:#}"))?;
     let mut command = std::process::Command::new(ffmpeg);
@@ -5444,26 +5508,26 @@ async fn video_calibrate(
                 format!("获取视频音轨失败：{err:#}"),
             )
         })?;
-    let headers = format!(
-        "Referer: https://www.bilibili.com/\r\nUser-Agent: Mozilla/5.0\r\n{}",
-        if cookies.is_empty() {
-            String::new()
-        } else {
-            format!("Cookie: {cookies}\r\n")
-        }
-    );
+    let mut headers = vec![
+        ("Referer".to_string(), "https://www.bilibili.com/".to_string()),
+        ("User-Agent".to_string(), "Mozilla/5.0".to_string()),
+    ];
+    if !cookies.is_empty() {
+        headers.push(("Cookie".to_string(), cookies));
+    }
     let local_path = track.path;
-    let local_job =
-        tokio::task::spawn_blocking(move || decode_alignment_envelope(local_path, None));
-    let video_job =
-        tokio::task::spawn_blocking(move || decode_alignment_envelope(video_url, Some(headers)));
+    // A song symphonia cannot read (rare containers) is left to FFmpeg where it is installed.
+    let local_job = tokio::task::spawn_blocking(move || {
+        native_alignment_envelope(Path::new(&local_path)).or_else(|error| {
+            if kdj_providers::ffmpeg::available() { decode_alignment_envelope(local_path, None) } else { Err(error) }
+        })
+    });
+    let video_job = remote_alignment_envelope(state.preview_http.clone(), video_url, headers);
     let (local, video) = tokio::join!(local_job, video_job);
     let local = local
         .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?
         .map_err(|err| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, err))?;
-    let video = video
-        .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?
-        .map_err(|err| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, err))?;
+    let video = video.map_err(|err| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, err))?;
     let (offset_ms, score) = correlate_offset(&local, &video);
     if !score.is_finite() || score < 0.12 {
         return Err(ApiError::new(
@@ -7841,10 +7905,11 @@ fn file_mtime(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// 视频文件 → 音轨 m4a 缓存。remux（流拷贝）优先，编码不兼容再转码 AAC。
+/// 视频文件 → 音轨 m4a 缓存。MP4 里的 AAC 由 kdj-media 原样复制，不需要 FFmpeg；
+/// webm/mkv 里常见的 opus/vorbis 塞不进 m4a，交给 FFmpeg 转码 AAC（有的话）。
 ///
 /// 缓存键带 mtime：文件被替换后旧缓存自动失效。半成品写 `.partial` 名，
-/// ffmpeg 中断不会留下能被下次请求误用的坏文件。
+/// 中断不会留下能被下次请求误用的坏文件。
 async fn extracted_audio(path: &Path, track_id: i64, cache_dir: &Path) -> ApiResult<PathBuf> {
     let mtime = file_mtime(path);
     let target = cache_dir.join(format!("{track_id}-{mtime}.m4a"));
@@ -7853,12 +7918,6 @@ async fn extracted_audio(path: &Path, track_id: i64, cache_dir: &Path) -> ApiRes
         .unwrap_or(false)
     {
         return Ok(target);
-    }
-    if !kdj_providers::ffmpeg::available() {
-        return Err(ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "系统里没有 ffmpeg，视频音轨播放不了",
-        ));
     }
     std::fs::create_dir_all(cache_dir).map_err(|err| {
         ApiError::new(
@@ -7869,25 +7928,23 @@ async fn extracted_audio(path: &Path, track_id: i64, cache_dir: &Path) -> ApiRes
     let tmp = cache_dir.join(format!("{track_id}-{mtime}.partial.m4a"));
     let log = cache_dir.join(format!("{track_id}-{mtime}.log"));
     let cancel = tokio_util::sync::CancellationToken::new();
-    // webm/mkv 里常见 opus/vorbis，塞不进 m4a 容器，copy 会失败 → 第二轮转码
-    for copy in [true, false] {
-        let args = kdj_providers::ffmpeg::extract_audio_args(path, &tmp, copy, 0);
-        if kdj_providers::ffmpeg::run(&args, &log, &cancel)
-            .await
-            .is_ok()
-            && std::fs::metadata(&tmp)
-                .map(|meta| meta.len() > 0)
-                .unwrap_or(false)
-        {
-            let _ = std::fs::rename(&tmp, &target);
-            let _ = std::fs::remove_file(&log);
-            return Ok(target);
-        }
+    let result = kdj_providers::finish::extract_audio(path, &tmp, 0, &log, &cancel).await;
+    let _ = std::fs::remove_file(&log);
+    if result.is_ok()
+        && std::fs::metadata(&tmp)
+            .map(|meta| meta.len() > 0)
+            .unwrap_or(false)
+    {
+        let _ = std::fs::rename(&tmp, &target);
+        return Ok(target);
     }
     let _ = std::fs::remove_file(&tmp);
     Err(ApiError::new(
         StatusCode::UNPROCESSABLE_ENTITY,
-        "抽不出音轨（文件可能损坏或没有音频流）",
+        match result {
+            Err(error) if !kdj_providers::ffmpeg::available() => format!("抽不出音轨：{error:#}"),
+            _ => "抽不出音轨（文件可能损坏或没有音频流）".to_string(),
+        },
     ))
 }
 
