@@ -19,6 +19,7 @@ flate2 = "1.1.9"
 futures-util = "0.3.33"
 hex = "0.4.3"
 hls-transmux = { version = "=0.2.1", default-features = false }
+kdj-media = { version = "1.1.0-rc18", path = "../kdj-media" }
 # 受控媒体请求判断系统代理是否对本跳生效，与 reqwest 读代理用的是同一个匹配器。
 http = "1"
 hyper-util = { version = "=0.1.20", default-features = false, features = ["client-proxy"] }

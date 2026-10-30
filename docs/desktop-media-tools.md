@@ -4,6 +4,15 @@ Mac（Apple Silicon / Intel）及 Windows x64 在“设置 → 媒体工具”�
 
 已存在的系统 / Homebrew 安装会自动识别；工具就绪后仍可导入另一套或重新安装。Windows 其他架构暂不支持一键安装，但可导入兼容架构的工具；Linux 沿用系统包安装。
 
+## 哪些功能要用 FFmpeg
+
+FFmpeg 是可选的。剪辑工程（合成、HDR、预览代理、缩略图、剪辑导出）要用它；其余功能不需要：
+
+- 下载：B 站 DASH、YouTube 分轨的音画合并，抽纯音频，Offset 掐头和补静音，YouTube Music 的 HLS 回退和 WebM Opus 整理，都由 `crates/kdj-media`（纯 Rust 的 MP4 读写，Offset 时用系统 AAC 编码器重编音轨）完成。仍要 FFmpeg 的：CRF 转码、MKV 成品、只有 FLV 单流的 B 站视频的纯音频 / 纯视频 / Offset、非 AAC 音轨加 Offset。
+- 可视化导出：画面由 WebView 的 WebCodecs 硬件编码，音轨是原曲的 AAC（原样复制）或系统 AAC 编码器（macOS AudioToolbox、Windows Media Foundation、Android MediaCodec）编的，MP4 由 kdj-media 封装。WebView 没有硬件 H.264 编码器（macOS 10.15、多数 Linux）或没有系统 AAC 编码器（Linux）时才退回 FFmpeg。
+- 曲库：分片 M4A 的时长、视频文件的音轨（MP4 里的 AAC）、B 站 Offset 自动校准都不需要 FFmpeg。视频封面帧、WebView 播不了的视频的兼容转码、WebM / MKV 视频的音轨仍要 FFmpeg。
+- AI 工具：`kdj align` 的本地文件、`kdj visualizer render`（由打开的窗口渲染）不需要；`kdj peek` 截帧、在线视频的对齐要用。
+
 ## 安装与恢复
 
 一键安装自动完成下载、校验、解压和运行验证。下载失败时可重试，也可导入已有的 ZIP、7Z 或已解压文件夹；压缩格式按文件内容识别，分开的 FFmpeg / ffprobe 包可同时选择。加密压缩包不支持。文件夹可选择 bin、工具包根目录或最多四层的外层目录。界面完整显示失败步骤、请求地址及错误详情，并可复制。成功后当次会话立即可用，无需重启。

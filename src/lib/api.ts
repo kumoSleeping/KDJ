@@ -1303,6 +1303,10 @@ export const visualizerApi = {
   // stalls the thread that draws the next frame for about twice as long (17 vs 9 ms at 1080p).
   frame: (id: string, token: number, index: number, pixels: ArrayBuffer, signal?: AbortSignal) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}/frames`, { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-KDJ-Activity-Recorded": "1", "X-KDJ-Video-Frame": `${token}:${index}` }, body: new Blob([pixels]), signal }),
   cancel: (id: string, keepalive = false) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST", keepalive }),
+  /** `kdj visualizer render`: the first window to claim a request renders it. */
+  claimCliRender: (id: string) => request<{ claimed: boolean }>(`/visualizer/render/${encodeURIComponent(id)}/claim`, { method: "POST" }),
+  finishCliRender: (id: string, result: { report: Record<string, unknown> } | { error: string }) =>
+    request<{ delivered: boolean }>(`/visualizer/render/${encodeURIComponent(id)}/done`, { method: "POST", body: JSON.stringify(result) }),
 };
 
 /**

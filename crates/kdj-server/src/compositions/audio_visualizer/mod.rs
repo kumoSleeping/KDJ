@@ -65,7 +65,7 @@ impl Stage {
 impl Drop for Stage {
     fn drop(&mut self) {
         // Exact owned paths only; never recursively erase an unexpected file.
-        for name in ["render.mp4", "arc.pgm", "disc.pgm"] {
+        for name in ["render.mp4", "arc.pgm", "disc.pgm", "video.h264s", "audio.aac"] {
             let _ = std::fs::remove_file(self.0.join(name));
         }
         let _ = std::fs::remove_dir(&self.0);

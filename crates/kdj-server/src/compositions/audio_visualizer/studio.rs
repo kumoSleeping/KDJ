@@ -1,7 +1,9 @@
 //! Authenticated editor transport. A bounded window of uploaded frames supplies the
-//! existing replayable FFmpeg pipe; no frame sequence is retained on disk. The editor
-//! uploads raw RGBA or I420 frames for FFmpeg to encode, or H.264 it encoded itself
-//! (closed GOPs in Annex B), which FFmpeg only muxes with the audio.
+//! export; no frame sequence is retained on disk. The editor uploads H.264 it encoded
+//! itself (closed GOPs in Annex B), which `kdj-media` puts into an MP4 with the song's
+//! AAC (copied, or encoded by the system encoder) without FFmpeg, on every platform.
+//! Without a hardware encoder in the WebView it uploads raw RGBA or I420 frames for
+//! FFmpeg to encode instead; only that path needs FFmpeg.
 use super::{check, destination, source, Stage};
 use crate::{error::{ApiError, ApiResult}, state::AppState};
 use crate::compositions::{acceleration, frame_pipe::{self, FrameSource, FramePixels}, media};
@@ -209,6 +211,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/visualizer/analyze", post(analyze))
         .route("/api/visualizer/export", post(start))
         .route("/api/visualizer/render", post(cover_render))
+        .route("/api/visualizer/render/{id}/claim", post(claim_cover_render))
+        .route("/api/visualizer/render/{id}/done", post(finish_cover_render))
         .route("/api/visualizer/jobs/{id}", get(poll))
         .route("/api/visualizer/jobs/{id}/cancel", post(cancel))
         .route("/api/visualizer/jobs/{id}/frames", post(frame).layer(DefaultBodyLimit::max(MAX_FRAME.max(MAX_CHUNK))))
@@ -223,11 +227,53 @@ fn track_audio(state: &AppState, id: i64) -> Result<PathBuf> {
     let track = state.library.get(id)?.context("曲目不存在")?;
     source(&track.path).context("请先把完整歌曲下载到本地曲库，不能使用流媒体占位或在线试听地址")
 }
-/// A visualizer rendered without the editor (the AI's `kdj visualizer render`): the song's own
-/// cover in the default scene, through the server's exporter. It is the base layout, not the
-/// studio's styled look — the studio's scenes live in the window, not here.
+/// A visualizer for the AI's `kdj visualizer render`: the song's own cover in the studio's
+/// default project, rendered and encoded by an open KDJ window exactly as the editor exports
+/// (WebCodecs, no FFmpeg). Only when no window takes it does the server draw the base layout
+/// with FFmpeg's filter graph (`graph.rs`), where FFmpeg is installed.
 #[derive(Deserialize)]
 struct CoverRender { track_id: i64, output_path: String, #[serde(default)] width: Option<u32>, #[serde(default)] height: Option<u32> }
+
+/// A render handed to a window: claimed once, answered once. Dropping the CLI request forgets it.
+struct WindowRender { claim: Option<tokio::sync::oneshot::Sender<()>>, done: Option<tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>> }
+fn window_renders() -> &'static Mutex<HashMap<String, WindowRender>> {
+    static RENDERS: std::sync::OnceLock<Mutex<HashMap<String, WindowRender>>> = std::sync::OnceLock::new();
+    RENDERS.get_or_init(Default::default)
+}
+/// How long an open window has to take the render before the server's own path runs.
+const WINDOW_CLAIM: Duration = Duration::from_secs(8);
+
+async fn render_in_window(state: &AppState, p: &CoverRender) -> ApiResult<Option<serde_json::Value>> {
+    let id = format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>());
+    let (claim, claimed) = tokio::sync::oneshot::channel();
+    let (done, finished) = tokio::sync::oneshot::channel();
+    window_renders().lock().unwrap().insert(id.clone(), WindowRender { claim: Some(claim), done: Some(done) });
+    struct Forget(String);
+    impl Drop for Forget { fn drop(&mut self) { window_renders().lock().unwrap().remove(&self.0); } }
+    let _forget = Forget(id.clone());
+    state.hub.publish("visualizer.render.requested", &serde_json::json!({ "id": id, "track_id": p.track_id, "output_path": p.output_path, "width": p.width, "height": p.height }));
+    if !matches!(tokio::time::timeout(WINDOW_CLAIM, claimed).await, Ok(Ok(()))) { return Ok(None); }
+    match finished.await {
+        Ok(Ok(report)) => Ok(Some(report)),
+        Ok(Err(error)) => Err(ApiError::new(axum::http::StatusCode::UNPROCESSABLE_ENTITY, error)),
+        Err(_) => Err(ApiError::new(axum::http::StatusCode::UNPROCESSABLE_ENTITY, "渲染可视化的窗口已关闭")),
+    }
+}
+async fn claim_cover_render(Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+    let claim = window_renders().lock().unwrap().get_mut(&id).and_then(|render| render.claim.take());
+    let taken = claim.is_some_and(|claim| claim.send(()).is_ok());
+    Ok(Json(serde_json::json!({ "claimed": taken })))
+}
+#[derive(Deserialize)]
+struct WindowRenderResult { #[serde(default)] error: Option<String>, #[serde(default)] report: Option<serde_json::Value> }
+async fn finish_cover_render(Path(id): Path<String>, Json(result): Json<WindowRenderResult>) -> ApiResult<Json<serde_json::Value>> {
+    let done = window_renders().lock().unwrap().get_mut(&id).and_then(|render| render.done.take());
+    let answer = match (result.error, result.report) {
+        (None, Some(report)) => Ok(report),
+        (error, _) => Err(error.unwrap_or_else(|| "可视化渲染失败".into())),
+    };
+    Ok(Json(serde_json::json!({ "delivered": done.is_some_and(|done| done.send(answer).is_ok()) })))
+}
 
 async fn cover_render(State(state): State<Arc<AppState>>, Json(p): Json<CoverRender>) -> ApiResult<Json<serde_json::Value>> {
     let audio = track_audio(&state, p.track_id)?;
@@ -235,6 +281,10 @@ async fn cover_render(State(state): State<Arc<AppState>>, Json(p): Json<CoverRen
     api_check(output.is_absolute(), "输出路径要是绝对路径")?;
     let folder = output.parent().context("输出路径没有文件夹")?.to_path_buf();
     let (bytes, mime) = kdj_providers::tags::read_cover(&audio).context("这首歌没有内嵌封面，可视化需要一张图片")?;
+    if let Some(report) = render_in_window(&state, &p).await? {
+        return Ok(Json(report));
+    }
+    api_check(kdj_providers::ffmpeg::available(), "没有打开的 KDJ 窗口来渲染可视化，这台设备上也没有 FFmpeg")?;
     let extension = if mime.contains("png") { "png" } else { "jpg" };
     let cover = folder.join(format!(".kdj-visualizer-cover-{:016x}.{extension}", rand::random::<u64>()));
     std::fs::write(&cover, &bytes).context("封面写不出来")?;
@@ -314,16 +364,22 @@ async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> 
     if let Some(bytes) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return Ok(analysis_response(bytes));
     }
-    let probe = media::probe(&audio, &cancel).await?;
-    let duration = probe.check(false)?;
-    api_check((1..=MAX_DURATION_MS).contains(&duration), "初版支持最长 30 分钟的完整音频")?;
+    // The container's own length, read by the same decoder the analysis uses: no FFmpeg,
+    // so phones analyze as well. Headers that say nothing leave the check to the decode.
+    let header = { let path = audio.clone(); tokio::task::spawn_blocking(move || kdj_analysis::decode::probe_duration(&path)).await.map_err(anyhow::Error::from)?? };
+    // A fragmented MP4 states no length in its header (symphonia reports 0): only the decode counts.
+    let header_ms = header.filter(|secs| secs.is_finite() && *secs > 0.).map(|secs| secs * 1000.);
+    let length = |ms: f64| api_check(ms >= 1. && ms <= MAX_DURATION_MS as f64, "初版支持最长 30 分钟的完整音频");
+    if let Some(ms) = header_ms { length(ms)?; }
     let path = audio.clone(); let token = cancel.clone();
     let timeline = tokio::task::spawn_blocking(move || {
         let _background = kdj_core::thread_qos::prefer_background();
         kdj_analysis::visualizer::analyze_at_fps(&path, &p.spectrum, 60, &|| token.is_cancelled())
     }).await.map_err(anyhow::Error::from)??;
     api_check(fingerprint(&audio)? == signature, "分析期间歌曲已变化，请重新打开工程")?;
-    api_check((timeline.duration_seconds() * 1000. - duration as f64).abs() <= 250., "音轨解码不完整，不能导出")?;
+    let decoded_ms = timeline.duration_seconds() * 1000.;
+    length(decoded_ms)?;
+    if let Some(ms) = header_ms { api_check((decoded_ms - ms).abs() <= 250., "音轨解码不完整，不能导出")?; }
     let bytes = Bytes::from(serde_json::to_vec(&Analyzed { timeline, signature }).map_err(anyhow::Error::from)?);
     cache.lock().unwrap_or_else(|e| e.into_inner()).insert(key, bytes.clone());
     Ok(analysis_response(bytes))
@@ -378,8 +434,9 @@ impl Export {
     }
 }
 async fn start(State(state): State<Arc<AppState>>, Extension(jobs): Extension<Arc<Jobs>>, Json(p): Json<Export>) -> ApiResult<Json<Snapshot>> {
-    api_check(cfg!(any(target_os = "macos", target_os = "windows")), "视频导出仅支持 Windows 和 macOS")?;
     p.validate()?;
+    // Editor-encoded video needs nothing else; raw frames need FFmpeg to encode them.
+    api_check(p.pixel_format == PixelFormat::H264 || kdj_providers::ffmpeg::available(), "这个 WebView 没有可用的硬件视频编码器，软件编码需要 FFmpeg")?;
     let audio = track_audio(&state, p.track_id)?;
     api_check(fingerprint(&audio)? == p.signature, "歌曲已变化，请重新分析后导出")?;
     let output = destination(&p.output_path)?;
@@ -469,9 +526,8 @@ async fn render(p: &Export, audio: &std::path::Path, output: &std::path::Path, j
     let token = job.cancel.clone();
     let _work = tokio::task::spawn_blocking(move || work_scheduler().acquire(WorkRequest::new(WorkClass::MediaComposition), || token.is_cancelled()).map_err(|_| anyhow::anyhow!("可视化导出已取消"))).await??;
     check(&job.cancel)?;
-    let probe = media::probe(audio, &job.cancel).await?;
-    ensure!(probe.streams.iter().filter(|s| s.codec_type == "audio").count() == 1, "需要只有一条音轨的完整音频文件");
-    ensure!((probe.check(false)? as f64 - p.duration * 1000.).abs() <= 250., "音频时长已变化或不完整");
+    let header = { let path = audio.to_path_buf(); tokio::task::spawn_blocking(move || kdj_analysis::decode::probe_duration(&path)).await?? };
+    ensure!(header.filter(|secs| secs.is_finite() && *secs > 0.).is_none_or(|secs| (secs - p.duration).abs() <= 0.25), "音频时长已变化或不完整");
     ensure!(fingerprint(audio)? == p.signature, "音频已变化，未开始编码");
     let stage = Stage::new(output.parent().context("输出目录无效")?)?;
     job.update(|s| { s.phase = "encoding".into(); s.status = "绘制与编码".into(); });
@@ -479,8 +535,12 @@ async fn render(p: &Export, audio: &std::path::Path, output: &std::path::Path, j
     if p.pixel_format == PixelFormat::H264 {
         // Nothing left to encode but the audio, and no other encoder to retry on.
         job.update(|s| s.status = "系统硬件编码".into());
-        frame_pipe::render(&kdj_providers::ffmpeg::binary()?, &mux_args(p, audio, &stage.0), duration, &job.cancel, job.clone(),
-            |v| job.update(|s| s.progress = s.progress.max(v * 0.96))).await?;
+        match editor_sound(p, audio).await? {
+            Some(sound) => mux_editor_video(p, sound, audio, &stage.0, job.clone()).await?,
+            // Neither an AAC song to copy nor a system AAC encoder (Linux): FFmpeg encodes the audio.
+            None => frame_pipe::render(&kdj_providers::ffmpeg::binary().context("这台设备没有系统 AAC 编码器，导出音轨需要 FFmpeg")?, &mux_args(p, audio, &stage.0), duration, &job.cancel, job.clone(),
+                |v| job.update(|s| s.progress = s.progress.max(v * 0.96))).await?,
+        }
     } else {
         let bitrate = if p.video_bitrate > 0 { p.video_bitrate } else { acceleration::bitrate(p.width, p.height, p.fps as f64) };
         acceleration::render_frames(&render_args(p, audio, &stage.0), duration, &job.cancel, p.acceleration,
@@ -490,10 +550,8 @@ async fn render(p: &Export, audio: &std::path::Path, output: &std::path::Path, j
     check(&job.cancel)?;
     job.update(|s| { s.phase = "validating".into(); s.status = "校验画面、音轨和文件版本".into(); s.progress = 0.97; s.demand = None; });
     let temporary = stage.0.join("render.mp4");
-    let actual = media::probe(&temporary, &job.cancel).await?;
-    let expected = media::Probe { streams: vec![media::Stream { codec_type: "video".into(), width: p.width, height: p.height, avg_frame_rate: format!("{}/1", p.fps), ..Default::default() }], ..Default::default() };
-    media::validate(&expected, &actual, (p.duration * 1000.).round() as i64)?;
-    ensure!(actual.video().is_some_and(|v| v.codec_name == "h264" && v.pix_fmt == "yuv420p") && actual.audio().is_some_and(|a| a.codec_name == "aac"), "成品缺少 H.264 画面或 AAC 音轨");
+    let checked = { let path = temporary.clone(); tokio::task::spawn_blocking(move || kdj_media::export::check(&path)).await?? };
+    validate_output(p, &checked)?;
     ensure!(fingerprint(audio)? == p.signature, "导出期间音频已变化，未提交成品");
     // Windows FlushFileBuffers requires GENERIC_WRITE, even after FFmpeg exits.
     std::fs::File::options().write(true).open(&temporary)
@@ -505,6 +563,87 @@ async fn render(p: &Export, audio: &std::path::Path, output: &std::path::Path, j
     g.snapshot.phase = "done".into(); g.snapshot.status = "完成".into(); g.snapshot.progress = 1.; g.snapshot.output_path = output.to_string_lossy().into_owned(); g.snapshot.demand = None;
     #[cfg(unix)] if let Err(e) = std::fs::File::open(output.parent().unwrap()).and_then(|d| d.sync_all()) { g.snapshot.status = format!("成品已生成，目录同步警告：{e}"); }
     job.publish(&mut g); Ok(())
+}
+
+/// The read-back export against the request: picture size, every frame, both tracks
+/// as long as the song within a frame and a bit (the tolerance FFmpeg's path had).
+fn validate_output(p: &Export, checked: &kdj_media::export::Checked) -> Result<()> {
+    let expected = p.duration * 1000.;
+    let tolerance = (2000. / p.fps as f64).ceil() + 60.;
+    ensure!((checked.width, checked.height) == (p.width, p.height), "成品画面尺寸 {}x{} 与画布不符", checked.width, checked.height);
+    ensure!(checked.frames == p.frames(), "成品帧数 {} 与预期 {} 不符", checked.frames, p.frames());
+    ensure!((checked.video_secs * 1000. - expected).abs() <= tolerance && (checked.audio_secs * 1000. - expected).abs() <= tolerance,
+        "成品时长校验失败：预期 {expected:.0} ms，视频 {:.0} ms，音频 {:.0} ms", checked.video_secs * 1000., checked.audio_secs * 1000.);
+    ensure!(!p.audio_48k || checked.audio_rate == 48_000, "成品音轨不是 48 kHz");
+    Ok(())
+}
+
+/// Where the export's AAC comes from. Both present the song exactly as symphonia decoded
+/// it for the analysis, so the picture keeps the timing the editor previewed.
+enum Sound {
+    /// The song already is AAC at the wanted rate: its frames are copied.
+    Copy(kdj_media::mp4::write::OutTrack),
+    /// The system encoder makes it, alongside the video.
+    Encode { rate: u32, frames: u64 },
+}
+
+/// `None` where neither is possible (no AAC song, no system encoder: Linux).
+async fn editor_sound(p: &Export, audio: &std::path::Path) -> Result<Option<Sound>> {
+    let (duration, audio_48k, audio) = (p.duration, p.audio_48k, audio.to_path_buf());
+    tokio::task::spawn_blocking(move || {
+        let source = kdj_media::pcm::inspect(&audio)?;
+        let rate = if audio_48k || ![44_100, 48_000].contains(&source.sample_rate) { 48_000 } else { source.sample_rate };
+        let frames = (duration * rate as f64).round() as u64;
+        Ok(match kdj_media::audio::copy(&audio, 1, Some(rate), Some(frames)) {
+            Some(track) => Some(Sound::Copy(track)),
+            None if kdj_media::aac::available() => Some(Sound::Encode { rate, frames }),
+            None => None,
+        })
+    }).await?
+}
+
+/// Takes the editor's GOPs in order as they arrive, encodes the audio meanwhile, and
+/// writes the MP4 when the last GOP is in.
+async fn mux_editor_video(p: &Export, sound: Sound, audio: &std::path::Path, stage: &std::path::Path, job: Arc<Job>) -> Result<()> {
+    let (p, audio, stage) = (p.clone(), audio.to_path_buf(), stage.to_path_buf());
+    tokio::task::spawn_blocking(move || {
+        let samples = stage.join("video.h264s");
+        let scratch = stage.join("audio.aac");
+        let encoding = match &sound {
+            Sound::Copy(_) => None,
+            &Sound::Encode { rate, frames } => {
+                let (audio, scratch, cancel) = (audio.clone(), scratch.clone(), job.cancel.clone());
+                Some(std::thread::Builder::new().name("visualizer-aac".into()).spawn(move || {
+                    let _background = kdj_core::thread_qos::prefer_background();
+                    let shape = kdj_media::audio::Shape { frames: Some(frames), ..Default::default() };
+                    kdj_media::audio::encode(&audio, &scratch, 1, Some(rate), 256_000, shape, &|| cancel.is_cancelled())
+                })?)
+            }
+        };
+        let video = (|| {
+            let mut video = kdj_media::export::VideoTrack::create(&samples, 0, p.width, p.height, p.fps)?;
+            for index in 0..job.frame_count() {
+                let gop = job.receive_frame(index, &job.cancel)?;
+                video.push_gop(&gop).with_context(|| format!("第 {index} 段视频无法封装"))?;
+            }
+            ensure!(video.frames() == p.frames(), "编辑器提供了 {} 帧，应为 {} 帧", video.frames(), p.frames());
+            video.finish()
+        })();
+        // Joined on every path: the encoder must be done with its scratch file before it is removed.
+        let encoded = encoding.map(|thread| thread.join().map_err(|_| anyhow::anyhow!("音频编码线程异常退出")).and_then(|r| r.context("音轨编码失败")));
+        let result = (|| {
+            let video = video?;
+            let (audio, audio_source) = match (sound, encoded) {
+                (Sound::Copy(track), _) => (track, audio.clone()),
+                (_, Some(encoded)) => (encoded?, scratch.clone()),
+                (_, None) => unreachable!(),
+            };
+            kdj_media::mp4::write::write(&stage.join("render.mp4"), &[samples.as_path(), audio_source.as_path()], &[video, audio], kdj_media::mp4::write::Brand::Mp4, &|| job.cancel.is_cancelled())
+        })();
+        let _ = std::fs::remove_file(&samples);
+        let _ = std::fs::remove_file(&scratch);
+        result
+    }).await?
 }
 
 #[cfg(test)]

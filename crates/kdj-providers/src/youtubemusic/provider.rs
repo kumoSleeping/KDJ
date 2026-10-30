@@ -244,7 +244,8 @@ impl YoutubeMusicProvider {
         }).await
     }
 
-    /// HLS 音频轨提取：`-vn -c:a copy` 把 TS 里的 AAC 原样装进 m4a。
+    /// HLS 音频轨提取：hls-transmux 把清单里码率最高的一档（音画合流的 TS）转成 MP4，
+    /// 再把其中的 AAC 原样装进 m4a。都不经 FFmpeg；纯 Rust 失败而有 FFmpeg 时退回 FFmpeg。
     /// HLS 是按分片拉取的，没有逐字节进度；跑完一次性报总量。
     async fn download_hls(
         &self,
@@ -252,26 +253,35 @@ impl YoutubeMusicProvider {
         output: &std::path::Path,
         job: &DownloadJob<'_>,
     ) -> Result<()> {
-        anyhow::ensure!(
-            crate::ffmpeg::available(),
-            "需要 FFmpeg 才能下载 HLS 音频流"
-        );
         let log_path = self.ctx.data_dir.join("ytm-hls-ffmpeg.log");
-        let args = vec![
-            "-y".to_string(),
-            "-i".to_string(),
-            url.to_string(),
-            "-vn".to_string(),
-            "-c:a".to_string(),
-            "copy".to_string(),
-            "-f".to_string(),
-            "ipod".to_string(),
-            output.to_string_lossy().into_owned(),
-        ];
         job.report(0, 0);
-        crate::ffmpeg::run(&args, &log_path, &job.cancel)
-            .await
-            .context("FFmpeg 提取 HLS 音轨失败")?;
+        let video = output.with_extension(format!("hls-{:016x}.partial", rand::random::<u64>()));
+        let native = async {
+            crate::youtube::hls_download::download_youtube_hls(url, &video, &job.cancel, &job.progress).await?;
+            job.check_canceled()?;
+            crate::finish::extract_audio(&video, output, 0, &log_path, &job.cancel).await
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&video).await;
+        if let Err(error) = native {
+            job.check_canceled()?;
+            anyhow::ensure!(crate::ffmpeg::available(), "{error:#}");
+            tracing::warn!(error = %format!("{error:#}"), "纯 Rust 下载 HLS 失败，改用 FFmpeg");
+            let args = vec![
+                "-y".to_string(),
+                "-i".to_string(),
+                url.to_string(),
+                "-vn".to_string(),
+                "-c:a".to_string(),
+                "copy".to_string(),
+                "-f".to_string(),
+                "ipod".to_string(),
+                output.to_string_lossy().into_owned(),
+            ];
+            crate::ffmpeg::run(&args, &log_path, &job.cancel)
+                .await
+                .context("FFmpeg 提取 HLS 音轨失败")?;
+        }
         job.check_canceled()?;
         let size = std::fs::metadata(output)
             .map(|meta| meta.len())
@@ -281,29 +291,15 @@ impl YoutubeMusicProvider {
     }
 
     /// 播放 API 的 Opus 装在 WebM 容器里。WebM 在曲库中会被当成视频，而且
-    /// 常见 DJ 软件无法写封面；无损重封装成 Ogg Opus 后再走统一标签链路。
+    /// 常见 DJ 软件无法写封面；无损重封装成 Ogg Opus（kdj-media，逐包复制）后再走统一标签链路。
     async fn remux_webm_opus(&self, input: &std::path::Path, job: &DownloadJob<'_>) -> Result<()> {
-        anyhow::ensure!(
-            crate::ffmpeg::available(),
-            "需要 FFmpeg 才能整理 WebM 音频格式"
-        );
         let converted =
             input.with_extension(format!("ytm-opus-{:016x}.partial", rand::random::<u64>()));
-        let log_path = self.ctx.data_dir.join("ytm-audio-ffmpeg.log");
-        let args = vec![
-            "-y".to_string(),
-            "-i".to_string(),
-            input.to_string_lossy().into_owned(),
-            "-vn".to_string(),
-            "-map".to_string(),
-            "0:a:0".to_string(),
-            "-c:a".to_string(),
-            "copy".to_string(),
-            "-f".to_string(),
-            "opus".to_string(),
-            converted.to_string_lossy().into_owned(),
-        ];
-        if let Err(error) = crate::ffmpeg::run(&args, &log_path, &job.cancel).await {
+        let (from, to, cancel) = (input.to_path_buf(), converted.clone(), job.cancel.clone());
+        let result = tokio::task::spawn_blocking(move || kdj_media::webm::opus_to_ogg(&from, &to, &|| cancel.is_cancelled()))
+            .await
+            .context("整理 YouTube Music Opus 音频的线程异常退出")?;
+        if let Err(error) = result {
             let _ = tokio::fs::remove_file(&converted).await;
             return Err(error).context("整理 YouTube Music Opus 音频失败");
         }
@@ -774,7 +770,7 @@ impl MusicProvider for YoutubeMusicProvider {
         let ext = match &stream {
             StreamSource::Direct { .. } if remux_webm => "opus".to_string(),
             StreamSource::Direct { ext, .. } => ext.clone(),
-            // HLS 交给 FFmpeg 提取音轨，产物统一 m4a（TS 里的 AAC 原样封装）
+            // HLS 转成 MP4 后提取音轨，产物统一 m4a（TS 里的 AAC 原样封装）
             StreamSource::Hls { .. } => "m4a".to_string(),
         };
         let output_dir = self.ctx.platform_dir(Platform::Ytm)?;

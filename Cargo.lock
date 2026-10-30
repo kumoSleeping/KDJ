@@ -3181,6 +3181,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kdj-media"
+version = "1.1.0-rc18"
+dependencies = [
+ "anyhow",
+ "rubato",
+ "symphonia",
+ "tracing",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
+]
+
+[[package]]
 name = "kdj-playback"
 version = "1.1.0-rc18"
 dependencies = [
@@ -3231,6 +3243,7 @@ dependencies = [
  "hyper-util",
  "image",
  "kdj-core",
+ "kdj-media",
  "libc",
  "lofty",
  "md-5",
@@ -3276,6 +3289,7 @@ dependencies = [
  "kdj-analysis",
  "kdj-core",
  "kdj-library",
+ "kdj-media",
  "kdj-providers",
  "notify",
  "rand 0.10.2",

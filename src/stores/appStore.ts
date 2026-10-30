@@ -689,5 +689,9 @@ export function connectEvents(): () => void {
       const payload = event.payload;
       void import("../lib/kdjvPlay").then(module => module.handleKdjvProxy(payload.source));
     }
+    if (event.type === "visualizer.render.requested") {
+      const payload = event.payload;
+      void import("../lib/visualizerCliRender").then(module => module.renderForCli(payload));
+    }
   });
 }

@@ -278,6 +278,27 @@ pub struct AlignBody {
 }
 
 async fn pcm(state: &Arc<AppState>, media: &Media, cancel: &CancellationToken) -> ApiResult<Vec<f32>> {
+    // A local file is decoded by symphonia, from where players start it (as FFmpeg would);
+    // online video, and files symphonia cannot read, still go through FFmpeg.
+    if let Media::File { path, .. } = media {
+        let (path, token) = (path.clone(), cancel.clone());
+        let native = tokio::task::spawn_blocking(move || {
+            let channels = kdj_media::pcm::inspect(&path)?.channels as usize;
+            let mut mono = Vec::new();
+            kdj_media::pcm::decode_played(&path, Some(alignment::SAMPLE_RATE as u32), Some((alignment::SAMPLE_RATE * MAX_AUDIO_SECONDS) as u64), &|| token.is_cancelled(), &mut |pcm| {
+                mono.extend(pcm.chunks(channels).map(|frame| frame.iter().sum::<f32>() / channels as f32));
+                Ok(())
+            })?;
+            anyhow::Ok(mono)
+        })
+        .await
+        .map_err(|error| ApiError::bad_request(format!("读取音轨失败：{error}")))?;
+        match native {
+            Ok(mono) => return Ok(mono),
+            Err(error) if !kdj_providers::ffmpeg::available() => return Err(ApiError::bad_request(format!("读取音轨失败：{error:#}"))),
+            Err(_) => {}
+        }
+    }
     let mut args: Vec<String> = ["-v", "error", "-nostdin", "-threads", "1"].map(str::to_owned).to_vec();
     args.extend(input_args(state, media, true).await?);
     args.extend(["-map", "0:a:0", "-t"].map(str::to_owned));

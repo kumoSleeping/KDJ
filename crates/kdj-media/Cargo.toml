@@ -1,0 +1,20 @@
+[package]
+name = "kdj-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure-Rust MP4 remuxing and the system AAC encoders: downloads and visualizer exports without FFmpeg."
+
+[dependencies]
+anyhow = "1.0.104"
+rubato = "4.0.0"
+symphonia = { version = "0.5.4", default-features = false, features = ["aac", "alac", "mp3", "isomp4", "mkv", "ogg", "vorbis", "flac", "wav", "pcm"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+anyhow = "1.0.104"
+
+# Media Foundation's AAC encoder MFT. Same pair as kdj-player's pin.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "=0.61.3", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_DirectShow"] }
+windows-core = "=0.61.2"
