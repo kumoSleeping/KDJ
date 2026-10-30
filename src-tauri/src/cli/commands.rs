@@ -15,9 +15,9 @@ const POLL: Duration = Duration::from_millis(500);
 
 /// `kdj status` 里唯一的说明文字。命令和参数从 clap 生成，这里只写 clap 表达不了的约定。
 const NOTES: [&str; 8] = [
-    "输出都是一行 JSON：成功 {\"ok\":true,\"data\":…}；失败 {\"ok\":false,\"error\":{\"code\",\"message\"}}，code 为 usage / not_found / ambiguous / failed。",
+    "输出都是一行 JSON：成功 {\"ok\":true,\"data\":…}；失败 {\"ok\":false,\"error\":{\"code\",\"message\"}}，code 为 usage / not_found / ambiguous / failed。退出码：0 成功，2 usage，其余失败 1。",
     "search 的结果和 status 的 playlists 都带 ref：把 ref 交给 download 下载，或交给 search 展开歌单、专辑、歌手。ref 存在 KDJ 内存里，KDJ 重启后请重新 search；bilibili:BV…[:pN] 与 youtube:<id> 这类视频 ref 随时可用。",
-    "download 和 login 会一直运行到结束才输出。整张歌单或长视频可能要好几分钟，请放到后台运行或调大命令超时；中断命令就会取消。",
+    "download 默认下到 download.default_dir，--to 可以换成曲库根目录（download.library_roots）里任意一个已存在的文件夹。download 和 login 会一直运行到结束才输出。整张歌单或长视频可能要好几分钟，请放到后台运行或调大命令超时；中断命令就会取消。",
     "下载完成后 KDJ 自动入库并分析。移动、改名、删除、整理文件请直接用你自己的文件工具；放进 download.library_roots 下的文件会被 KDJ 自动跟上。",
     "library get 缺少分析时会当场补齐再返回（可能要几十秒）；时间单位都是秒，grid.downbeats 是小节线。",
     "peek 把截图存成 JPEG 文件并返回路径（多张时另有一张按时间顺序拼好的 sheet），用你看图片的工具打开即可；截图只用来核对画面内容，判断不了音画是否同步。",

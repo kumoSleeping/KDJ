@@ -102,7 +102,7 @@ function normalizeInfo(raw: unknown): BridgeInfo {
 async function createTauriBridge(): Promise<KdjBridge> {
   const info = normalizeInfo(await tauriInvoke<unknown>("get_bridge_info"));
   const desktop = ["darwin", "win32", "linux"].includes(info.platform);
-  const cliSupported = ["darwin", "win32"].includes(info.platform);
+  const cliSupported = ["darwin", "win32", "linux"].includes(info.platform);
   // 只认 Rust 报的平台名。iOS 沙盒里不存在系统级浮层，那边这些命令没有实现，
   // 靠 UA 猜会在 iPhone 上调到不存在的插件命令。
   const android = info.platform === "android";

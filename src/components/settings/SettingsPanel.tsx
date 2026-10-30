@@ -53,6 +53,7 @@ import { AccountRow, linkedAccount, linkedPlatforms } from "./AccountRow";
 import { ActivityLogPanel } from "./ActivityLogPanel";
 import { UpdateRow } from "./UpdateRow";
 import { FfmpegPanel } from "./FfmpegPanel";
+import { CliPanel } from "./CliPanel";
 import { TASK_STAY_CHOICES, useTaskStayPref, type TaskStaySeconds } from "../../lib/taskStayPref";
 
 import "./Preferences.css";
@@ -769,6 +770,7 @@ export function SettingsPanel({ preferences = false, page }: {
           />
         </Panel>}
 
+        {on("system") && <CliPanel />}
         {on("system") && <ActivityLogPanel />}
 
         {on("ffmpeg") && ["darwin", "win32", "linux"].includes(getBridge().platform)

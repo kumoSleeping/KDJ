@@ -1,8 +1,8 @@
 //! 桌面 CLI 入口的检测、安装与版本校验。
 //!
 //! KDJ 的 CLI 与桌面应用是同一个二进制。这里不复制一份会随更新变旧的程序：
-//! macOS 安装 `/usr/local/bin/kdj` 软链接，Windows 安装用户级 `kdj.cmd`
-//! 启动器并把它所在目录加入用户 PATH。
+//! macOS 安装 `/usr/local/bin/kdj` 软链接，Linux 安装 `~/.local/bin/kdj` 软链接（AppImage
+//! 链到 AppImage 文件本身），Windows 安装用户级 `kdj.cmd` 启动器并把它所在目录加入用户 PATH。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -71,7 +71,7 @@ fn state_for_version(version: Option<&str>) -> CliInstallState {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod platform {
     use std::fs;
     use std::io::ErrorKind;
@@ -79,7 +79,26 @@ mod platform {
 
     use super::*;
 
-    const DEFAULT_INSTALL_PATH: &str = "/usr/local/bin/kdj";
+    /// macOS 用系统 PATH 里一定有的 `/usr/local/bin`（要时请管理员授权）；Linux 用不需要
+    /// 权限的 `~/.local/bin`，多数发行版的登录 shell 已把它放进 PATH。
+    fn default_install_path() -> PathBuf {
+        if cfg!(target_os = "macos") {
+            PathBuf::from("/usr/local/bin/kdj")
+        } else {
+            kdj_core::config::home_dir().join(".local/bin/kdj")
+        }
+    }
+
+    /// 链接要指向的程序。AppImage 运行时 `current_exe` 在每次挂载都不同的临时目录里，
+    /// 链接要指向 AppImage 文件本身（`APPIMAGE`）。
+    fn source_executable() -> Result<PathBuf> {
+        if cfg!(target_os = "linux") {
+            if let Some(image) = std::env::var_os("APPIMAGE").map(PathBuf::from).filter(|p| p.is_file()) {
+                return Ok(image);
+            }
+        }
+        std::env::current_exe().context("无法取得 KDJ 可执行文件路径")
+    }
 
     #[derive(Debug)]
     enum AliasState {
@@ -89,9 +108,8 @@ mod platform {
     }
 
     pub fn status() -> Result<CliInstallStatus> {
-        let source = std::env::current_exe().context("无法取得 KDJ 可执行文件路径")?;
-        let install_path =
-            find_owned_alias(&source).unwrap_or_else(|| PathBuf::from(DEFAULT_INSTALL_PATH));
+        let source = source_executable()?;
+        let install_path = find_owned_alias(&source).unwrap_or_else(default_install_path);
         let alias_state = alias_state(&install_path, &source)?;
         let installed_version = if matches!(alias_state, AliasState::Owned) {
             probe_version(&install_path).ok()
@@ -118,7 +136,7 @@ mod platform {
     }
 
     pub fn install() -> Result<()> {
-        let source = std::env::current_exe().context("无法取得 KDJ 可执行文件路径")?;
+        let source = source_executable()?;
         let current = status()?;
         let install_path = PathBuf::from(&current.install_path);
         match alias_state(&install_path, &source)? {
@@ -138,7 +156,11 @@ mod platform {
                     Some(ErrorKind::PermissionDenied)
                 ) =>
             {
-                install_link_with_admin(&source, &install_path)
+                if cfg!(target_os = "macos") {
+                    install_link_with_admin(&source, &install_path)
+                } else {
+                    Err(error)
+                }
             }
             Err(error) => Err(error),
         }
@@ -150,7 +172,8 @@ mod platform {
             candidates.extend(std::env::split_paths(&path).map(|dir| dir.join("kdj")));
         }
         candidates.extend([
-            PathBuf::from(DEFAULT_INSTALL_PATH),
+            default_install_path(),
+            PathBuf::from("/usr/local/bin/kdj"),
             PathBuf::from("/opt/homebrew/bin/kdj"),
             kdj_core::config::home_dir().join(".local/bin/kdj"),
             kdj_core::config::home_dir().join("bin/kdj"),
@@ -195,6 +218,11 @@ mod platform {
     }
 
     fn looks_like_kdj_bundle_executable(path: &Path) -> bool {
+        if cfg!(target_os = "linux") {
+            // A .deb / .rpm install (`kdj-app`) or an AppImage of KDJ, wherever it was moved.
+            let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            return name == "kdj-app" || (name.starts_with("kdj") && name.ends_with(".appimage"));
+        }
         let parts = path
             .components()
             .rev()
@@ -228,6 +256,7 @@ mod platform {
             .with_context(|| format!("无法安装 CLI：{}", destination.display()))
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn install_link_with_admin(source: &Path, destination: &Path) -> Result<()> {
         let parent = destination.parent().context("CLI 安装路径没有父目录")?;
         let script = concat!(
@@ -534,7 +563,7 @@ mod platform {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod platform {
     use super::*;
 
