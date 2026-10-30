@@ -50,6 +50,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/cli/search", post(crate::cli_api::search))
         .route("/api/cli/download", post(crate::cli_api::download))
         .route("/api/cli/peek", post(crate::cli_media::peek))
+        .route("/api/cli/align", post(crate::cli_media::align))
         .route("/api/cli/peek/{id}/claim", post(crate::cli_media::claim_peek))
         .route("/api/cli/peek/{id}/source", get(crate::cli_media::peek_source))
         .route("/api/cli/peek/{id}/picture", post(crate::cli_media::peek_picture))

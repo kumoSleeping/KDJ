@@ -13,7 +13,7 @@ KDJ 没在运行时，除 status 外的命令会在后台拉起它（不开窗�
 #[command(
     name = "kdj",
     version = kdj_core::VERSION,
-    about = "KDJ 命令行：帮你找歌和视频、下载、截帧、查曲库",
+    about = "KDJ 命令行：帮你找歌和视频、下载、截帧、声学定位、查曲库",
     after_help = AFTER_HELP
 )]
 pub struct Cli {
@@ -92,6 +92,16 @@ pub enum Commands {
         /// 画面宽度（像素），默认 480
         #[arg(long, value_name = "PX")]
         width: Option<u32>,
+    },
+    /// 声学定位：把视频或音频的声音对到参考曲上，返回几套定位方案（plans）；在线 B 站视频只读音轨，不下载
+    #[command(after_help = AFTER_HELP)]
+    Align {
+        /// 参考曲：曲库 id 或音频/视频文件的绝对路径
+        #[arg(long = "ref", value_name = "REF")]
+        reference: String,
+        /// 要定位的视频或音频：曲库 id、文件绝对路径、bilibili 引用或链接
+        #[arg(long, value_name = "SOURCE")]
+        video: String,
     },
     /// 查询本地曲库、把文件夹加进曲库
     #[command(after_help = AFTER_HELP)]
@@ -237,7 +247,6 @@ mod tests {
             &["kdj", "library", "analyze"],
             &["kdj", "account", "list"],
             &["kdj", "quit"],
-            &["kdj", "align", "--ref", "1", "--video", "2"],
             &["kdj", "project", "check", "a.kdjv"],
         ] {
             assert!(Cli::try_parse_from(retired).is_err(), "{retired:?}");
