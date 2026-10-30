@@ -19,7 +19,7 @@ import { CodecClip } from "../../lib/codecClip";
 import { MEDIA_SYNC_EVENT, type MediaSyncDetail } from "../../lib/mediaSync";
 import { SEEK_EVENT, type SeekDetail } from "../library/Waveform";
 import { clipAlpha, clipBox, heldClips, preparedClips, sourceTime, type LiveClip } from "../../lib/kdjvLive";
-import { projectTime, type Heard, type LiveTransport } from "./KdjvLivePicture";
+import { projectTime, type Heard, type LiveTransport } from "../../lib/kdjvClock";
 import type { KdjvLive } from "../../types";
 import type { VideoSample } from "mediabunny";
 

@@ -33,7 +33,7 @@ test("Android module graph omits production panels/export worker, keeps the visu
       assert.match(plugin.load(id), /return null/);
     }
     assert.match(plugin.load(plugin.resolveId("../visualizerStudioExport")), /throw new Error/);
-    for (const name of ["VisualizerStudioPanel", "VisualizerPopup", "VisualizerDock", "visualizerStudioRenderer", "visualizerStudioPalette", "songColor", "youtubeNativePo", "youtubeSabr", "videoPlaybackEngine"]) {
+    for (const name of ["VisualizerStudioPanel", "VisualizerPopup", "VisualizerDock", "visualizerStudioRenderer", "kdjvClock", "visualizerStudioPalette", "songColor", "youtubeNativePo", "youtubeSabr", "videoPlaybackEngine"]) {
       assert.equal(plugin.resolveId(`./${name}`), null);
     }
     assert.equal((config as any).resolve, undefined, "Android must not alias proof/SABR to unsupported");
