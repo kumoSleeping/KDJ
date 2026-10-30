@@ -11,6 +11,11 @@ export function visualizerExportAvailable(platform = currentPlatform()): boolean
   return mediaProductionAvailable(platform) || platform === "android";
 }
 
+/** No FFmpeg to fall back on: the WebView's own encoder, hardware or not, is the only one. */
+export function onlyWebViewEncodes(platform = currentPlatform()): boolean {
+  return platform === "android";
+}
+
 /**
  * What a live visualizer picture may cost. A phone keeps it at 30 frames a second on a smaller
  * backing store, also full screen: the picture is drawn on the page's main thread and heats it.

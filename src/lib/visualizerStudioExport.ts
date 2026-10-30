@@ -4,8 +4,10 @@ import { getBridge } from "./bridge";
 import { studioChunkFrames, studioVideoBitrate, studioWorkerCount } from "./visualizerStudioFrames";
 import { visualizerApi, type VisualizerJobStatus } from "./api";
 import { captureDiagnostic } from "./diagnostics";
+import { onlyWebViewEncodes } from "./platformFeatures";
 import type { StudioWorkerCommand, StudioWorkerReply, StudioWorkerRequest, StudioWorkerResult } from "./visualizerStudioExport.worker";
 
+const onlyEditorEncodes = onlyWebViewEncodes();
 const terminal = (status: VisualizerJobStatus) => ["done", "failed", "canceled"].includes(status.phase);
 /** The encoder moved past this frame, a retry replaced its pass, or the job already
  * ended. The next snapshot says which; none of these is a renderer failure. */
@@ -42,7 +44,7 @@ export async function runStudioExport(draft: VisualizerDraft, outputPath: string
     // An export encoded by the editor's renderers can lose its encoder midway (a driver
     // reset, a session taken away). It is then redone once with FFmpeg encoding.
     const { width, height } = draft.project.scene.canvas, { fps, quality } = draft.project.output;
-    for (let encode = draft.project.output.acceleration !== "software"; ; encode = false) {
+    for (let encode = onlyEditorEncodes || draft.project.output.acceleration !== "software"; ; encode = false) {
       producer = await createStudioFrameProducer(draft.project, prepared, images, signal, encode);
       signal.throwIfAborted();
       const editor = producer.format === "h264";
@@ -54,10 +56,10 @@ export async function runStudioExport(draft: VisualizerDraft, outputPath: string
           ...(producer.chunkFrames ? { chunk_frames: producer.chunkFrames } : {}) });
         status = await pumpFrames(job, producer, signal, onStatus);
       } catch (error) {
-        if (!editor || signal.aborted) throw error;
+        if (!editor || signal.aborted || onlyEditorEncodes) throw error;
         failure = error;
       }
-      if (!editor || signal.aborted || status && status.phase !== "failed") return status!;
+      if (!editor || signal.aborted || onlyEditorEncodes || status && status.phase !== "failed") return status!;
       // Respect the backend commit point: a completed file is the result.
       const final = status ?? (job ? await visualizerApi.cancel(job.id) : undefined);
       if (final?.phase === "done") return final;
@@ -183,10 +185,10 @@ class StudioWorker {
 
 /** The renderers that opened a hardware encoder writing the same parameter sets as the
  * first one that did. Drivers cap concurrent sessions, so some renderers may get none. */
-async function openStudioEncoders(workers: StudioWorker[]): Promise<{ encoders: StudioWorker[]; reason: string }> {
+async function openStudioEncoders(workers: StudioWorker[], anyEncoder: boolean): Promise<{ encoders: StudioWorker[]; reason: string }> {
   let timer = 0;
   const late = new Promise<never>((_, reject) => { timer = window.setTimeout(() => reject(new Error("硬件编码器启动超时")), ENCODER_SETUP_MS); });
-  const probes = await Promise.allSettled(workers.map(worker => Promise.race([worker.call({ type: "encoder" }), late])));
+  const probes = await Promise.allSettled(workers.map(worker => Promise.race([worker.call({ type: "encoder", anyEncoder }), late])));
   window.clearTimeout(timer);
   const encoders: StudioWorker[] = [];
   let parameters: string | undefined, reason = "";
@@ -232,10 +234,12 @@ async function createStudioWorkerPool(project: VisualizerProject, prepared: Prep
     signal.throwIfAborted();
     // The renderers are up: from here only the encoder probe is bounded, by its own limit.
     window.clearTimeout(timer);
-    const opened = encode ? await openStudioEncoders(workers) : { encoders: [], reason: "" };
+    const opened = encode ? await openStudioEncoders(workers, onlyEditorEncodes) : { encoders: [], reason: "" };
     // Encoding in the renderers pays only while most of them still draw: with fewer
     // sessions than that, every renderer uploading frames to FFmpeg is the faster pool.
-    const encoders = opened.encoders.length * 2 >= size ? opened.encoders : [];
+    // Without FFmpeg any session is the pool: phones cap their encoder sessions.
+    const encoders = onlyEditorEncodes || opened.encoders.length * 2 >= size ? opened.encoders : [];
+    if (onlyEditorEncodes && !encoders.length) throw new Error(opened.reason || "这台设备的 WebView 没有可用的视频编码器");
     if (encode && !encoders.length) console.info("[visualizer export] renderers do not encode; FFmpeg will", { sessions: opened.encoders.length, workers: size, reason: opened.reason });
     signal.throwIfAborted();
     const calibrationMs = performance.now() - started;

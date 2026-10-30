@@ -37,6 +37,9 @@ test("the editor's encoder gets the level and bitrate of its canvas", () => {
   assert.equal(studioAvcCodec(1920, 1080, 30), "avc1.640028");
   assert.equal(studioAvcCodec(1920, 1080, 60), "avc1.64002a");
   assert.equal(studioAvcCodec(320, 180, 60), "avc1.640028");
+  // A phone without a High profile encoder tries Main, then Baseline, at the same level.
+  assert.equal(studioAvcCodec(1280, 720, 30, "main"), "avc1.4d0028");
+  assert.equal(studioAvcCodec(1280, 720, 30, "baseline"), "avc1.420028");
   // Wider than 1080p already needs level 5, long before 1440p.
   assert.equal(studioAvcCodec(2560, 1080, 30), "avc1.640032");
   assert.equal(studioAvcCodec(2560, 1440, 30), "avc1.640032");
