@@ -83,6 +83,6 @@ export function ErrorReport({ problem = "" }: { problem?: string }) {
       <Button size="sm" variant="ghost" disabled={busy} onClick={() => void send()}><Send size={14} />发送</Button>
     </div>
     {shown && preview && <pre className="kd-report-body" tabIndex={0} aria-label="将发送的内容">{preview.body}</pre>}
-    <InlineNotice text={error} block report={false} onDismiss={() => setError("")} />
+    <InlineNotice text={error} block wrap report={false} onDismiss={() => setError("")} />
   </section>;
 }
