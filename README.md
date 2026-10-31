@@ -33,10 +33,10 @@ KDJ 是一款面向音乐收集、整理、分析、播放和可视化的跨平�
 
 <!-- release-package-size-badges:start -->
 <p>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc24/KDJ_1.1.0-rc24_aarch64.dmg"><img src="https://img.shields.io/badge/macOS-8.4_MB-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 8.4 MB"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc24/KDJ_1.1.0-rc24_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-6.8_MB-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 6.8 MB"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc24/KDJ_1.1.0-rc24_amd64.deb"><img src="https://img.shields.io/badge/Linux-9.8_MB-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux 9.8 MB"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc24/app-arm64-release.apk"><img src="https://img.shields.io/badge/Android-23.9_MB-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android 23.9 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc25/KDJ_1.1.0-rc25_aarch64.dmg"><img src="https://img.shields.io/badge/macOS-8.6_MB-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 8.6 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc25/KDJ_1.1.0-rc25_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-6.9_MB-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 6.9 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc25/KDJ-1.1.0-rc25-1.x86_64.rpm"><img src="https://img.shields.io/badge/Linux-9.9_MB-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux 9.9 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc25/app-arm64-release.apk"><img src="https://img.shields.io/badge/Android-24.0_MB-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android 24.0 MB"></a>
   <a href="https://github.com/kumoSleeping/KDJ/releases"><img src="https://img.shields.io/badge/More-Releases-555555?style=for-the-badge&logo=github&logoColor=white" alt="More releases"></a>
 </p>
 <!-- release-package-size-badges:end -->
