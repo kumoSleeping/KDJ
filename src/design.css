@@ -2655,6 +2655,9 @@ body[data-kd-search-pointer-dragging="true"] * {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* 一条错误要能抄给别人：字可以选中、复制（应用默认禁划选）。 */
+  user-select: text;
+  -webkit-user-select: text;
 }
 /* The keys of a notice are as small as its words: they add nothing to its height. */
 .kd-notice > .kd-btn { flex: none; height: 1.2rem; }
@@ -2662,19 +2665,23 @@ body[data-kd-search-pointer-dragging="true"] * {
 /* A notice whose words may wrap is one run of text: the mark begins its first line, the words
    wrap across the whole width at their own breaks, and the keys follow the last word. Nothing
    holds a column beside the words. */
-.kd-notice.kd-account-notice { display: block; }
-.kd-notice.kd-account-notice > .kd-chip {
+.kd-notice.kd-account-notice,
+.kd-notice[data-wrap="true"] { display: block; }
+.kd-notice.kd-account-notice > .kd-chip,
+.kd-notice[data-wrap="true"] > .kd-chip {
   display: inline;
   margin-right: 0.4rem;
   padding: 0;
 }
-.kd-notice.kd-account-notice > .kd-notice-text {
+.kd-notice.kd-account-notice > .kd-notice-text,
+.kd-notice[data-wrap="true"] > .kd-notice-text {
   display: inline;
   overflow: visible;
   white-space: normal;
   overflow-wrap: break-word;
 }
-.kd-notice.kd-account-notice > .kd-btn {
+.kd-notice.kd-account-notice > .kd-btn,
+.kd-notice[data-wrap="true"] > .kd-btn {
   vertical-align: middle;
   margin-left: 0.2rem;
 }

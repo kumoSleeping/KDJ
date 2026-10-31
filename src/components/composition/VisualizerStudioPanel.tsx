@@ -30,6 +30,7 @@ import { useLyricsStore } from "../../stores/lyricsStore";
 import { LyricsSourcePicker } from "../player/LyricsSourcePicker";
 import type { LyricsEngine } from "../../lib/lyricsPrefs";
 import { useAppStore } from "../../stores/appStore";
+import { captureDiagnostic } from "../../lib/diagnostics";
 import { usePreviewFullscreen } from "../../lib/usePreviewFullscreen";
 import { applyVisualizerPreferences, loadVisualizerPreferences, saveVisualizerPreferences, switchVisualizerContentLayout } from "../../lib/visualizerStudioPreferences";
 import { EditorSeparator, EditorTabs } from "../workspace/EditorChrome";
@@ -49,6 +50,15 @@ const studioTabs = shownStudioTabs();
 const studioTabIds = studioTabs.map(tab => tab.id);
 const exportable = visualizerExportAvailable();
 const budget = visualizerPreviewBudget();
+/** How long the song's own cover and the remembered adjustments are waited for before the picture
+ *  goes on without them: neither may keep it at its blurred placeholder for ever. */
+const COVER_WAIT_MS = 20_000, DRAFT_WAIT_MS = 6_000;
+/** `promise`, or `timeout` thrown once `ms` have passed. */
+function within<T>(promise: Promise<T>, ms: number, timeout: string): Promise<T> {
+  let timer = 0;
+  return Promise.race([promise, new Promise<never>((_, reject) => { timer = window.setTimeout(() => reject(new Error(timeout)), ms); })])
+    .finally(() => window.clearTimeout(timer));
+}
 const frameRates = [{ value: 30, label: "30 fps" }, { value: 60, label: "60 fps" }] as const;
 const qualities = [{ value: "high", label: "高" }, { value: "standard", label: "标准" }, { value: "low", label: "低" }] as const;
 function Toggle({ label, checked, disabled = false, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange: (value: boolean) => void }) {
@@ -150,6 +160,8 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
   const imageSlot = useRef(0);
   const history = useRef<{ past: VisualizerDraft[]; future: VisualizerDraft[]; last: number }>({ past: [], future: [], last: 0 });
   const saveChain = useRef(Promise.resolve());
+  // The remembered adjustments could not be read: what is on screen must not be written over them.
+  const draftUnread = useRef(false);
   const p = draft?.project;
   const defaults = useMemo(() => createVisualizerProject(track), [track.id]);
   const leftContent = p?.leftContent ?? defaults.leftContent!;
@@ -216,7 +228,17 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
       let restored: VisualizerDraft | undefined;
       try {
         const current = latestDraft.current;
-        restored = current ? { project: structuredClone(current.project), images: current.images } : await loadVisualizerDraft(track.id);
+        if (current) restored = { project: structuredClone(current.project), images: current.images };
+        else {
+          // IndexedDB in a WebView can stop answering; the picture does not wait on it for ever.
+          try { restored = await within(loadVisualizerDraft(track.id), DRAFT_WAIT_MS, "本地存储没有响应"); }
+          catch (e) {
+            if (!active) return;
+            draftUnread.current = true;
+            captureDiagnostic("visualizer", "visualizer.draft", e);
+            setNotice(`读不出这首歌记住的调整（${message(e)}），这次的调整不会保存`);
+          }
+        }
         if (restored?.images.length) validateVisualizerProject(restored.project);
       } catch { restored = undefined; }
       const install = (next: VisualizerDraft) => {
@@ -238,8 +260,17 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
       const blobs: Blob[] = [];
       // Artwork is first paint. Optional metadata must not hold it behind a network lookup.
       const lyricsPromise = api.libraryLyrics(track.id).catch(() => null);
-      const cover = await visualizerApi.cover(track.id, controller.signal).catch(() => null);
+      // A cover that does not come (its reads queue behind the list's) is not waited for for ever.
+      const coverWait = new AbortController(), giveUp = () => coverWait.abort();
+      controller.signal.addEventListener("abort", giveUp);
+      const coverTimer = window.setTimeout(giveUp, COVER_WAIT_MS);
+      const cover = await visualizerApi.cover(track.id, coverWait.signal).catch(() => null)
+        .finally(() => { window.clearTimeout(coverTimer); controller.signal.removeEventListener("abort", giveUp); });
       if (!active) return;
+      if (coverWait.signal.aborted) {
+        captureDiagnostic("visualizer", "visualizer.cover", `cover not answered within ${COVER_WAIT_MS} ms`);
+        setNotice(`封面 ${COVER_WAIT_MS / 1000} 秒还没读出来，先不用封面`);
+      }
       if (cover && cover.size <= STUDIO_IMAGE_LIMIT) blobs.push(cover);
       syncVisualizerImages(project, blobs.length); install({ project, images: blobs });
       const initialLyrics = JSON.stringify(project.lyrics);
@@ -269,7 +300,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
   }, [track.bpm, track.first_beat, track.beat_origin, track.downbeat_origin, track.downbeat_confidence]);
 
   useEffect(() => {
-    if (!draft || !dirty.current) return;
+    if (!draft || !dirty.current || draftUnread.current) return;
     const snapshot = draft;
     const timer = window.setTimeout(() => {
       saveChain.current = saveChain.current.catch(() => undefined).then(() => saveVisualizerDraft(snapshot));
@@ -293,7 +324,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
         analyzedSpectrum.current = spectrumKey; setAnalysis(result);
         // A file that ends before the length it states: everything it holds is drawn and exported.
         if (result.missing_tail) setNotice(`这首歌的文件末尾缺了约 ${result.missing_tail.toFixed(1)} 秒（文件不完整，可能是下载或拷贝时没写完），可视化和导出到 ${formatDuration(studioDuration(result.timeline))} 为止`);
-      }).catch(e => { if (!controller.signal.aborted) { setNotice(message(e)); } }).finally(() => { if (!controller.signal.aborted) setAnalyzing(false); });
+      }).catch(e => { if (!controller.signal.aborted) { captureDiagnostic("visualizer", "visualizer.analyze", e); setNotice(message(e)); } }).finally(() => { if (!controller.signal.aborted) setAnalyzing(false); });
     }, 250);
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [track.id, spectrumKey, loadAllowed, previewRequested, images.length]);
@@ -304,10 +335,19 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     version: 1, sample_rate: 22050, sample_count: Math.max(1, Math.round((track.duration || 1) * 22050)),
     fps: 30, frames: [{ bands: Array(64).fill(0), bass: 0, rms: 0, onset: 0 }],
   }), [track.duration]);
-  const prepared = useMemo(() => {
-    if (!loadAllowed || !p || !images.length || images.length !== p.scene.images.length) return null;
-    try { return prepareStudio(p, images, analysis?.timeline ?? firstPaintTimeline, previewWidth); } catch { return null; }
+  // A picture that cannot be drawn says why: swallowed, it left the blurred cover and its spinner
+  // up for ever, with nothing to report.
+  const preparation = useMemo(() => {
+    if (!loadAllowed || !p || !images.length || images.length !== p.scene.images.length) return { prepared: null, error: "" };
+    try { return { prepared: prepareStudio(p, images, analysis?.timeline ?? firstPaintTimeline, previewWidth), error: "" }; }
+    catch (e) { return { prepared: null, error: message(e) }; }
   }, [p, images, analysis, firstPaintTimeline, previewWidth, loadAllowed]);
+  const prepared = preparation.prepared, prepareError = preparation.error;
+  useEffect(() => {
+    if (!prepareError) return;
+    captureDiagnostic("visualizer", "visualizer.prepare", prepareError, `width=${previewWidth} analysed=${!!analysis}`);
+    setNotice(`画不出这首歌的可视化：${prepareError}`);
+  }, [prepareError]);
   // The popup's window is up from the first picture this song could draw (its cover, or a
   // picture saved with its project) until the song leaves. A song with neither keeps it away;
   // a picture that is only being replaced does not take it down.
@@ -713,7 +753,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
         {!inline && <img src={api.coverUrl(track.id, track.modified_at)} alt="" aria-hidden="true"
           onLoad={() => setCoverAvailable(true)} onError={() => setCoverAvailable(false)} />}
         {loadAllowed && <div className="kd-viz-empty-action">
-          {!draft || analyzing || draft.images.length ? <LoaderCircle className="kd-spin" size={20} role="status" aria-label={!draft ? "正在加载可视化" : "正在分析音频"} />
+          {(!draft || analyzing || draft.images.length) && !mediaFailed && !prepareError ? <LoaderCircle className="kd-spin" size={20} role="status" aria-label={!draft ? "正在加载可视化" : "正在分析音频"} />
             : <button type="button" disabled={busy} aria-label="添加图片" title="添加图片" onClick={() => { imageSlot.current = 0; imageInput.current?.click(); }}><ImagePlus size={20} /></button>}
         </div>}
       </div>}

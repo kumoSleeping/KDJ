@@ -311,7 +311,9 @@ async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> 
     }
     let cancel = CancellationToken::new(); let _guard = cancel.clone().drop_guard();
     static ANALYSIS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let asked = Instant::now();
     let _slot = ANALYSIS.get_or_init(|| tokio::sync::Semaphore::new(1)).acquire().await.map_err(anyhow::Error::from)?;
+    let queued_ms = asked.elapsed().as_millis();
     // Concurrent previews share the completed result instead of queuing the same whole song.
     if let Some(bytes) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return Ok(analysis_response(bytes));
@@ -323,10 +325,17 @@ async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> 
     let length = |ms: f64| api_check(ms >= 1. && ms <= MAX_DURATION_MS as f64, "初版支持最长 30 分钟的完整音频");
     if let Some(ms) = header_ms { length(ms)?; }
     let path = audio.clone(); let token = cancel.clone();
+    let started = Instant::now();
     let timeline = tokio::task::spawn_blocking(move || {
         let _background = kdj_core::thread_qos::prefer_background();
+        // The picture on screen waits for this, as the bar waits for its waveform: library
+        // analysis steps aside at its next checkpoint instead of sharing the phone's cores with it.
+        let _visible = work_scheduler().activity(WorkClass::VisibleWaveform);
         kdj_analysis::visualizer::analyze_at_fps(&path, &p.spectrum, 60, &|| token.is_cancelled())
     }).await.map_err(anyhow::Error::from)??;
+    // Like the waveform's: a phone's timing is seen only in its report.
+    crate::diagnostics::record("info", "analysis", "visualizer.timing", &format!(
+        "audio_s={:.1} queued_ms={queued_ms} analysis_ms={}", timeline.duration_seconds(), started.elapsed().as_millis()));
     api_check(fingerprint(&audio)? == signature, "分析期间歌曲已变化，请重新打开工程")?;
     let decoded_ms = timeline.duration_seconds() * 1000.;
     length(decoded_ms)?;

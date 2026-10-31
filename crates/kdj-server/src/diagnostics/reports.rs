@@ -149,31 +149,90 @@ pub async fn submit(Json(request): Json<SubmitRequest>) -> ApiResult<Json<serde_
         .map_err(ApiError::from)
 }
 
-async fn send(body: String, expected_id: &str) -> anyhow::Result<String> {
-    let client = reqwest::Client::builder()
+/// How a report travels. `Usual` is the way every other request of the app goes: the system's
+/// certificates, IPv6 or IPv4, HTTP/2 where offered. `Other` is tried once when that cannot
+/// connect: HTTP/1.1 to the collector's IPv4 addresses, checked against the Mozilla roots built
+/// into KDJ. A phone whose system store lacks the collector's root, or whose VPN drops IPv6 or
+/// HTTP/2, still reaches it; the browser on the same phone does, with its own roots and stack.
+#[derive(Clone, Copy, PartialEq)]
+enum Route {
+    Usual,
+    Other,
+}
+
+async fn client(route: Route) -> reqwest::Result<reqwest::Client> {
+    kdj_core::ensure_rustls_ring();
+    let builder = reqwest::Client::builder()
+        .user_agent(concat!("KDJ/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .build()?;
-    let mut response = client
+        .timeout(Duration::from_secs(30));
+    if route == Route::Usual {
+        return builder.build();
+    }
+    let roots = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .filter_map(|der| reqwest::Certificate::from_der(der.as_ref()).ok());
+    let mut builder = builder.http1_only().tls_certs_only(roots);
+    let host = ENDPOINT
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    // No IPv4 address found: the lookup is left to the client, which says why it failed.
+    let v4: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, 443))
+        .await
+        .map(|addrs| addrs.filter(std::net::SocketAddr::is_ipv4).collect())
+        .unwrap_or_default();
+    if !v4.is_empty() {
+        builder = builder.resolve_to_addrs(host, &v4);
+    }
+    builder.build()
+}
+
+/// What a request that got no answer says: every cause in the chain (DNS, TLS, refused…).
+fn cause(error: &reqwest::Error) -> String {
+    let mut cause = String::new();
+    let mut source: Option<&dyn std::error::Error> = Some(error);
+    while let Some(current) = source {
+        cause.push_str(if cause.is_empty() { "" } else { "：" });
+        cause.push_str(&current.to_string());
+        source = current.source();
+    }
+    cause
+}
+
+async fn post(route: Route, body: String) -> Result<reqwest::Response, reqwest::Error> {
+    client(route)
+        .await?
         .post(ENDPOINT)
         .header("Content-Type", "application/json")
         .body(body)
         .send()
         .await
-        .map_err(|error| {
-            // 带上真正的原因（DNS、TLS、被拒绝、超时……）：只说「失败或超时」时，瞬间失败和
-            // 等满 30 秒的超时看起来一样，没法判断是网络还是代理的问题。
-            let mut cause = String::new();
-            let mut source: Option<&dyn std::error::Error> = Some(&error);
-            while let Some(current) = source {
-                cause.push_str(if cause.is_empty() { "" } else { "：" });
-                cause.push_str(&current.to_string());
-                source = current.source();
+}
+
+async fn send(body: String, expected_id: &str) -> anyhow::Result<String> {
+    let mut response = match post(Route::Usual, body.clone()).await {
+        Ok(response) => response,
+        // A timeout has already waited its 30 seconds: it is not waited for twice.
+        Err(first) if first.is_timeout() => anyhow::bail!(
+            "上报超时，未自动重试；可手动重试同一报告（{}）",
+            cause(&first)
+        ),
+        Err(first) => match post(Route::Other, body).await {
+            Ok(response) => response,
+            // Both ways are named: which one failed how is what tells a phone's network apart.
+            Err(second) => {
+                let kind = if second.is_timeout() { "超时" } else { "连接失败" };
+                anyhow::bail!(
+                    "上报{kind}，已换 IPv4 / HTTP/1.1 / 内置根证书重试一次；可手动重试同一报告（第一次：{}；第二次：{}）",
+                    cause(&first),
+                    cause(&second)
+                )
             }
-            let kind = if error.is_timeout() { "超时" } else { "连接失败" };
-            anyhow::anyhow!("上报{kind}，未自动重试；可手动重试同一报告（{cause}）")
-        })?;
+        },
+    };
     anyhow::ensure!(
         response.status().is_success(),
         "收集器返回 HTTP {}，未自动重试",

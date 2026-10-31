@@ -10,6 +10,8 @@ import "./DiagnosticsPanel.css";
 
 /**
  * 日志：打开日志文件夹，或把错误上报给开发者（展开在原处，见 ErrorReport）。
+ * Android 没有「打开日志文件夹」：日志在应用私有目录里，FileProvider 不覆盖它
+ * （「Failed to find configured root」），也没有文件管理器能打开那个目录。看日志用上报的「查看内容」。
  * 只是打开这个面板不轮询、不联网。
  */
 export function ActivityLogPanel() {
@@ -44,7 +46,7 @@ export function ActivityLogPanel() {
   useEffect(() => () => landing.current.forEach(timer => window.clearTimeout(timer)), []);
   return <Panel heading="日志" dense>
     <div ref={anchor} className="kd-diagnostic-actions">
-      <Button variant="ghost" size="sm" disabled={opening} onClick={() => {
+      {getBridge().platform !== "android" && <Button variant="ghost" size="sm" disabled={opening} onClick={() => {
         setOpening(true); setError("");
         void api.diagnostics.directory().then(({ path }) => getBridge().openPath(path))
           // Android's plugin rejects with a plain object ({ message }), not an Error.
@@ -52,7 +54,7 @@ export function ActivityLogPanel() {
             : typeof (error as { message?: unknown })?.message === "string" ? (error as { message: string }).message
             : String(error)))
           .finally(() => setOpening(false));
-      }}><FolderOpen size={14}/>打开日志文件夹</Button>
+      }}><FolderOpen size={14}/>打开日志文件夹</Button>}
       <Button variant="ghost" size="sm" aria-expanded={reporting} onClick={() => {
         setRequest(current => ({ epoch: current.epoch, problem: "" }));
         setReporting(open => !open);

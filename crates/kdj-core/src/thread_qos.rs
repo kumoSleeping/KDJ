@@ -25,8 +25,13 @@ pub fn prefer_live_audio() {
 /// Background work mostly runs on shared blocking-pool threads, and the next task on the same
 /// thread is often interactive: a playback command, a library query, a cover. A demotion that
 /// outlived its task left those running at background priority behind the analysis workers.
+///
+/// Linux and Android: `nice` is relative, so a pool thread that ran a background task twice was at
+/// 19, and every later task on it (a cover, the visualizer's analysis the listener waits for) ran
+/// there too. The level is set absolutely and the one before it put back; a desktop Linux thread
+/// that may not raise itself again stays at 10, never lower.
 #[must_use = "the thread returns to its normal priority when this is dropped"]
-pub struct BackgroundPriority(());
+pub struct BackgroundPriority(#[allow(dead_code)] Option<i32>);
 
 impl Drop for BackgroundPriority {
     fn drop(&mut self) {
@@ -35,7 +40,13 @@ impl Drop for BackgroundPriority {
             let _ =
                 libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_DEFAULT, 0);
         }
-        // Linux and Android: an unprivileged thread cannot lower its nice value again.
+        // Android lets an app raise its own threads again; desktop Linux refuses, which is ignored.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some(previous) = self.0 {
+            unsafe {
+                let _ = libc::setpriority(libc::PRIO_PROCESS, 0, previous);
+            }
+        }
         #[cfg(windows)]
         unsafe {
             let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
@@ -45,19 +56,44 @@ impl Drop for BackgroundPriority {
 
 /// Full-file waveform and BPM/key analysis. Must not steal the live Deck.
 pub fn prefer_background() -> BackgroundPriority {
-    #[cfg(target_os = "macos")]
+    BackgroundPriority(lower_to_background())
+}
+
+/// The level the thread had before, where it can be put back.
+#[cfg(target_os = "macos")]
+fn lower_to_background() -> Option<i32> {
     unsafe {
         let _ = libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    unsafe {
-        let _ = libc::nice(10);
+    None
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn lower_to_background() -> Option<i32> {
+    const BACKGROUND_NICE: i32 = 10;
+    // Who 0 is the calling thread on Linux. -1 is also the error value: then nothing is changed
+    // rather than a level guessed at.
+    let previous = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+    if previous == -1 || previous >= BACKGROUND_NICE {
+        return None;
     }
-    #[cfg(windows)]
+    unsafe {
+        let _ = libc::setpriority(libc::PRIO_PROCESS, 0, BACKGROUND_NICE);
+    }
+    Some(previous)
+}
+
+#[cfg(windows)]
+fn lower_to_background() -> Option<i32> {
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
-    BackgroundPriority(())
+    None
+}
+
+#[cfg(not(any(unix, windows)))]
+fn lower_to_background() -> Option<i32> {
+    None
 }
 
 /// Set the child's priority without changing a Tokio runtime thread's QoS.

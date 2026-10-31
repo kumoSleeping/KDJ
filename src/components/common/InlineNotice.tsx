@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { X } from "lucide-react";
 import { reportError, useReportEntry } from "../../lib/errorReport";
 import { Button } from "./Button";
@@ -15,6 +16,8 @@ export interface InlineNoticeProps {
   chip?: string;
   /** 出错的提示默认带「上报」；上报处自己的失败回执不带，免得绕回自己。 */
   report?: boolean;
+  /** 一开始就整段换行显示（上报失败的原因就在末尾的括号里，截掉就什么也看不出）。 */
+  wrap?: boolean;
 }
 
 /**
@@ -32,6 +35,7 @@ export interface InlineNoticeProps {
  * 出错的提示都带一个「上报」键，直达设置里给开发者的上报处（`reportError`）；没有设置抽屉的
  * 窗口里不出现。提示默认占一行、放不下就截断；允许换行的地方（账号、混音操作），它是
  * 一段正常的文字：「出错」打头，字按整宽换行，键跟在最后一个字后面，谁也不单占一栏。
+ * 截断的提示点一下字就这样展开成全文，再点收回；字可以长按选中、复制（手机上没有悬停提示）。
  */
 export function InlineNotice({
   text,
@@ -41,16 +45,25 @@ export function InlineNotice({
   tone = "warn",
   chip,
   report = true,
+  wrap = false,
 }: InlineNoticeProps) {
   const canReport = useReportEntry(state => state.ready) && tone === "warn" && report;
+  // The text that was opened: another notice in the same place starts on one line again.
+  const [opened, setOpened] = useState<string | null>(null);
   if (!text) return null;
+  const open = wrap || opened === text;
   const classes = ["kd-notice", className ?? ""].filter(Boolean).join(" ");
   return (
-    <div className={classes} data-block={block || undefined} data-kd-motion="pop" role="status">
+    <div className={classes} data-block={block || undefined} data-wrap={open || undefined} data-kd-motion="pop" role="status">
       <span className="kd-chip" data-tone={tone}>
         {chip ?? (tone === "ok" ? "完成" : "出错")}
       </span>
-      <span className="kd-notice-text kd-muted" title={text}>
+      <span className="kd-notice-text kd-muted" title={text}
+        onClick={wrap ? undefined : () => {
+          // A long press that selected the words is a copy, not a tap.
+          if (!window.getSelection()?.isCollapsed) return;
+          setOpened(open ? null : text);
+        }}>
         {text}
       </span>
       {canReport && (
