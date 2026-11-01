@@ -4,7 +4,7 @@ import { getBridge } from "./bridge";
 import { studioChunkFrames, studioVideoBitrate, studioWorkerCount } from "./visualizerStudioFrames";
 import { visualizerApi, type VisualizerJobStatus } from "./api";
 import { NO_BACKGROUND_DRAWING, NO_VIDEO_ENCODER } from "./visualizerExportSupport";
-import type { StudioFrameTiming, StudioWorkerCommand, StudioWorkerReply, StudioWorkerRequest, StudioWorkerResult } from "./visualizerStudioExport.worker";
+import type { StudioFrameTiming, StudioWorkerCommand, StudioWorkerProgress, StudioWorkerReply, StudioWorkerRequest, StudioWorkerResult, StudioWorkerStep } from "./visualizerStudioExport.worker";
 import { captureDiagnostic } from "./diagnostics";
 
 const terminal = (status: VisualizerJobStatus) => ["done", "failed", "canceled"].includes(status.phase);
@@ -18,6 +18,10 @@ interface FrameProducer {
   slots: number;
   chunkFrames: number;
   upload(job: string, token: number, index: number): Promise<VisualizerJobStatus>;
+  /** Frames drawn so far by every renderer: the server waits as long as this grows. */
+  drawn(): number;
+  /** Why a renderer has stopped moving, once one has. */
+  stuck(): Error | undefined;
   release(): void;
 }
 
@@ -76,6 +80,8 @@ async function pumpFrames(first: VisualizerJobStatus, producer: FrameProducer, s
     while (true) {
       signal.throwIfAborted();
       if (failure !== undefined) throw failure;
+      const stuck = producer.stuck();
+      if (stuck) throw stuck;
       const now = performance.now();
       if (now - lastUi >= 200 || terminal(latest)) { onStatus(latest); lastUi = now; }
       if (terminal(latest)) return latest;
@@ -95,7 +101,7 @@ async function pumpFrames(first: VisualizerJobStatus, producer: FrameProducer, s
       // A GOP takes a renderer seconds, and nothing else tells the server the editor is alive.
       if (!polling) {
         polling = true;
-        visualizerApi.poll(first.id, demand?.token ?? 0, signal)
+        visualizerApi.poll(first.id, demand?.token ?? 0, signal, producer.drawn())
           .then(accept, error => { failure ??= error; })
           .finally(() => { polling = false; changed(); });
       }
@@ -109,6 +115,10 @@ async function pumpFrames(first: VisualizerJobStatus, producer: FrameProducer, s
 const WORKER_SETUP_MS = 30_000;
 /** Opening a hardware session and encoding four frames; a driver that hangs must not hold the export. */
 const ENCODER_SETUP_MS = 15_000;
+/** A renderer that has not finished a step of a frame for this long is stuck, however slow the
+ * machine (the server gives up after 120 s without any frame). */
+const RENDERER_STALL_MS = 90_000;
+const STEPS: Record<StudioWorkerStep, string> = { draw: "绘制画面", queue: "等编码器接收画面", flush: "等编码器交出这一秒的视频", send: "上传到本机服务" };
 
 class StudioWorker {
   private calls = new Map<number, { resolve: (result: StudioWorkerResult) => void; reject: (error: Error) => void }>();
@@ -118,11 +128,18 @@ class StudioWorker {
   // start it and fall back to the editor-thread producer.
   readonly worker = new Worker(new URL("./visualizerStudioExport.worker.ts", import.meta.url), { type: "module" });
   pending = 0;
+  /** Frames this renderer has drawn, what it is doing, and when it last moved. */
+  drawn = 0;
+  step: StudioWorkerStep | undefined;
+  work = "";
+  moved = performance.now();
   constructor() {
-    this.worker.onmessage = (event: MessageEvent<StudioWorkerReply>) => {
+    this.worker.onmessage = (event: MessageEvent<StudioWorkerReply | StudioWorkerProgress>) => {
+      this.moved = performance.now();
+      if ("progress" in event.data) { ({ drawn: this.drawn, step: this.step } = event.data.progress); return; }
       const reply = event.data, call = this.calls.get(reply.id);
       if (!call) return;
-      this.calls.delete(reply.id); this.pending--;
+      this.calls.delete(reply.id); this.pending--; this.step = undefined;
       if (reply.ok) call.resolve(reply); else call.reject(new Error(reply.message));
     };
     this.worker.onerror = event => { event.preventDefault(); this.fail(new Error(event.message || "可视化导出线程异常退出")); };
@@ -131,6 +148,8 @@ class StudioWorker {
   call(command: StudioWorkerCommand, transfer: Transferable[] = []): Promise<StudioWorkerResult> {
     if (this.dead) return Promise.reject(this.dead);
     const id = ++this.next;
+    if (!this.pending) this.moved = performance.now();
+    this.work = command.type === "encode" ? `第 ${command.index + 1} 秒` : command.type;
     return new Promise((resolve, reject) => {
       this.calls.set(id, { resolve, reject }); this.pending++;
       this.worker.postMessage({ id, command } satisfies StudioWorkerRequest, transfer);
@@ -203,6 +222,10 @@ async function createStudioWorkerPool(project: VisualizerProject, prepared: Prep
     if (!encoders.length) throw new Error(reason || NO_VIDEO_ENCODER);
     signal.throwIfAborted();
     const calibrationMs = performance.now() - started;
+    // Before any frame: a report of an export that never finishes a second still says how it began.
+    captureDiagnostic("visualizer-export", "setup", JSON.stringify({ workers: size, encoders: encoders.length, calibrationMs: Math.round(calibrationMs),
+      willReadFrequently: hint, calibrationFramesPerSecond: Object.fromEntries([...rates].map(([key, rate]) => [String(key), +(rate * 1000).toFixed(2)])) }),
+      `width=${width} height=${height} fps=${fps} images=${images.length} imagePixels=${imagePixels}${reason ? ` reason=${reason}` : ""}`, "info");
     let frames = 0;
     const timings = new Map<StudioWorker, StudioFrameTiming>();
     const log = (encoder: string, active: number) => {
@@ -224,6 +247,14 @@ async function createStudioWorkerPool(project: VisualizerProject, prepared: Prep
         if (timing) timings.set(worker, timing);
         frames += Math.min(chunkFrames, count - index * chunkFrames);
         return status!;
+      },
+      drawn: () => encoders.reduce((sum, worker) => sum + worker.drawn, 0),
+      stuck() {
+        const now = performance.now();
+        const k = encoders.findIndex(worker => worker.pending > 0 && now - worker.moved > RENDERER_STALL_MS);
+        if (k < 0) return undefined;
+        const worker = encoders[k], seconds = Math.round((now - worker.moved) / 1000);
+        return new Error(`导出线程 ${k + 1}/${encoders.length} 在${worker.work}已 ${seconds} 秒没有进展，停在${worker.step ? STEPS[worker.step] : "等待线程回应"}（已画 ${worker.drawn} 帧）`);
       },
       release() {
         for (const worker of encoders) worker.terminate();
