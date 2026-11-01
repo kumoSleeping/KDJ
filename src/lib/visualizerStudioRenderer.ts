@@ -933,10 +933,11 @@ function paintLyrics(c: CanvasRenderingContext2D, s: PreparedStudio, t: number):
   if (s.project.lyrics.mode !== "off") paintRollingLyrics(c, s, t + s.project.lyrics.offset);
 }
 
-/** 作词、作曲、编曲 and any credit typed by hand, on one line where they fit at `size`; otherwise
- * the first two on a line and the rest on the next, rather than all of them set smaller. */
+/** 作词、作曲、编曲 (shown only when switched on) and any credit typed by hand, on one line where
+ * they fit at `size`; otherwise the first two on a line and the rest on the next, rather than all
+ * of them set smaller. */
 function creditRows(c: CanvasRenderingContext2D, p: VisualizerProject, size: number, width: number, font: string): string[] {
-  const parts = STUDIO_CREDITS.flatMap(key => { const name = p.text[key]?.trim(); return name ? [`${STUDIO_CREDIT_LABELS[key]} ${name}`] : []; });
+  const parts = !p.text.showCredits ? [] : STUDIO_CREDITS.flatMap(key => { const name = p.text[key]?.trim(); return name ? [`${STUDIO_CREDIT_LABELS[key]} ${name}`] : []; });
   const typed = p.text.credit.trim(); if (typed) parts.push(typed);
   const line = parts.join("\u3000"); if (parts.length < 2) return parts;
   c.save(); c.font = `400 ${size}px ${font}`; const fits = c.measureText(line).width <= width; c.restore();

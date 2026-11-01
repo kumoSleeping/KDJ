@@ -7,7 +7,7 @@ interface Preferences {
   version: 1 | 2 | 3 | 4;
   scene: Pick<VisualizerProject["scene"], "canvas" | "arc" | "spectrum"> & { disc: Omit<VisualizerProject["scene"]["disc"], "image"> };
   look: Omit<VisualizerProject["look"], "leftFit" | "rightFit">;
-  text: Pick<VisualizerProject["text"], "visible" | "showAlbum" | "scale" | "font" | "progress">;
+  text: Pick<VisualizerProject["text"], "visible" | "showAlbum" | "showCredits" | "scale" | "font" | "progress">;
   lyrics: { enabled: boolean; size: number; showTranslation?: boolean };
   output: Omit<VisualizerProject["output"], "filename">;
   layouts: Record<LayoutMode, Layout>;
@@ -24,7 +24,7 @@ export function applyVisualizerPreferences(p: VisualizerProject, settings: Prefe
   p.scene.disc = { ...s.scene.disc, image: p.scene.disc.image };
   const { leftFit, rightFit } = p.look;
   p.look = { ...s.look, leftFit, rightFit };
-  p.text = { ...p.text, visible: s.text.visible, showAlbum: s.text.showAlbum ?? false, scale: s.text.scale, font: s.text.font, progress: s.text.progress };
+  p.text = { ...p.text, visible: s.text.visible, showAlbum: s.text.showAlbum ?? false, showCredits: s.text.showCredits ?? false, scale: s.text.scale, font: s.text.font, progress: s.text.progress };
   p.lyrics.size = s.lyrics.size;
   p.lyrics.showTranslation = s.lyrics.showTranslation ?? true;
   p.lyrics.mode = s.lyrics.enabled && hasStudioLyrics(p.lyrics.lrc) ? "scroll" : "off";
@@ -71,7 +71,7 @@ export function saveVisualizerPreferences(p: VisualizerProject, resetLayouts = f
     version: 4,
     scene: { canvas: p.scene.canvas, arc: p.scene.arc, spectrum: p.scene.spectrum, disc },
     look,
-    text: { visible: p.text.visible, showAlbum: p.text.showAlbum ?? false, scale: p.text.scale, font: p.text.font, progress: p.text.progress },
+    text: { visible: p.text.visible, showAlbum: p.text.showAlbum ?? false, showCredits: p.text.showCredits ?? false, scale: p.text.scale, font: p.text.font, progress: p.text.progress },
     lyrics: { enabled: hasStudioLyrics(p.lyrics.lrc) ? p.lyrics.mode !== "off" : previous?.lyrics.enabled ?? true, size: p.lyrics.size, showTranslation: p.lyrics.showTranslation ?? true },
     output, layouts,
   });

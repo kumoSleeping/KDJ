@@ -1,6 +1,6 @@
 import { useVisualizerExportBlocked } from "../../lib/visualizerExportSupport";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type ReactNode, type RefObject } from "react";
-import { X, PictureInPicture2, Undo2, Redo2, ImagePlus, ListPlus, RotateCcw, Captions, LoaderCircle, SlidersHorizontal } from "lucide-react";
+import { X, PictureInPicture2, Undo2, Redo2, ImagePlus, ListPlus, RotateCcw, Captions, LoaderCircle, SlidersHorizontal, Signature } from "lucide-react";
 import { createPortal } from "react-dom";
 import type { TrackSummary } from "../../types";
 import { Select } from "../common/Select";
@@ -609,6 +609,10 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
   // In a drawer the sections are the drawer's title; elsewhere the inspector carries its own tabs.
   const inDrawer = useDrawer() !== null || !!settingsTarget?.closest(".kd-drawer");
   const lyricsVisible = hasLyrics && p?.lyrics.mode !== "off";
+  // 作词、作曲、编曲 are off until switched on: on the text page, in the toolbar or in the picture's controls.
+  const hasCredits = !!p && STUDIO_CREDITS.some(key => p.text[key]?.trim());
+  const creditsVisible = hasCredits && p?.text.showCredits === true;
+  const toggleCredits = () => edit(project => { project.text.showCredits = !project.text.showCredits; });
   const togglePreviewLyrics = () => {
     if (!hasLyrics) void loadSongLyrics();
     else edit(project => { project.lyrics.mode = project.lyrics.mode === "off" ? "scroll" : "off"; });
@@ -624,6 +628,8 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     <button type="button" disabled={!p || busy || loadingLyrics} aria-busy={loadingLyrics} title={loadingLyrics ? "正在匹配歌词…" : lyricsVisible ? "隐藏歌词" : "显示歌词"}
       aria-label={lyricsVisible ? "隐藏歌词" : "显示歌词"} aria-pressed={hasLyrics ? lyricsVisible : undefined} onClick={togglePreviewLyrics}>
       {loadingLyrics ? <LoaderCircle size={14} className="kd-spin" /> : <Captions size={14} />}</button>
+    <button type="button" disabled={!hasCredits || busy} title={creditsVisible ? "隐藏作词作曲" : "显示作词作曲"}
+      aria-label={creditsVisible ? "隐藏作词作曲" : "显示作词作曲"} aria-pressed={hasCredits ? creditsVisible : undefined} onClick={toggleCredits}><Signature size={14} /></button>
     <button type="button" disabled={!p || busy} onClick={refreshAutomaticConfiguration} aria-label="刷新自动配置"
       title="恢复默认布局、字号、特效和歌曲信息；保留图片、歌词与输出设置，可撤销"><RotateCcw size={14} /></button>
     <span className="kd-editor-spacer" />
@@ -693,6 +699,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
           {/* Enter starts another line, which the picture keeps (visualizerStudioRenderer). */}
           {([["title", "标题"], ["artist", "艺人"], ["album", "专辑"]] as const).map(([key, label]) => <Row key={key} label={label}><textarea value={p.text[key]} maxLength={500}
             rows={Math.min(4, p.text[key].split("\n").length)} spellCheck={false} onChange={e => edit(n => { n.text[key] = e.target.value; })} /></Row>)}
+          <Toggle label="显示作词作曲" checked={p.text.showCredits === true} onChange={v => edit(n => { n.text.showCredits = v; })} />
           {STUDIO_CREDITS.map(key => <Row key={key} label={STUDIO_CREDIT_LABELS[key]}><input value={p.text[key] ?? ""} maxLength={500} spellCheck={false} onChange={e => edit(n => { n.text[key] = e.target.value; })} /></Row>)}
           <Toggle label="显示专辑" checked={p.text.showAlbum === true} onChange={v => edit(n => { n.text.showAlbum = v; })} />
           <Slider label="字号" value={p.text.scale} defaultValue={defaults.text.scale} min={.5} max={1.5} step={.01} format={ratio} onChange={v => edit(n => { n.text.scale = v; })} />
@@ -798,6 +805,12 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
               aria-busy={loadingLyrics} disabled={!p || busy || loadingLyrics || lyricMatching}
               onClick={event => { event.stopPropagation(); togglePreviewLyrics(); }}>
               {loadingLyrics ? <LoaderCircle size={13} className="kd-spin" /> : <Captions size={13} />}
+            </button>}
+            {(inline || floating) && !expanded && <button type="button"
+              title={creditsVisible ? "关闭作词作曲" : "开启作词作曲"}
+              aria-label={creditsVisible ? "关闭可视化作词作曲" : "开启可视化作词作曲"} aria-pressed={creditsVisible}
+              disabled={!hasCredits || busy} onClick={event => { event.stopPropagation(); toggleCredits(); }}>
+              <Signature size={13} />
             </button>}
             {exportable && inline && !expanded && <button type="button" title={exportBlocked ?? (busy ? "正在加入导出队列…" : "导出可视化")} aria-label="导出可视化"
               aria-busy={busy} disabled={!prepared || analyzing || busy || !!exportBlocked}

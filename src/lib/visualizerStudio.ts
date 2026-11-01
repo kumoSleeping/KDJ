@@ -12,7 +12,7 @@ export interface VisualizerProject {
   scene: AudioVisualizerScene;
   leftContent?: { x: number; y: number; scale: number };
   output: { fps: 30 | 60; quality?: StudioQuality; acceleration: "auto" | "software"; directory: string; directoryMode?: "download" | "custom"; filename: string; watermark?: boolean; audio48k?: boolean };
-  text: { visible: boolean; showAlbum?: boolean; title: string; artist: string; album: string; subtitle: string; collaboration: string; credit: string; lyricist?: string; composer?: string; arranger?: string; scale: number; font: "sans" | "serif"; progress: boolean };
+  text: { visible: boolean; showAlbum?: boolean; showCredits?: boolean; title: string; artist: string; album: string; subtitle: string; collaboration: string; credit: string; lyricist?: string; composer?: string; arranger?: string; scale: number; font: "sans" | "serif"; progress: boolean };
   look: { leftFit?: "auto" | "cover" | "contain"; rightFit?: "auto" | "cover" | "contain"; leftRotationRpm?: number; leftReflection?: number; mist?: number; accentMode?: "image" | "manual"; traceSpeed?: number; accent: string; leftVeil: number; mainSpectrum: boolean; smallSpectrum: "off" | "bars" | "line" | "mixed"; energyLine: boolean; spectrumGain: number; motion: number; glow: number; particles: number };
   lyrics: { mode: "off" | "subtitle" | "scroll" | "ring"; lrc: string; translation: string; showTranslation?: boolean; offset: number; size: number };
 }
@@ -37,7 +37,7 @@ export function createVisualizerProject(track: TrackSummary): VisualizerProject 
   return {
     version: 1, track: { id: track.id, path: track.path, title: track.title, artist: track.artist, album: track.album, filename: track.filename, ...studioBeatGrid(track) }, scene,
     output: { fps: 30, acceleration: "auto", watermark: true, audio48k: true, directory: "", directoryMode: "download", filename: `${safeVisualizerName(track.title || track.filename)}-可视化.mp4` },
-    text: { visible: true, showAlbum: false, title: track.title || track.filename, artist: track.artist || "", album: track.album || "", subtitle: "", collaboration: "", credit: "", lyricist: "", composer: "", arranger: "", scale: 1, font: "sans", progress: true },
+    text: { visible: true, showAlbum: false, showCredits: false, title: track.title || track.filename, artist: track.artist || "", album: track.album || "", subtitle: "", collaboration: "", credit: "", lyricist: "", composer: "", arranger: "", scale: 1, font: "sans", progress: true },
     look: { leftFit: "cover", rightFit: "auto", leftRotationRpm: .35, leftReflection: .42, mist: .38, accentMode: "image", traceSpeed: 7, accent: "#45dce8", leftVeil: DEFAULT_STUDIO_LEFT_VEIL, mainSpectrum: true, smallSpectrum: "mixed", energyLine: true, spectrumGain: 1, motion: 0.65, glow: 0.38, particles: 0.35 },
     lyrics: { mode: "off", lrc: "", translation: "", showTranslation: true, offset: 0, size: 1 },
     leftContent: { x: 0, y: 0, scale: 1 },
@@ -77,6 +77,7 @@ export function validateVisualizerProject(p: VisualizerProject): void {
   if (p.output.quality !== undefined && !["high", "standard", "low"].includes(p.output.quality)) throw new Error("画质参数无效");
   if (p.output.audio48k !== undefined && typeof p.output.audio48k !== "boolean") throw new Error("音频采样率参数无效");
   if (p.text.showAlbum !== undefined && typeof p.text.showAlbum !== "boolean") throw new Error("专辑信息开关无效");
+  if (p.text.showCredits !== undefined && typeof p.text.showCredits !== "boolean") throw new Error("作词作曲开关无效");
   const finite = (v: number, lo: number, hi: number) => Number.isFinite(v) && v >= lo && v <= hi;
   if (p.leftContent !== undefined && (!p.leftContent || !finite(p.leftContent.x, -.4, .4) || !finite(p.leftContent.y, -.4, .4) || !finite(p.leftContent.scale, .5, 1.5))) throw new Error("左侧内容布局无效");
   if (!/^#[a-f\d]{6}$/i.test(p.look.accent) || !["off", "bars", "line", "mixed"].includes(p.look.smallSpectrum) || !["off", "subtitle", "scroll", "ring"].includes(p.lyrics.mode)) throw new Error("样式参数无效");
