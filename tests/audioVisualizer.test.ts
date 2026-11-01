@@ -33,7 +33,7 @@ test("scene defaults match the Rust scene contract", () => {
 test("invalid scene parameters are rejected before drawing", () => {
   assert.throws(() => validateVisualizerScene(createAudioVisualizerScene()));
   for (const change of [
-    (s: ReturnType<typeof createAudioVisualizerScene>) => { s.images.push("second", "third"); },
+    (s: ReturnType<typeof createAudioVisualizerScene>) => { s.images.push("second", "third", "fourth"); },
     (s: ReturnType<typeof createAudioVisualizerScene>) => { s.left.zoom = NaN; },
     (s: ReturnType<typeof createAudioVisualizerScene>) => { s.right.image = 1; },
     (s: ReturnType<typeof createAudioVisualizerScene>) => { s.canvas.width = 1919; },

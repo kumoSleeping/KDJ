@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import type { TrackSummary } from "../src/types";
 import type { VisualizerFeatureTimeline } from "../src/types/audioVisualizer";
-import { createVisualizerProject, validateVisualizerProject, syncVisualizerImages, parseVisualizerLyrics, lyricIndex, sampleStudioFeatures, prepareStudioMotion, sampleStudioMotion, safeVisualizerName, studioClock, serializeVisualizerDraft, deserializeVisualizerDraft } from "../src/lib/visualizerStudio";
+import { createVisualizerProject, validateVisualizerProject, syncVisualizerImages, parseVisualizerLyrics, lyricIndex, sampleStudioFeatures, prepareStudioMotion, sampleStudioMotion, safeVisualizerName, studioClock, serializeVisualizerDraft, deserializeVisualizerDraft, studioCredits, fillStudioCredits, studioPictures, withStudioPictures } from "../src/lib/visualizerStudio";
 const track = { id: 42, path: "/music/pinned.wav", title: "JAPANIZED BLUE", artist: "cold kiss", album: "Album", filename: "pinned.wav" } as TrackSummary;
 function project() { const p = createVisualizerProject(track); syncVisualizerImages(p, 1); return p; }
 function timeline(): VisualizerFeatureTimeline { return { version: 1, sample_rate: 22050, sample_count: 22050 * 3, fps: 30, frames: Array.from({ length: 90 }, (_, i) => ({ bands: Array(64).fill(i === 30 ? .8 : 0), bass: i === 30 ? .8 : 0, rms: i === 30 ? .2 : 0, onset: i === 30 ? .7 : 0 })) }; }
@@ -15,11 +15,11 @@ test("reference defaults: required cover, 1080p canvas, small top disc, transpar
   assert.equal(p.scene.left.rotation_deg, 180); assert.equal(p.scene.disc.mode, "cover"); assert.ok(p.scene.disc.size < .3);
   assert.equal(p.look.smallSpectrum, "mixed"); assert.equal(p.lyrics.mode, "off"); assert.equal(p.track.id, 42);
 });
-test("one or two asset slots; deleting second normalizes every reference", () => {
+test("one to three asset slots; deleting the rest normalizes every reference", () => {
   const p = project(); syncVisualizerImages(p, 2); p.scene.left.image = 1; p.scene.right.image = 1; p.scene.disc.image = 1;
   validateVisualizerProject(p); syncVisualizerImages(p, 1); validateVisualizerProject(p);
   assert.deepEqual([p.scene.left.image, p.scene.right.image, p.scene.disc.image], [0, 0, 0]);
-  syncVisualizerImages(p, 3); assert.throws(() => validateVisualizerProject(p), /图片/);
+  syncVisualizerImages(p, 3); validateVisualizerProject(p); syncVisualizerImages(p, 4); assert.throws(() => validateVisualizerProject(p), /图片/);
 });
 test("invalid colors, unbounded effect values and unsupported FPS rejected", () => {
   const p = project(); p.look.motion = NaN; assert.throws(() => validateVisualizerProject(p));
@@ -74,4 +74,27 @@ test("main entry is lazy and the reference small spectrum never paints a black a
   const small = renderer.slice(renderer.indexOf("function paintSmallSpectrum"), renderer.indexOf("function paintLights"));
   assert.ok(!/fillStyle\s*=\s*["'](?:black|#000)/.test(small)); assert.ok(!small.includes('globalCompositeOperation = "multiply"'));
   assert.ok(readFileSync(new URL("../src/components/composition/VisualizerDock.tsx", import.meta.url), "utf8").includes('lazy(() => import("./VisualizerStudioPanel"))'));
+});
+
+test("作词、作曲、编曲 are read from timed lines and provider JSON lines, and are not sung as lyrics", () => {
+  const plain = "[00:00.00] 作词 : 小林\n[00:01.00] 作曲 : Aki\n[00:02.00]编曲：Ren\n[00:10.00]第一句";
+  assert.deepEqual(studioCredits(plain), { lyricist: "小林", composer: "Aki", arranger: "Ren" });
+  assert.deepEqual(parseVisualizerLyrics(plain).flatMap(cue => cue.lines), ["第一句"]);
+  const json = '{"t":0,"c":[{"tx":"作词: "},{"tx":"森"}]}\n{"t":1000,"c":[{"tx":"作曲: "},{"tx":"林"}]}\n[00:10.00]歌';
+  assert.deepEqual(studioCredits(json), { lyricist: "森", composer: "林" });
+  const p = project(); p.text.composer = "kept";
+  fillStudioCredits(p, plain);
+  assert.equal(p.text.lyricist, "小林"); assert.equal(p.text.composer, "kept"); assert.equal(p.text.arranger, "Ren");
+  p.text.arranger = "x".repeat(501); assert.throws(() => validateVisualizerProject(p), /文字过长/);
+});
+
+test("the disc and the background take the main picture until each has its own", () => {
+  const main = new Blob(["m"]), disc = new Blob(["d"]), background = new Blob(["b"]);
+  const only = withStudioPictures(project(), { main });
+  assert.deepEqual(studioPictures(only), { main, background: undefined, disc: undefined });
+  const all = withStudioPictures(only.project, { main, background, disc });
+  assert.equal(all.images.length, 3); validateVisualizerProject(all.project);
+  assert.deepEqual(studioPictures(all), { main, background, disc });
+  const back = withStudioPictures(all.project, { ...studioPictures(all), background: undefined });
+  assert.deepEqual(back.images, [main, disc]); assert.equal(back.project.scene.right.image, 0); assert.equal(back.project.scene.disc.image, 1);
 });

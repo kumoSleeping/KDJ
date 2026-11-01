@@ -1,6 +1,6 @@
 import { useVisualizerExportBlocked } from "../../lib/visualizerExportSupport";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type ReactNode, type RefObject } from "react";
-import { X, PictureInPicture2, Undo2, Redo2, ImagePlus, ListPlus, RotateCcw, Captions, LoaderCircle, SlidersHorizontal } from "lucide-react";
+import { X, PictureInPicture2, Undo2, Redo2, ImagePlus, ListPlus, RotateCcw, Captions, LoaderCircle, SlidersHorizontal, Signature } from "lucide-react";
 import { createPortal } from "react-dom";
 import type { TrackSummary } from "../../types";
 import { Select } from "../common/Select";
@@ -8,7 +8,7 @@ import { Slider } from "../common/Slider";
 import { Segmented } from "../common/Segmented";
 import type { VisualizerFeatureTimeline } from "../../types/audioVisualizer";
 import { api, visualizerApi } from "../../lib/api";
-import { createVisualizerProject, loadVisualizerDraft, saveVisualizerDraft, studioBeatGrid, studioDuration, studioLyricText, hasStudioLyrics, syncVisualizerImages, validateVisualizerProject, STUDIO_IMAGE_LIMIT, clamp, type VisualizerDraft, type VisualizerProject } from "../../lib/visualizerStudio";
+import { createVisualizerProject, loadVisualizerDraft, saveVisualizerDraft, studioBeatGrid, studioDuration, studioLyricText, hasStudioLyrics, syncVisualizerImages, validateVisualizerProject, fillStudioCredits, studioPictures, withStudioPictures, STUDIO_CREDITS, STUDIO_CREDIT_LABELS, STUDIO_IMAGE_LIMIT, clamp, type StudioPictures, type VisualizerDraft, type VisualizerProject } from "../../lib/visualizerStudio";
 import { drawStudioFrame, loadStudioImages, prepareStudio, studioPictureSideAt } from "../../lib/visualizerStudioRenderer";
 import { studioExportBytes } from "../../lib/visualizerStudioFrames";
 import { formatBytes, formatDuration } from "../../lib/format";
@@ -70,7 +70,7 @@ function Toggle({ label, checked, disabled = false, onChange }: { label: string;
 function Group({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) { return <section className="kd-viz-group" aria-label={title}><h3 title={hint}>{title}</h3><div className="kd-viz-fields">{children}</div></section>; }
 /** A named control on the parameter grid: the name in the label column, the control beside it. */
 function Row({ label, children }: { label: string; children: ReactNode }) { return <label className="kd-viz-row"><span>{label}</span>{children}</label>; }
-function ImageChoice({ blob, label, action, disabled, onPick, onRemove }: { blob?: Blob; label: string; action: string; disabled: boolean; onPick: () => void; onRemove?: () => void }) {
+function ImageChoice({ blob, borrowed = false, label, action, disabled, onPick, onRemove }: { blob?: Blob; borrowed?: boolean; label: string; action: string; disabled: boolean; onPick: () => void; onRemove?: () => void }) {
   const [url, setUrl] = useState("");
   useEffect(() => {
     if (!blob) { setUrl(""); return; }
@@ -79,7 +79,7 @@ function ImageChoice({ blob, label, action, disabled, onPick, onRemove }: { blob
   }, [blob]);
   return <div className="kd-viz-image">
     <button type="button" className="kd-viz-image-choice" disabled={disabled} aria-label={action} title={action} onClick={onPick}>
-      <span className="kd-viz-image-thumb">{url ? <img src={url} alt="" /> : <ImagePlus size={16} aria-hidden="true" />}</span><span>{label}</span>
+      <span className="kd-viz-image-thumb" data-borrowed={borrowed || undefined}>{url ? <img src={url} alt="" /> : <ImagePlus size={16} aria-hidden="true" />}</span><span>{label}</span>
     </button>
     {onRemove && <button type="button" className="kd-viz-image-remove" disabled={disabled} aria-label={`移除${label}`} title={`移除${label}`} onClick={onRemove}><X size={13} /></button>}
   </div>;
@@ -157,7 +157,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
   const canvas = useRef<HTMLCanvasElement>(null);
   const imageInput = useRef<HTMLInputElement>(null), lyricInput = useRef<HTMLInputElement>(null);
   const pictureDrag = useRef<{ side: "left" | "right"; x: number; y: number; fx: number; fy: number; scale: number; angle: number; kx: number; ky: number } | null>(null);
-  const imageSlot = useRef(0);
+  const imageSlot = useRef<keyof StudioPictures>("main");
   const history = useRef<{ past: VisualizerDraft[]; future: VisualizerDraft[]; last: number }>({ past: [], future: [], last: 0 });
   const saveChain = useRef(Promise.resolve());
   // The remembered adjustments could not be read: what is on screen must not be written over them.
@@ -253,6 +253,8 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
       if (restored) {
         restored.project.track = createVisualizerProject(track).track;
         if (!hasStudioLyrics(restored.project.lyrics.lrc)) restored.project.lyrics.mode = "off";
+        // A project kept before the credits were: read them from its lyrics once.
+        if (restored.project.text.lyricist === undefined) fillStudioCredits(restored.project, restored.project.lyrics.lrc);
         install(restored); return;
       }
       const project = createVisualizerProject(track);
@@ -283,6 +285,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
         next.lyrics.lrc = studioLyricText(lyrics.lrc || "", lyrics.word_lrc);
         next.lyrics.translation = lyrics.translated_lrc || "";
         next.lyrics.mode = hasStudioLyrics(next.lyrics.lrc) ? "scroll" : "off";
+        fillStudioCredits(next, lyrics.lrc || "");
         return { ...current, project: next };
       });
     })().catch(e => { if (active) { setMediaFailed(true); setNotice(message(e)); } });
@@ -504,18 +507,19 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     const from = redo ? history.current.future : history.current.past, to = redo ? history.current.past : history.current.future;
     const next = from.pop(); if (next) { to.push(draft); rememberCommon(next.project); setDraft(next); history.current.last = 0; }
   }
-  async function installImage(blob: Blob, slot: number) {
+  async function installImage(blob: Blob, role: keyof StudioPictures) {
     if (!draft || busy) return;
     if (blob.size > STUDIO_IMAGE_LIMIT) throw new Error("每张图片最多 16 MiB");
     await loadStudioImages([blob]);
     // Decoding can take a while; build on the draft as it is now, not as it was at the click.
     const current = latestDraft.current ?? draft;
-    const next: VisualizerDraft = { project: structuredClone(current.project), images: [...current.images] };
-    next.images[Math.min(slot, next.images.length)] = blob;
-    syncVisualizerImages(next.project, next.images.length);
-    if (slot === 1) next.project.scene.right.image = 1;
-    else { next.project.scene.left.image = 0; next.project.scene.disc.image = 0; }
+    const next = withStudioPictures(structuredClone(current.project), { ...studioPictures(current), [role]: blob });
     checkpoint(current, true); setDraft(next); setNotice("");
+  }
+  /** The background or the disc goes back to the main picture. */
+  function removePicture(role: "background" | "disc") {
+    if (!draft || busy) return;
+    replaceDraft(withStudioPictures(structuredClone(draft.project), { ...studioPictures(draft), [role]: undefined }));
   }
   async function onImage(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]; e.target.value = ""; if (!file) return;
@@ -584,13 +588,14 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
       await useLyricsStore.getState().ensure(source, { matchMissing: true, platform });
       const entry = useLyricsStore.getState().byId[track.id];
       if (entry?.error || entry?.status === "error") throw new Error(entry.error || "歌词匹配失败，请稍后重试。");
-      const lrc = entry?.meta ? studioLyricText(entry.meta.lrc, entry.meta.word_lrc) : "";
+      const lrc = entry?.meta ? studioLyricText(entry.meta.lrc, entry.meta.word_lrc) : "", raw = entry?.meta?.lrc || "";
       if (!hasStudioLyrics(lrc)) return;
       setDraft(current => {
         // Never replace text edited while a slower lyric lookup was pending.
         if (!current || current.project.lyrics.lrc !== before.lrc || current.project.lyrics.translation !== before.translation) return current;
         checkpoint(current, true);
-        const project = { ...current.project, lyrics: { ...current.project.lyrics, mode: hasStudioLyrics(before.lrc) ? current.project.lyrics.mode : "scroll" as const, lrc, translation: entry?.meta?.translated_lrc || "" } };
+        const project = { ...current.project, text: { ...current.project.text }, lyrics: { ...current.project.lyrics, mode: hasStudioLyrics(before.lrc) ? current.project.lyrics.mode : "scroll" as const, lrc, translation: entry?.meta?.translated_lrc || "" } };
+        fillStudioCredits(project, raw);
         switchVisualizerContentLayout(project, current.project); rememberCommon(project);
         return { ...current, project };
       });
@@ -604,6 +609,10 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
   // In a drawer the sections are the drawer's title; elsewhere the inspector carries its own tabs.
   const inDrawer = useDrawer() !== null || !!settingsTarget?.closest(".kd-drawer");
   const lyricsVisible = hasLyrics && p?.lyrics.mode !== "off";
+  // 作词、作曲、编曲 are off until switched on: on the text page, in the toolbar or in the picture's controls.
+  const hasCredits = !!p && STUDIO_CREDITS.some(key => p.text[key]?.trim());
+  const creditsVisible = hasCredits && p?.text.showCredits === true;
+  const toggleCredits = () => edit(project => { project.text.showCredits = !project.text.showCredits; });
   const togglePreviewLyrics = () => {
     if (!hasLyrics) void loadSongLyrics();
     else edit(project => { project.lyrics.mode = project.lyrics.mode === "off" ? "scroll" : "off"; });
@@ -619,17 +628,36 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     <button type="button" disabled={!p || busy || loadingLyrics} aria-busy={loadingLyrics} title={loadingLyrics ? "正在匹配歌词…" : lyricsVisible ? "隐藏歌词" : "显示歌词"}
       aria-label={lyricsVisible ? "隐藏歌词" : "显示歌词"} aria-pressed={hasLyrics ? lyricsVisible : undefined} onClick={togglePreviewLyrics}>
       {loadingLyrics ? <LoaderCircle size={14} className="kd-spin" /> : <Captions size={14} />}</button>
+    <button type="button" disabled={!hasCredits || busy} title={creditsVisible ? "隐藏作词作曲" : "显示作词作曲"}
+      aria-label={creditsVisible ? "隐藏作词作曲" : "显示作词作曲"} aria-pressed={hasCredits ? creditsVisible : undefined} onClick={toggleCredits}><Signature size={14} /></button>
     <button type="button" disabled={!p || busy} onClick={refreshAutomaticConfiguration} aria-label="刷新自动配置"
       title="恢复默认布局、字号、特效和歌曲信息；保留图片、歌词与输出设置，可撤销"><RotateCcw size={14} /></button>
     <span className="kd-editor-spacer" />
     {exportable && <button type="button" className="kd-viz-export" title={exportBlocked ?? "导出可视化"} aria-label="导出可视化" disabled={!prepared || analyzing || busy || !!exportBlocked} onClick={event => void enqueueExport(event.currentTarget)}><ListPlus size={14} /><span>{busy ? "加入中…" : "导出"}</span></button>}
   </div>;
   const noticeRow = notice && <div className="kd-viz-notice" role="alert">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>;
-  const pickImage = (slot: number) => { imageSlot.current = slot; imageInput.current?.click(); };
-  // Where the picture sits in its frame is set by dragging it in the preview.
+  const pickImage = (role: keyof StudioPictures) => { imageSlot.current = role; imageInput.current?.click(); };
+  const pictures = draft ? studioPictures(draft) : {};
+  // The right picture's place in its frame, also set by dragging it in the preview. A picture that
+  // fills its frame only moves the way it is larger than the frame, so at ×1 a square cover in
+  // the tall right half moves sideways and not up and down: that slider waits for a zoom.
+  const rightRoom = (() => {
+    const image = p && images[p.scene.right.image], texture = prepared?.right;
+    if (!p || !image || !texture) return { x: false, y: false };
+    const iw = image.naturalWidth, ih = image.naturalHeight, fit = p.look.rightFit || "auto";
+    if (!(fit === "cover" || (fit === "auto" && iw / ih >= .85))) return { x: true, y: true };
+    const [cw, ch] = visualizerCropExtent(texture.width, texture.height, p.scene.right.rotation_deg), zoom = p.scene.right.zoom;
+    return { x: iw - Math.floor(Math.min(iw, ih * cw / ch) / zoom) >= 2, y: ih - Math.floor(Math.min(ih, iw * ch / cw) / zoom) >= 2 };
+  })();
+  const offset = (axis: "x" | "y") => p && <div style={{ display: "contents" }} title={rightRoom[axis] ? undefined : "放大后可调"}>
+    <Slider label={axis === "x" ? "水平" : "垂直"} value={(.5 - p.scene.right[axis === "x" ? "focus_x" : "focus_y"]) * 100} defaultValue={(.5 - defaults.scene.right[axis === "x" ? "focus_x" : "focus_y"]) * 100}
+      min={-50} max={50} step={.5} origin={0} format={signedPercent} disabled={!rightRoom[axis]}
+      onChange={v => edit(n => { n.scene.right[axis === "x" ? "focus_x" : "focus_y"] = clamp(.5 - v / 100); })} />
+  </div>;
   const pictureSide = (side: "left" | "right") => p && <Group title={side === "left" ? "左侧图片" : "右侧图片"}>
     <Slider label="缩放" value={p.scene[side].zoom} defaultValue={defaults.scene[side].zoom} min={1} max={4} step={.01} format={times} onChange={v => edit(n => { n.scene[side].zoom = v; })} />
     {side === "left" && <Slider label="加深" value={p.look.leftVeil * 100} defaultValue={defaults.look.leftVeil * 100} min={0} max={100} format={percent} onChange={v => edit(n => { n.look.leftVeil = v / 100; })} />}
+    {side === "right" && <>{offset("x")}{offset("y")}</>}
   </Group>;
   const moveLeftContent = (patch: Partial<NonNullable<VisualizerProject["leftContent"]>>) => edit(n => { n.leftContent = { ...(n.leftContent ?? defaults.leftContent!), ...patch }; });
   const inspector = <aside className="kd-viz-inspector" aria-label="可视化设置">
@@ -656,9 +684,12 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
       {tab === "pictures" && <>
         <Group title="图片">
           <div className="kd-viz-images">
-            <ImageChoice blob={draft.images[0]} label="主图" action={draft.images.length ? "更换主图" : "添加主图"} disabled={busy} onPick={() => pickImage(0)} />
-            <ImageChoice blob={draft.images[1]} label="背景图" action={draft.images.length > 1 ? "更换背景图" : "添加背景图"} disabled={busy || !draft.images.length} onPick={() => pickImage(1)}
-              onRemove={draft.images.length > 1 ? () => { const project = structuredClone(p); syncVisualizerImages(project, 1); replaceDraft({ project, images: draft.images.slice(0, 1) }); } : undefined} />
+            <ImageChoice blob={pictures.main} label="主图" action={pictures.main ? "更换主图" : "添加主图"} disabled={busy} onPick={() => pickImage("main")} />
+            {/* Without a picture of its own the disc shows the main picture, greyed as borrowed. */}
+            <ImageChoice blob={pictures.disc ?? pictures.main} borrowed={!pictures.disc} label="唱片" action={pictures.disc ? "更换唱片图" : "单独设置唱片图"} disabled={busy || !pictures.main} onPick={() => pickImage("disc")}
+              onRemove={pictures.disc ? () => removePicture("disc") : undefined} />
+            <ImageChoice blob={pictures.background} label="背景图" action={pictures.background ? "更换背景图" : "添加背景图"} disabled={busy || !pictures.main} onPick={() => pickImage("background")}
+              onRemove={pictures.background ? () => removePicture("background") : undefined} />
           </div>
         </Group>
         {pictureSide("left")}{pictureSide("right")}
@@ -668,6 +699,8 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
           {/* Enter starts another line, which the picture keeps (visualizerStudioRenderer). */}
           {([["title", "标题"], ["artist", "艺人"], ["album", "专辑"]] as const).map(([key, label]) => <Row key={key} label={label}><textarea value={p.text[key]} maxLength={500}
             rows={Math.min(4, p.text[key].split("\n").length)} spellCheck={false} onChange={e => edit(n => { n.text[key] = e.target.value; })} /></Row>)}
+          <Toggle label="显示作词作曲" checked={p.text.showCredits === true} onChange={v => edit(n => { n.text.showCredits = v; })} />
+          {STUDIO_CREDITS.map(key => <Row key={key} label={STUDIO_CREDIT_LABELS[key]}><input value={p.text[key] ?? ""} maxLength={500} spellCheck={false} onChange={e => edit(n => { n.text[key] = e.target.value; })} /></Row>)}
           <Toggle label="显示专辑" checked={p.text.showAlbum === true} onChange={v => edit(n => { n.text.showAlbum = v; })} />
           <Slider label="字号" value={p.text.scale} defaultValue={defaults.text.scale} min={.5} max={1.5} step={.01} format={ratio} onChange={v => edit(n => { n.text.scale = v; })} />
         </Group>
@@ -689,7 +722,8 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
         <div className="kd-viz-row"><span>帧率</span><Segmented label="帧率" options={frameRates} value={p.output.fps} onChange={fps => edit(n => { n.output.fps = fps; })} /></div>
         <div className="kd-viz-row"><span>画质</span><Segmented label="画质" options={qualities} value={p.output.quality ?? "standard"} onChange={quality => edit(n => { n.output.quality = quality; })} /></div>
         {duration > 0 && <div className="kd-viz-row"><span>预计大小</span><output>约 {formatBytes(studioExportBytes(p.scene.canvas.width, p.scene.canvas.height, p.output.fps, duration, p.output.quality))}</output></div>}
-        <Row label="文件名"><input value={p.output.filename} onChange={e => edit(n => { n.output.filename = e.target.value; })} /></Row>
+        {/* The project's name is the export's: its task in the queue and its file, ".mp4" added. */}
+        <Row label="项目名称"><input value={p.output.filename.replace(/\.mp4$/i, "")} maxLength={150} spellCheck={false} onChange={e => edit(n => { n.output.filename = `${e.target.value}.mp4`; })} /></Row>
         <Toggle label="48 kHz 音频" checked={p.output.audio48k !== false} onChange={v => edit(n => { n.output.audio48k = v; })} />
         <Toggle label="水印" checked={p.output.watermark !== false} onChange={v => edit(n => { n.output.watermark = v; })} />
       </Group>}
@@ -754,7 +788,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
           onLoad={() => setCoverAvailable(true)} onError={() => setCoverAvailable(false)} />}
         {loadAllowed && <div className="kd-viz-empty-action">
           {(!draft || analyzing || draft.images.length) && !mediaFailed && !prepareError ? <LoaderCircle className="kd-spin" size={20} role="status" aria-label={!draft ? "正在加载可视化" : "正在分析音频"} />
-            : <button type="button" disabled={busy} aria-label="添加图片" title="添加图片" onClick={() => { imageSlot.current = 0; imageInput.current?.click(); }}><ImagePlus size={20} /></button>}
+            : <button type="button" disabled={busy} aria-label="添加图片" title="添加图片" onClick={() => pickImage("main")}><ImagePlus size={20} /></button>}
         </div>}
       </div>}
       {inline && !settingsTarget && notice && <div className="kd-viz-notice kd-viz-inline-notice" role="alert">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>}
@@ -771,6 +805,12 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
               aria-busy={loadingLyrics} disabled={!p || busy || loadingLyrics || lyricMatching}
               onClick={event => { event.stopPropagation(); togglePreviewLyrics(); }}>
               {loadingLyrics ? <LoaderCircle size={13} className="kd-spin" /> : <Captions size={13} />}
+            </button>}
+            {(inline || floating) && !expanded && <button type="button"
+              title={creditsVisible ? "关闭作词作曲" : "开启作词作曲"}
+              aria-label={creditsVisible ? "关闭可视化作词作曲" : "开启可视化作词作曲"} aria-pressed={creditsVisible}
+              disabled={!hasCredits || busy} onClick={event => { event.stopPropagation(); toggleCredits(); }}>
+              <Signature size={13} />
             </button>}
             {exportable && inline && !expanded && <button type="button" title={exportBlocked ?? (busy ? "正在加入导出队列…" : "导出可视化")} aria-label="导出可视化"
               aria-busy={busy} disabled={!prepared || analyzing || busy || !!exportBlocked}
@@ -794,6 +834,6 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     {settingsVisible && settings(inspector)}
     </div>
     <input hidden ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp,image/bmp" onChange={e => void onImage(e)} />
-    <input hidden ref={lyricInput} type="file" accept=".lrc,.txt" onChange={e => { const file = e.target.files?.[0]; e.target.value = ""; if (!file) return; if (file.size > 250000) { setNotice("歌词文件过大"); return; } void file.text().then(text => edit(n => { n.lyrics.lrc = text; })).catch(error => setNotice(message(error))); }} />
+    <input hidden ref={lyricInput} type="file" accept=".lrc,.txt" onChange={e => { const file = e.target.files?.[0]; e.target.value = ""; if (!file) return; if (file.size > 250000) { setNotice("歌词文件过大"); return; } void file.text().then(text => edit(n => { n.lyrics.lrc = text; fillStudioCredits(n, text); })).catch(error => setNotice(message(error))); }} />
   </section>;
 }

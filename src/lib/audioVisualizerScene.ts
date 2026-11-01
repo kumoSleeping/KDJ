@@ -16,7 +16,7 @@ const between = (v: number, lo: number, hi: number) => Number.isFinite(v) && v >
 export function validateVisualizerScene(scene: AudioVisualizerScene): void {
   const c = scene.canvas;
   if (scene.version !== 1 || !Number.isInteger(c.width) || !Number.isInteger(c.height) || c.width % 2 || c.height % 2 || !between(c.width, 320, 2560) || !between(c.height, 180, 1440) || c.fps !== 30) throw new Error("可视化画布参数无效");
-  if (scene.images.length < 1 || scene.images.length > 2 || scene.images.some((s) => !s.trim())) throw new Error("需要一至两张图片");
+  if (scene.images.length < 1 || scene.images.length > 3 || scene.images.some((s) => !s.trim())) throw new Error("需要一至三张图片");
   const imageIndex = (i: number) => Number.isInteger(i) && i >= 0 && i < scene.images.length;
   for (const t of [scene.left, scene.right]) {
     if (!imageIndex(t.image) || !between(t.focus_x, 0, 1) || !between(t.focus_y, 0, 1) || !between(t.zoom, 1, 4) || !between(t.rotation_deg, -180, 180) || !between(t.blur, 0, 20)) throw new Error("图片变换参数无效");
