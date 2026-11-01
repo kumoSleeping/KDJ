@@ -10,6 +10,7 @@ import {
   useNowPlayingInfo,
 } from "../../lib/nowPlayingInfo";
 import { newerRevision } from "../../lib/coverLoad";
+import { androidPlatform } from "../../lib/platformFeatures";
 import { useSongColor, useSongColorAvailable } from "../../lib/songColor";
 import { songSwapEntranceDelay } from "../../lib/songSwapMotion";
 import { useWindowTaken } from "../../lib/windowTaken";
@@ -82,6 +83,10 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
     if (!song.current.announced && playing) {
       song.current.announced = true;
       if (trackId !== null && previewing(trackId)) return;
+      // On a phone the bar under the list already shows the new song with its waveform; a
+      // second, shorter one over it has no room to add anything. With the bar away the bubble
+      // is held as the transport and is up anyway (nowPlayingInfo.ts).
+      if (androidPlatform()) return;
       entrance.current = window.setTimeout(() => {
         entrance.current = null;
         useNowPlayingInfo.getState().startPeek();
