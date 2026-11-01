@@ -12,7 +12,7 @@ export interface VisualizerProject {
   scene: AudioVisualizerScene;
   leftContent?: { x: number; y: number; scale: number };
   output: { fps: 30 | 60; quality?: StudioQuality; acceleration: "auto" | "software"; directory: string; directoryMode?: "download" | "custom"; filename: string; watermark?: boolean; audio48k?: boolean };
-  text: { visible: boolean; showAlbum?: boolean; title: string; artist: string; album: string; subtitle: string; collaboration: string; credit: string; scale: number; font: "sans" | "serif"; progress: boolean };
+  text: { visible: boolean; showAlbum?: boolean; title: string; artist: string; album: string; subtitle: string; collaboration: string; credit: string; lyricist?: string; composer?: string; arranger?: string; scale: number; font: "sans" | "serif"; progress: boolean };
   look: { leftFit?: "auto" | "cover" | "contain"; rightFit?: "auto" | "cover" | "contain"; leftRotationRpm?: number; leftReflection?: number; mist?: number; accentMode?: "image" | "manual"; traceSpeed?: number; accent: string; leftVeil: number; mainSpectrum: boolean; smallSpectrum: "off" | "bars" | "line" | "mixed"; energyLine: boolean; spectrumGain: number; motion: number; glow: number; particles: number };
   lyrics: { mode: "off" | "subtitle" | "scroll" | "ring"; lrc: string; translation: string; showTranslation?: boolean; offset: number; size: number };
 }
@@ -37,7 +37,7 @@ export function createVisualizerProject(track: TrackSummary): VisualizerProject 
   return {
     version: 1, track: { id: track.id, path: track.path, title: track.title, artist: track.artist, album: track.album, filename: track.filename, ...studioBeatGrid(track) }, scene,
     output: { fps: 30, acceleration: "auto", watermark: true, audio48k: true, directory: "", directoryMode: "download", filename: `${safeVisualizerName(track.title || track.filename)}-可视化.mp4` },
-    text: { visible: true, showAlbum: false, title: track.title || track.filename, artist: track.artist || "", album: track.album || "", subtitle: "", collaboration: "", credit: "", scale: 1, font: "sans", progress: true },
+    text: { visible: true, showAlbum: false, title: track.title || track.filename, artist: track.artist || "", album: track.album || "", subtitle: "", collaboration: "", credit: "", lyricist: "", composer: "", arranger: "", scale: 1, font: "sans", progress: true },
     look: { leftFit: "cover", rightFit: "auto", leftRotationRpm: .35, leftReflection: .42, mist: .38, accentMode: "image", traceSpeed: 7, accent: "#45dce8", leftVeil: DEFAULT_STUDIO_LEFT_VEIL, mainSpectrum: true, smallSpectrum: "mixed", energyLine: true, spectrumGain: 1, motion: 0.65, glow: 0.38, particles: 0.35 },
     lyrics: { mode: "off", lrc: "", translation: "", showTranslation: true, offset: 0, size: 1 },
     leftContent: { x: 0, y: 0, scale: 1 },
@@ -50,6 +50,23 @@ export function safeVisualizerName(name: string): string {
 export function syncVisualizerImages(project: VisualizerProject, count: number): void {
   project.scene.images = Array.from({ length: count }, (_, i) => `image:${i}`);
   for (const layer of [project.scene.left, project.scene.right, project.scene.disc]) layer.image = Math.max(0, Math.min(layer.image, count - 1));
+}
+/** The pictures by what they are for. The background (right half) and the disc take the main
+ * picture (left half) unless one of their own was chosen. */
+export interface StudioPictures { main?: Blob; background?: Blob; disc?: Blob }
+export function studioPictures({ project: { scene }, images }: VisualizerDraft): StudioPictures {
+  const own = (index: number) => index !== scene.left.image ? images[index] : undefined;
+  return { main: images[scene.left.image], background: own(scene.right.image), disc: own(scene.disc.image) };
+}
+/** The draft's images and their assignment rebuilt from `pictures`; `project` is changed in place. */
+export function withStudioPictures(project: VisualizerProject, pictures: StudioPictures): VisualizerDraft {
+  const images: Blob[] = pictures.main ? [pictures.main] : [];
+  const place = (blob?: Blob) => blob && images.length ? images.push(blob) - 1 : 0;
+  project.scene.left.image = 0;
+  project.scene.right.image = place(pictures.background);
+  project.scene.disc.image = place(pictures.disc);
+  project.scene.images = images.map((_, i) => `image:${i}`);
+  return { project, images };
 }
 export function validateVisualizerProject(p: VisualizerProject): void {
   if (!p || p.version !== 1 || !p.track || !Number.isSafeInteger(p.track.id)) throw new Error("不支持的可视化工程");
@@ -70,8 +87,41 @@ export function validateVisualizerProject(p: VisualizerProject): void {
   for (const v of [p.look.leftVeil, p.look.motion, p.look.glow, p.look.particles]) if (!finite(v, 0, 1)) throw new Error("效果强度无效");
   if (!finite(p.look.spectrumGain, 0.1, 3) || !finite(p.text.scale, 0.5, 1.5) || !finite(p.lyrics.size, 0.5, 2) || !finite(p.lyrics.offset, -60, 60) || !["sans", "serif"].includes(p.text.font)) throw new Error("文本或响应参数无效");
   for (const s of [p.text.title, p.text.artist, p.text.album, p.text.subtitle, p.text.collaboration, p.text.credit]) if (typeof s !== "string" || s.length > 500) throw new Error("文字过长（最多 500 字）");
+  for (const key of STUDIO_CREDITS) { const s = p.text[key]; if (s !== undefined && (typeof s !== "string" || s.length > 500)) throw new Error("文字过长（最多 500 字）"); }
   if (p.lyrics.showTranslation !== undefined && typeof p.lyrics.showTranslation !== "boolean") throw new Error("歌词翻译开关无效");
   if (typeof p.lyrics.lrc !== "string" || typeof p.lyrics.translation !== "string" || p.lyrics.lrc.length + p.lyrics.translation.length > 500_000) throw new Error("歌词超过容量上限");
+}
+
+/** The song's credits drawn under its name, in this order. */
+export const STUDIO_CREDITS = ["lyricist", "composer", "arranger"] as const;
+export type StudioCredit = typeof STUDIO_CREDITS[number];
+export const STUDIO_CREDIT_LABELS: Record<StudioCredit, string> = { lyricist: "作词", composer: "作曲", arranger: "编曲" };
+const CREDIT_LINE = /^\s*(作词|作詞|词|詞|作曲|曲|编曲|編曲|lyricist|lyrics|composer|music|arranger|arrangement)\s*[:：]\s*(.+?)\s*$/i;
+function creditOf(text: string): [StudioCredit, string] | null {
+  const match = text.match(CREDIT_LINE); if (!match) return null;
+  const key = match[1].toLowerCase();
+  const role: StudioCredit = /^(作词|作詞|词|詞|lyricist|lyrics)$/.test(key) ? "lyricist" : /^(作曲|曲|composer|music)$/.test(key) ? "composer" : "arranger";
+  return [role, match[2]];
+}
+/** 作词、作曲、编曲 as a song's lyrics state them: in its timed lines ("[00:00.00]作词 : …") or
+ * in a provider's JSON credit lines ({"t":0,"c":[{"tx":"作词: "},{"tx":"…"}]}). */
+export function studioCredits(raw: string): Partial<Record<StudioCredit, string>> {
+  const found: Partial<Record<StudioCredit, string>> = {};
+  for (const line of raw.split(/\r?\n/)) {
+    let text = line.replace(/\[[^\]]*\]/g, "").replace(/<[^>]*>/g, "");
+    if (line.trimStart().startsWith("{")) {
+      try { const parts = (JSON.parse(line) as { c?: { tx?: unknown }[] }).c; text = Array.isArray(parts) ? parts.map(part => typeof part?.tx === "string" ? part.tx : "").join("") : ""; }
+      catch { continue; }
+    }
+    const credit = creditOf(text);
+    if (credit && !found[credit[0]]) found[credit[0]] = credit[1].slice(0, 500);
+  }
+  return found;
+}
+/** Fills the credits the project does not have yet from `raw` lyrics; never replaces one that is set. */
+export function fillStudioCredits(project: VisualizerProject, raw: string): void {
+  const found = studioCredits(raw);
+  for (const key of STUDIO_CREDITS) if (!project.text[key]?.trim() && found[key]) project.text[key] = found[key];
 }
 
 /** Prefer timed lyrics, not provider JSON credits; reuse the main player's YRC parser. */
@@ -93,6 +143,8 @@ export function parseVisualizerLyrics(lrc: string, translation = "", showTransla
       const tags = [...line.matchAll(/\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g)];
       if (!tags.length) continue;
       const text = line.replace(/\[[^\]]*\]/g, "").replace(/<[^>]*>/g, "").trim();
+      // A credit line is drawn as the song's credits under its name, not sung as a lyric.
+      if (creditOf(text)) continue;
       for (const tag of tags) {
         if (Number(tag[2]) >= 60) continue;
         const key = Math.max(0, Math.round((Number(tag[1]) * 60 + Number(tag[2]) + Number(`0.${tag[3] || 0}`) + offset) * 1000));
@@ -239,7 +291,7 @@ export async function serializeVisualizerDraft(draft: VisualizerDraft): Promise<
 export function deserializeVisualizerDraft(text: string, track: TrackSummary): VisualizerDraft {
   if (text.length > STUDIO_IMAGE_LIMIT * 3) throw new Error("工程文件过大");
   const input = JSON.parse(text);
-  if (input.kind !== "kdj-visualizer" || input.version !== 1 || !Array.isArray(input.images) || input.images.length < 1 || input.images.length > 2) throw new Error("无效的可视化工程文件");
+  if (input.kind !== "kdj-visualizer" || input.version !== 1 || !Array.isArray(input.images) || input.images.length < 1 || input.images.length > 3) throw new Error("无效的可视化工程文件");
   const images = input.images.map((data: unknown) => {
     if (typeof data !== "string" || !/^data:image\/(png|jpeg|webp|bmp);base64,/i.test(data)) throw new Error("工程图片无效");
     const [head, bytes] = data.split(",");

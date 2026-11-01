@@ -138,7 +138,9 @@ export const useVisualizerExportStore = create<State>((set, get) => ({
     const snapshot = { project: structuredClone(draft.project), images: [...draft.images] };
     validateVisualizerProject(snapshot.project);
     const requestedName = snapshot.project.output.filename.trim();
-    if (!requestedName.toLowerCase().endsWith(".mp4") || /[<>:"/\\|?*\u0000-\u001f]/.test(requestedName) || requestedName.length > 160) throw new Error("请填写有效的 MP4 文件名（不能包含目录分隔符）");
+    // The project's name is the file's, less ".mp4" (VisualizerStudioPanel's 项目名称).
+    const projectName = requestedName.replace(/\.mp4$/i, "").trim();
+    if (!projectName || !requestedName.toLowerCase().endsWith(".mp4") || /[<>:"/\\|?*\u0000-\u001f]/.test(requestedName) || requestedName.length > 160) throw new Error("请填写项目名称，不能包含 < > : \" / \\ | ? *");
     if (!snapshot.images.length) throw new Error("请先添加图片");
     await get().initialize();
     await waitForSettingsWrites();
@@ -151,7 +153,7 @@ export const useVisualizerExportStore = create<State>((set, get) => ({
     while (reservedPaths.has(path(filename).toLowerCase()) || get().tasks.some(task => task.outputPath.toLowerCase() === path(filename).toLowerCase())) {
       filename = requestedName.slice(0, -4).slice(0, 140) + ` (${suffix++}).mp4`;
     }
-    const task: VisualizerExportTask = { id: crypto.randomUUID(), name: snapshot.project.text.title || snapshot.project.track.title || filename,
+    const task: VisualizerExportTask = { id: crypto.randomUUID(), name: filename.replace(/\.mp4$/i, ""),
       filename, outputPath: path(filename), width: snapshot.project.scene.canvas.width, height: snapshot.project.scene.canvas.height,
       fps: snapshot.project.output.fps, phase: "ready", progress: 0, status: "待导出", error: "", createdAt: Date.now(),
       trackId: snapshot.project.track.id };

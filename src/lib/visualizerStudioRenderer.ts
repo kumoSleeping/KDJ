@@ -4,7 +4,7 @@ import { fitVisualizerImage, visualizerCanvas, type VisualizerImage } from "./au
 import { beatLevel, beatPulseIndex, GLOW_REST, PULSES_PER_CYCLE, songBeat, type SongBeat } from "./songColorBeat";
 import { inkOnGround, inkTone, lightColours, parseHex, relativeLuminance, songColorPalette, toneOf } from "./songColorPalette";
 import { extractStudioPalette, type StudioPalette } from "./visualizerStudioPalette";
-import { clamp, lyricIndex, parseVisualizerLyrics, prepareStudioMotion, sampleStudioFeatures, sampleStudioMotion, studioBeatGrid, studioClock, studioDuration, studioPercentile, STUDIO_FONTS, validateVisualizerProject, type LyricLine, type StudioMotion, type VisualizerProject } from "./visualizerStudio";
+import { clamp, lyricIndex, parseVisualizerLyrics, prepareStudioMotion, sampleStudioFeatures, sampleStudioMotion, studioBeatGrid, studioClock, studioDuration, studioPercentile, STUDIO_CREDITS, STUDIO_CREDIT_LABELS, STUDIO_FONTS, validateVisualizerProject, type LyricLine, type StudioMotion, type VisualizerProject } from "./visualizerStudio";
 
 const LYRIC_ACTIVE_SCALE = 1.2;
 const LYRIC_PREVIEW_SCALE = .88;
@@ -161,7 +161,7 @@ function studioInk(accent: string, ground: number): StudioInk {
   return { ...ink, edge: ink.light ? "6,26,40" : "255,255,255" };
 }
 export async function loadStudioImages(blobs: Blob[]): Promise<HTMLImageElement[]> {
-  if (blobs.length < 1 || blobs.length > 2) throw new Error("需要一至两张图片");
+  if (blobs.length < 1 || blobs.length > 3) throw new Error("需要一至三张图片");
   return Promise.all(blobs.map(blob => new Promise<HTMLImageElement>((resolve, reject) => {
     const url = URL.createObjectURL(blob), image = new Image();
     image.onload = () => { URL.revokeObjectURL(url); if (!image.naturalWidth || image.naturalWidth * image.naturalHeight > 32_000_000) reject(new Error("图片超过 3200 万像素")); else resolve(image); };
@@ -933,6 +933,15 @@ function paintLyrics(c: CanvasRenderingContext2D, s: PreparedStudio, t: number):
   if (s.project.lyrics.mode !== "off") paintRollingLyrics(c, s, t + s.project.lyrics.offset);
 }
 
+/** 作词、作曲、编曲 and any credit typed by hand, on one line where they fit at `size`; otherwise
+ * the first two on a line and the rest on the next, rather than all of them set smaller. */
+function creditRows(c: CanvasRenderingContext2D, p: VisualizerProject, size: number, width: number, font: string): string[] {
+  const parts = STUDIO_CREDITS.flatMap(key => { const name = p.text[key]?.trim(); return name ? [`${STUDIO_CREDIT_LABELS[key]} ${name}`] : []; });
+  const typed = p.text.credit.trim(); if (typed) parts.push(typed);
+  const line = parts.join("\u3000"); if (parts.length < 2) return parts;
+  c.save(); c.font = `400 ${size}px ${font}`; const fits = c.measureText(line).width <= width; c.restore();
+  return fits ? [line] : [parts.slice(0, 2).join("\u3000"), parts.slice(2).join("\u3000")].filter(Boolean);
+}
 function paintInformation(c: CanvasRenderingContext2D, p: VisualizerProject, lyricLayout: boolean, contentScale: number): void {
   const { width: w, height: h } = p.scene.canvas;
   c.save(); c.shadowColor = `${p.look.accent}a6`; c.shadowBlur = h * .012;
@@ -949,12 +958,14 @@ function paintInformation(c: CanvasRenderingContext2D, p: VisualizerProject, lyr
   if (lyricLayout) {
     // Over the lyrics the title keeps its place above them and takes a second line upward,
     // into the gap under the sleeve; with nothing under it, it comes a little lower first.
-    const size = h * .078 * scale, top = Math.max(ceiling + h * .012, p.text.credit.trim() ? h * .362 : 0);
+    const creditSize = h * .022 * scale, credits = creditRows(c, p, creditSize, w * .285 * contentScale, font);
+    const size = h * .078 * scale, top = Math.max(ceiling + h * .012, credits.length ? h * .362 : 0);
     const one = h * .435, lower = p.text.subtitle.trim() ? one : h * .452;
     const block = titleBlock(c, p.text.title, size, max, Math.max(size * .8, lower - top), font, "700");
     paintTitleBlock(c, block, textX, (block.rows.length > 1 ? lower : one) - block.height, font);
     paintText(c, p.text.subtitle, textX, h * .495, h * .026 * scale, max, font);
-    paintText(c, p.text.credit, w * .186 * contentScale, h * .35, h * .022 * scale, w * .285 * contentScale, font);
+    // A second line of credits goes up into the gap beside the sleeve, not down onto the title.
+    for (const [i, row] of credits.entries()) paintText(c, row, w * .186 * contentScale, h * .35 - (credits.length - 1 - i) * creditSize * 1.45, creditSize, w * .285 * contentScale, font);
     c.restore(); return;
   }
   // Without lyrics the title and the artist are one column between the sleeve and the
@@ -963,8 +974,9 @@ function paintInformation(c: CanvasRenderingContext2D, p: VisualizerProject, lyr
   // more lines everything is made a little smaller together, never one line squeezed against
   // the next. The artist is never set larger than the title.
   const labelHeight = h * .03 * scale, labelGap = (size: number) => h * (size * .08 + .018) * scale;
-  const regionTop = ceiling + h * .012, subtitle = p.text.subtitle.trim(), credit = p.text.credit.trim();
-  const region = h * (credit ? .68 : .715) - regionTop;
+  const regionTop = ceiling + h * .012, subtitle = p.text.subtitle.trim(), creditSize = h * .025 * scale;
+  const credits = creditRows(c, p, creditSize, max, font);
+  const region = h * (credits.length ? .68 : .715) - regionTop - Math.max(0, credits.length - 1) * creditSize * 1.45;
   const head = (block: TitleBlock, size: number) => block.rows.length ? labelHeight + labelGap(size) + block.height : 0;
   const title = titleBlock(c, p.text.title, h * .082 * scale, max, h * .175 * scale, font, "700");
   const artist = titleBlock(c, p.text.artist, Math.min(h * .083 * scale, title.rows[0]?.size ?? Infinity), max, h * .16 * scale, font, "600");
@@ -988,7 +1000,7 @@ function paintInformation(c: CanvasRenderingContext2D, p: VisualizerProject, lyr
     label(c, "Artist Name", textX, y + labelHeight, labelSize, font, p.look.accent);
     y = paintTitleBlock(c, artist, textX, y + labelHeight + labelGap(.083), font);
   }
-  paintText(c, p.text.credit, textX, y + h * .051 * scale, h * .025 * scale, max, font);
+  for (const [i, row] of credits.entries()) paintText(c, row, textX, y + h * .051 * scale + i * creditSize * 1.45, creditSize, max, font);
   c.restore();
 }
 
