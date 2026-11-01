@@ -867,7 +867,7 @@ async fn check_desktop_update(app: tauri::AppHandle) -> Result<DesktopUpdateInfo
     let update = updater
         .check()
         .await
-        .map_err(|err| format!("读取更新清单失败（发行包可能仍在构建中）：{err}"))?;
+        .map_err(|err| update_error("检查更新", err))?;
     Ok(match update {
         Some(update) => DesktopUpdateInfo {
             current,
@@ -904,6 +904,43 @@ fn fail_update(app: &tauri::AppHandle, error: impl ToString) -> String {
     message
 }
 
+/// 更新出错时说清是哪一类：连不上 GitHub（DNS、超时、TLS，在国内常见），还是清单里
+/// 没有本机的包（发行包仍在构建中）。插件自己记的那行只有 `error sending request`，
+/// 不带下层原因，完整的原因链在这里记进日志，也附在给用户的提示后面。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn update_error(stage: &str, err: tauri_plugin_updater::Error) -> String {
+    use tauri_plugin_updater::Error;
+    let chain = error_chain(&err);
+    tracing::warn!(stage, error = %chain, "更新失败");
+    let reason = match &err {
+        Error::Reqwest(e) if e.is_timeout() => "连接 GitHub 超时，请检查网络或代理后重试",
+        Error::Reqwest(e) if e.is_connect() => "连不上 GitHub，请检查网络或代理后重试",
+        Error::Reqwest(_) | Error::Network(_) => "访问 GitHub 失败，请检查网络或代理后重试",
+        Error::ReleaseNotFound
+        | Error::TargetNotFound(_)
+        | Error::TargetsNotFound(_)
+        | Error::Serialization(_) => "还没有本机可用的更新包，发行包可能仍在构建中",
+        _ => return chain,
+    };
+    format!("{reason}（{chain}）")
+}
+
+/// 一个错误和它的各层原因，用「：」连起来；已经写进上一层文字的原因不重复。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut text = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !text.contains(&cause_text) {
+            text.push_str("：");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
+}
+
 /// 后台下载更新包并暂存（staged_update.rs），下次启动时装；返回暂存的版本号。
 /// 已经暂存了同一次发布就直接返回。前端在自动下载开着时，发现新版本后调它。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -916,7 +953,11 @@ async fn download_update(app: tauri::AppHandle) -> Result<String, String> {
     let lock = app.state::<staged_update::UpdateLock>();
     let _guard = lock.0.lock().await;
     let updater = app.updater().map_err(|err| err.to_string())?;
-    let Some(update) = updater.check().await.map_err(|err| err.to_string())? else {
+    let Some(update) = updater
+        .check()
+        .await
+        .map_err(|err| update_error("检查更新", err))?
+    else {
         staged_update::clear(&app);
         return Err("已经是最新版本".into());
     };
@@ -941,7 +982,7 @@ async fn download_update(app: tauri::AppHandle) -> Result<String, String> {
             || {},
         )
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| update_error("后台下载更新", err))?;
     staged_update::write(&app, &update, &bytes)?;
     app.state::<UpdateProgressState>().replace(UpdateProgress::default());
     tracing::info!(version = update.version, "更新包已在后台下好，下次启动时安装");
@@ -974,7 +1015,7 @@ async fn apply_update(app: tauri::AppHandle) -> Result<(), String> {
     let Some(update) = updater
         .check()
         .await
-        .map_err(|err| fail_update(&app, err))?
+        .map_err(|err| fail_update(&app, update_error("检查更新", err)))?
     else {
         return Err(fail_update(&app, "已经是最新版本"));
     };
@@ -1001,7 +1042,7 @@ async fn apply_update(app: tauri::AppHandle) -> Result<(), String> {
                     || tracing::info!("更新下载完成，开始安装"),
                 )
                 .await
-                .map_err(|err| fail_update(&app, err))?
+                .map_err(|err| fail_update(&app, update_error("下载更新", err)))?
         }
     };
     let downloaded = app.state::<UpdateProgressState>().get().downloaded.max(bytes.len() as u64);
@@ -1011,7 +1052,9 @@ async fn apply_update(app: tauri::AppHandle) -> Result<(), String> {
         total: Some(downloaded),
         message: "签名校验通过，正在安装".into(),
     });
-    update.install(&bytes).map_err(|err| fail_update(&app, err))?;
+    update
+        .install(&bytes)
+        .map_err(|err| fail_update(&app, update_error("安装更新", err)))?;
     staged_update::clear(&app);
     let completed = app.state::<UpdateProgressState>().get();
     app.state::<UpdateProgressState>().replace(UpdateProgress {
