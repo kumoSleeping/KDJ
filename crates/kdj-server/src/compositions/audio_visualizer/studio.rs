@@ -95,16 +95,27 @@ struct Job {
     inner: Mutex<Exchange>, changed: Notify, ready: Condvar,
     cancel: CancellationToken, count: u64, window: u64, created: Instant,
     last_seen: Mutex<Instant>,
+    /// Frames the editor's renderers have drawn (as it last said), and when anything last moved:
+    /// a frame drawn, a GOP taken.
+    progressed: Mutex<(u64, Instant)>,
+    patience: Duration,
     chunks: Chunks,
 }
 impl Job {
     /// `frames` in GOPs of `per`. Compressed GOPs are small: the window is as wide as it gets.
     fn new(id: String, frames: u64, per: u64) -> Self {
-        Self { inner: Mutex::new(Exchange { snapshot: Snapshot { id, phase: "queued".into(), status: "等待编码资源".into(), progress: 0., demand: None, output_path: String::new(), error: String::new(), version: 0 }, token: 0, attempt: 0, next: 0, pending: BTreeMap::new() }), changed: Notify::new(), ready: Condvar::new(), cancel: CancellationToken::new(), count: frames.div_ceil(per), window: MAX_WINDOW, created: Instant::now(), last_seen: Mutex::new(Instant::now()), chunks: Chunks { frames, per, parameters: Mutex::new(None) } }
+        Self { inner: Mutex::new(Exchange { snapshot: Snapshot { id, phase: "queued".into(), status: "等待编码资源".into(), progress: 0., demand: None, output_path: String::new(), error: String::new(), version: 0 }, token: 0, attempt: 0, next: 0, pending: BTreeMap::new() }), changed: Notify::new(), ready: Condvar::new(), cancel: CancellationToken::new(), count: frames.div_ceil(per), window: MAX_WINDOW, created: Instant::now(), last_seen: Mutex::new(Instant::now()), progressed: Mutex::new((0, Instant::now())), patience: Duration::from_secs(120), chunks: Chunks { frames, per, parameters: Mutex::new(None) } }
     }
-    /// A GOP is a second of video drawn and encoded by one renderer. One that does not come for
-    /// this long means a renderer is stuck: the export stops instead of waiting for ever.
-    fn patience(&self) -> Duration { Duration::from_secs(120) }
+    /// A GOP is a second of video drawn and encoded by one renderer, which takes a slow machine
+    /// with a large canvas minutes. So the export is not timed per GOP: it stops only when for
+    /// this long no renderer has drawn a frame and no GOP has come.
+    fn patience(&self) -> Duration { self.patience }
+    /// `drawn` is the editor's count of frames drawn; `None` is a GOP taken.
+    fn progress(&self, drawn: Option<u64>) {
+        let mut p = self.progressed.lock().unwrap();
+        match drawn { Some(drawn) if drawn <= p.0 => {} Some(drawn) => *p = (drawn, Instant::now()), None => p.1 = Instant::now() }
+    }
+    fn stalled(&self) -> bool { self.progressed.lock().unwrap().1.elapsed() > self.patience() }
     fn touch(&self) { *self.last_seen.lock().unwrap() = Instant::now(); }
     fn editor_idle(&self) -> bool { self.last_seen.lock().unwrap().elapsed() > Duration::from_secs(45) }
     fn snapshot(&self) -> Snapshot { self.inner.lock().unwrap().snapshot.clone() }
@@ -151,7 +162,8 @@ impl Job {
             self.advertise(&mut g);
         }
         let pass = g.attempt;
-        let started = Instant::now();
+        // The window has just moved (or opened, after however long the job queued).
+        self.progress(None);
         loop {
             ensure!(!self.cancel.is_cancelled() && !attempt.is_cancelled() && !g.snapshot.terminal(), "可视化导出已取消");
             ensure!(g.attempt == pass, "本次编码尝试已被替代");
@@ -162,7 +174,9 @@ impl Job {
                 self.advertise(&mut g);
                 return Ok(pixels);
             }
-            if started.elapsed() > self.patience() { self.cancel.cancel(); bail!("编辑器超过 {} 秒未提供画面，已终止导出", self.patience().as_secs()); }
+            // A failure, not a cancel: the job's token stays for the user's cancel, so this is
+            // logged and reported as what it is.
+            if self.stalled() { bail!("导出窗口超过 {} 秒没有画出新的画面，已终止导出", self.patience().as_secs()); }
             g = self.ready.wait_timeout(g, Duration::from_millis(200)).unwrap().0;
         }
     }
@@ -410,9 +424,10 @@ async fn start(State(state): State<Arc<AppState>>, Extension(jobs): Extension<Ar
     Ok(Json(first))
 }
 #[derive(Deserialize)]
-struct Poll { #[serde(default)] since: u64 }
+struct Poll { #[serde(default)] since: u64, #[serde(default)] drawn: Option<u64> }
 async fn poll(Extension(jobs): Extension<Arc<Jobs>>, Path(id): Path<String>, Query(p): Query<Poll>) -> ApiResult<Json<Snapshot>> {
     let job = jobs.get(&id)?;
+    if let Some(drawn) = p.drawn { job.progress(Some(drawn)); }
     Ok(Json(job.next_snapshot(p.since).await))
 }
 async fn frame(Extension(jobs): Extension<Arc<Jobs>>, Path(id): Path<String>, headers: HeaderMap, pixels: Bytes) -> ApiResult<Json<Snapshot>> {
@@ -508,10 +523,12 @@ async fn mux_editor_video(p: &Export, sound: Sound, audio: &std::path::Path, sta
     tokio::task::spawn_blocking(move || {
         let samples = stage.join("video.h264s");
         let scratch = stage.join("audio.aac");
+        // Stopped with the job, or as soon as the picture has failed.
+        let sound_cancel = job.cancel.child_token();
         let encoding = match &sound {
             Sound::Copy(_) => None,
             &Sound::Encode { rate, frames } => {
-                let (audio, scratch, cancel) = (audio.clone(), scratch.clone(), job.cancel.clone());
+                let (audio, scratch, cancel) = (audio.clone(), scratch.clone(), sound_cancel.clone());
                 Some(std::thread::Builder::new().name("visualizer-aac".into()).spawn(move || {
                     let _background = kdj_core::thread_qos::prefer_background();
                     let shape = kdj_media::audio::Shape { frames: Some(frames), ..Default::default() };
@@ -528,6 +545,7 @@ async fn mux_editor_video(p: &Export, sound: Sound, audio: &std::path::Path, sta
             ensure!(video.frames() == p.frames(), "编辑器提供了 {} 帧，应为 {} 帧", video.frames(), p.frames());
             video.finish()
         })();
+        if video.is_err() { sound_cancel.cancel(); }
         // Joined on every path: the encoder must be done with its scratch file before it is removed.
         let encoded = encoding.map(|thread| thread.join().map_err(|_| anyhow::anyhow!("音频编码线程异常退出")).and_then(|r| r.context("音轨编码失败")));
         let result = (|| {
@@ -600,6 +618,31 @@ mod tests {
         assert!(job.editor_idle()); job.touch(); assert!(!job.editor_idle());
         job.update(|s| s.phase = "done".into()); job.stop();
         assert_eq!(job.snapshot().phase, "done"); assert!(!job.cancel.is_cancelled());
+    }
+    #[test]
+    fn studio_slow_gop_waits_while_the_editor_draws_and_silence_fails_the_export() {
+        let mut job = Job::new("slow".into(), 1, 1);
+        job.patience = Duration::from_millis(300);
+        let job = Arc::new(job);
+        let source = job.clone();
+        let muxer = std::thread::spawn(move || source.receive_frame(0, &source.cancel).map(|b| tag(&b)));
+        let open = demand(&job);
+        // Three times the patience, drawing all along: a slow renderer, not a stuck one.
+        for drawn in 1..=18 { std::thread::sleep(Duration::from_millis(50)); job.progress(Some(drawn)); }
+        job.submit(open.token, 0, tagged(5)).unwrap();
+        assert_eq!(muxer.join().unwrap().unwrap(), 5);
+
+        let mut job = Job::new("stuck".into(), 1, 1);
+        job.patience = Duration::from_millis(300);
+        let job = Arc::new(job);
+        let source = job.clone();
+        let muxer = std::thread::spawn(move || source.receive_frame(0, &source.cancel));
+        demand(&job);
+        // A count that does not grow is no progress.
+        for _ in 0..10 { std::thread::sleep(Duration::from_millis(50)); job.progress(Some(0)); }
+        let error = muxer.join().unwrap().unwrap_err().to_string();
+        assert!(error.contains("没有画出新的画面"), "{error}");
+        assert!(!job.cancel.is_cancelled(), "a stalled export is a failure, not the user's cancel");
     }
     #[test]
     fn studio_canvas_limits() {

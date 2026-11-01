@@ -1260,7 +1260,8 @@ export const visualizerApi = {
     const blob = await response.blob(); return blob.size ? blob : null;
   },
   start: (body: { track_id: number; signature: string; duration: number; output_path: string; width: number; height: number; fps: number; chunk_frames: number; video_bitrate?: number; audio_48k?: boolean }) => request<VisualizerJobStatus>("/visualizer/export", { method: "POST", body: JSON.stringify(body) }),
-  poll: (id: string, since: number, signal?: AbortSignal) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}?since=${since}`, { signal, headers: { "X-KDJ-Activity-Recorded": "1" } }),
+  /** `drawn`: frames the export's renderers have drawn, which keeps a slow export alive. */
+  poll: (id: string, since: number, signal?: AbortSignal, drawn?: number) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}?since=${since}${drawn === undefined ? "" : `&drawn=${drawn}`}`, { signal, headers: { "X-KDJ-Activity-Recorded": "1" } }),
   cancel: (id: string, keepalive = false) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST", keepalive }),
   /** `kdj visualizer render`: the first window to claim a request renders it. */
   claimCliRender: (id: string) => request<{ claimed: boolean }>(`/visualizer/render/${encodeURIComponent(id)}/claim`, { method: "POST" }),

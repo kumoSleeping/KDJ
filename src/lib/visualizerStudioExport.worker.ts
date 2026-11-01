@@ -24,11 +24,18 @@ export interface StudioWorkerResult { status?: VisualizerJobStatus; parameters?:
  * time spent waiting for the encoder (its queue, and the flush that closes each GOP). */
 export interface StudioFrameTiming { frames: number; drawMs: number; readMs: number; convertMs: number; encodeMs: number; sendMs: number }
 export type StudioWorkerReply = { id: number } & ({ ok: true } & StudioWorkerResult | { ok: false; message: string });
+/** Where a renderer is in its GOP. */
+export type StudioWorkerStep = "draw" | "queue" | "flush" | "send";
+/** Sent beside the replies, as a renderer moves: frames drawn since it started, and the step it
+ * is in now. A renderer that stops moving is seen, and where it stopped. */
+export interface StudioWorkerProgress { progress: { drawn: number; step: StudioWorkerStep } }
 
 let prepared: PreparedStudio | undefined;
 let surface: ReturnType<typeof studioCanvas> | undefined;
 let server = { baseUrl: "", authToken: "" };
 const timing: StudioFrameTiming = { frames: 0, drawMs: 0, readMs: 0, convertMs: 0, encodeMs: 0, sendMs: 0 };
+let drawn = 0;
+const step = (now: StudioWorkerStep) => postMessage({ progress: { drawn, step: now } } satisfies StudioWorkerProgress);
 
 function draw(index: number): void {
   if (!prepared || !surface) throw new Error("导出线程尚未准备画面");
@@ -112,6 +119,7 @@ async function encodeGop(first: number, count: number): Promise<Uint8Array<Array
   const { encoder } = video, gop: Gop = video.gop = { parts: [], last: -1 };
   const { width, height } = prepared.project.scene.canvas, fps = prepared.project.output.fps;
   for (let n = 0; n < count; n++) {
+    step("draw");
     const index = first + n, timestamp = Math.round(index * 1e6 / fps), duration = Math.round(1e6 / fps);
     // Not `new VideoFrame(canvas)`: Android's WebView turns an RGB frame into BT.601 YUV and
     // writes no colour description, so players read it as BT.709 and shift reds and greens.
@@ -121,12 +129,15 @@ async function encodeGop(first: number, count: number): Promise<Uint8Array<Array
     });
     const before = performance.now();
     try { encoder.encode(frame, { keyFrame: n === 0 }); } finally { frame.close(); }
+    drawn++;
     // Bound the frames waiting for the encoder: each holds a full I420 copy.
+    if (encoder.encodeQueueSize > 2) step("queue");
     while (encoder.encodeQueueSize > 2 && !gop.failure) await settle(encoder);
     timing.encodeMs += performance.now() - before;
     timing.frames++;
     if (gop.failure) throw new Error(gop.failure);
   }
+  step("flush");
   const flushing = performance.now();
   await encoder.flush();
   timing.encodeMs += performance.now() - flushing;
@@ -136,6 +147,7 @@ async function encodeGop(first: number, count: number): Promise<Uint8Array<Array
 }
 
 async function send(job: string, token: number, index: number, body: Blob): Promise<VisualizerJobStatus> {
+  step("send");
   const before = performance.now();
   try { return await post(job, token, index, body); } finally { timing.sendMs += performance.now() - before; }
 }
