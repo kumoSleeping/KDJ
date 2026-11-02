@@ -131,7 +131,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
   const [analyzing, setAnalyzing] = useState(false);
   const analyzedSpectrum = useRef<string | null>(null);
   // Inline selection is not a request to decode another song while playback continues.
-  const [loadAllowed, setLoadAllowed] = useState(() => !inline || (popup && useVisualizerPopup.getState().track?.id === track.id));
+  const [loadAllowed, setLoadAllowed] = useState(() => !inline || (popup && useVisualizerPopup.getState().pin?.track.id === track.id));
   const [previewVisible, setPreviewVisible] = useState(() => !inline);
   const [loadingLyrics, setLoadingLyrics] = useState(false);
   const lyricSource = useLyricsStore(s => s.byId[track.id]?.meta?.platform);
