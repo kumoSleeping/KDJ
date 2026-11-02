@@ -17,8 +17,10 @@ import type { ActiveSearchDrag } from "../../lib/searchDrag";
  * class `kd-scroll` or the attribute `data-drawer-scroll`. Every part beside them, and everything
  * inside them, must have a height of its own: one that merely fills what it is given says
  * nothing about what it needs. A body that is still fetching what decides its height carries
- * `data-drawer-pending` until its first result or error; a `fit` panel waits offscreen for that
- * initial content and keeps its measured height throughout the entrance.
+ * `data-drawer-pending` until its first result or error; a `fit` panel, and an `at-least-half`
+ * one whose first picture is pending, waits offscreen for that initial content and keeps its
+ * measured height throughout the entrance. A page of `SlidePages` that arrives pending is waited
+ * for in the same way before it slides in.
  */
 export type DrawerExtent = "fit" | "at-least-half" | "two-thirds" | "full";
 

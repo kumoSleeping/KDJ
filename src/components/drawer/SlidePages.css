@@ -21,3 +21,5 @@
   inset: 0;
   pointer-events: none;
 }
+/* The page that has come but is not ready yet: the old picture stays over it until it is. */
+.kd-slide-page[data-slide-waiting] { visibility: hidden; }
