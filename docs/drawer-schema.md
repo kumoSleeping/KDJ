@@ -80,7 +80,9 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   the edge (600 ms at most) rather than arriving at a short loading page's height. A leaving page's still copy
   does not keep the new page waiting.
 - **When the body is built.** An `at-least-half` body is built with its panel and measured
-  before the first paint. Any other body is built one frame after its panel, so a heavy app does
+  before the first paint; when that first picture is still pending (the task pages build theirs
+  a frame later), the panel waits beyond the edge for it like a `fit` panel instead of coming in
+  at half and growing. Any other body is built one frame after its panel, so a heavy app does
   not hold up that frame. A `fit` panel waits for its first measure and then comes in at the
   height it keeps, with its body already visible. The 120 ms fallback is only for a body
   without a measure; explicitly pending content is waited for up to 600 ms, then the panel
@@ -95,6 +97,9 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   itself. Never pass the page down from the component that lists the apps — a switch of page
   would then redraw the whole workspace before the drawer could answer. A page word answers the
   press, not its release, and the panel's height starts for the new page as the slide starts.
+  A page that arrives still pending (`data-drawer-pending`) is waited for under the old picture,
+  600 ms at most, and the slide starts once it has its content: it never comes in at the old
+  page's height with the panel changing under it afterwards.
 - **Many pages: the row is carried.** When the page words are more than the title row has room
   for, the row travels so that the page in view stands in the middle (`TitleTabs`,
   `--kd-tabs-carry`): choosing a word to the right brings those after it into reach, and a word

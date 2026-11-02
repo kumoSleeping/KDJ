@@ -253,13 +253,19 @@ function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart }: {
     const frame = requestAnimationFrame(() => startTransition(() => setBuilt(true)));
     return () => cancelAnimationFrame(frame);
   }, [built]);
+  // A `fit` panel arrives at its prepared height, and so does an app that keeps room whose first
+  // picture is still pending (the task pages build theirs a frame late). Explicitly pending
+  // content (settings' storage statistics, for example) must not be mistaken for a short
+  // finished page.
+  const [patient, setPatient] = useState(spec.extent === "fit" || eager);
   useLayoutEffect(() => {
-    if (eager && body.current && layer.current) setFit(fittingHeight(layer.current, body.current));
+    const node = body.current, sheet = layer.current;
+    if (!eager || !node || !sheet) return;
+    const next = fittingHeight(sheet, node);
+    if (next !== null) setFit(next);
+    else if (!pendingBody(node)) setPatient(false);
     // Only the first picture is decided here; later changes are followed below.
   }, []);
-  // A `fit` panel arrives at its prepared height. Explicitly pending content (settings'
-  // storage statistics, for example) must not be mistaken for a short finished page.
-  const [patient, setPatient] = useState(spec.extent === "fit");
   const held = patient && fit === null;
   useEffect(() => {
     if (!held || leaving) return;
