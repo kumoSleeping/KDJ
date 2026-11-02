@@ -14,7 +14,7 @@ const superseded = (error: unknown) => /过期或重复的视频帧|导出任务
 
 /** Renders, encodes and uploads the video: its unit is a GOP of `chunkFrames` frames,
  * drawn and encoded by one worker. `slots` uploads may be in flight at once. */
-interface FrameProducer {
+export interface FrameProducer {
   slots: number;
   chunkFrames: number;
   upload(job: string, token: number, index: number): Promise<VisualizerJobStatus>;
@@ -67,7 +67,7 @@ export async function runStudioExport(draft: VisualizerDraft, outputPath: string
 
 /** Keep every free slot busy with the lowest frame of the encoder's window that is
  * not uploaded yet. Upload responses carry the window; poll only when none can. */
-async function pumpFrames(first: VisualizerJobStatus, producer: FrameProducer, signal: AbortSignal,
+export async function pumpFrames(first: VisualizerJobStatus, producer: FrameProducer, signal: AbortSignal,
   onStatus: (status: VisualizerJobStatus) => void): Promise<VisualizerJobStatus> {
   let latest = first, attempt = -1, active = 0, polling = false, failure: unknown, lastUi = -Infinity;
   const sent = new Set<number>();
@@ -112,39 +112,36 @@ async function pumpFrames(first: VisualizerJobStatus, producer: FrameProducer, s
   }
 }
 
-const WORKER_SETUP_MS = 30_000;
+export const WORKER_SETUP_MS = 30_000;
 /** Opening a hardware session and encoding four frames; a driver that hangs must not hold the export. */
-const ENCODER_SETUP_MS = 15_000;
+export const ENCODER_SETUP_MS = 15_000;
 /** A renderer that has not finished a step of a frame for this long is stuck, however slow the
  * machine (the server gives up after 120 s without any frame). */
-const RENDERER_STALL_MS = 90_000;
-const STEPS: Record<StudioWorkerStep, string> = { draw: "绘制画面", queue: "等编码器接收画面", flush: "等编码器交出这一秒的视频", send: "上传到本机服务" };
+export const RENDERER_STALL_MS = 90_000;
+export const STEPS: Record<StudioWorkerStep, string> = { draw: "绘制画面", queue: "等编码器接收画面", flush: "等编码器交出这一秒的视频", send: "上传到本机服务" };
 
-class StudioWorker {
+export class StudioWorker {
   private calls = new Map<number, { resolve: (result: StudioWorkerResult) => void; reject: (error: Error) => void }>();
   private next = 0;
   private dead: Error | undefined;
-  // Vite emits the worker chunk; tool bundles that leave this URL unresolved fail to
-  // start it and fall back to the editor-thread producer.
-  readonly worker = new Worker(new URL("./visualizerStudioExport.worker.ts", import.meta.url), { type: "module" });
   pending = 0;
   /** Frames this renderer has drawn, what it is doing, and when it last moved. */
   drawn = 0;
   step: StudioWorkerStep | undefined;
   work = "";
   moved = performance.now();
-  constructor() {
+  constructor(readonly worker: Worker, private readonly label = "可视化导出") {
     this.worker.onmessage = (event: MessageEvent<StudioWorkerReply | StudioWorkerProgress | StudioWorkerNote>) => {
       this.moved = performance.now();
       if ("progress" in event.data) { ({ drawn: this.drawn, step: this.step } = event.data.progress); return; }
-      if ("note" in event.data) { captureDiagnostic("visualizer-export", "encoder-stall", event.data.note, "", "warn"); return; }
+      if ("note" in event.data) { captureDiagnostic(this.label === "可视化导出" ? "visualizer-export" : "kdjv-export", "encoder-stall", event.data.note, "", "warn"); return; }
       const reply = event.data, call = this.calls.get(reply.id);
       if (!call) return;
       this.calls.delete(reply.id); this.pending--; this.step = undefined;
       if (reply.ok) call.resolve(reply); else call.reject(new Error(reply.message));
     };
-    this.worker.onerror = event => { event.preventDefault(); this.fail(new Error(event.message || "可视化导出线程异常退出")); };
-    this.worker.onmessageerror = () => this.fail(new Error("可视化导出线程消息无法解析"));
+    this.worker.onerror = event => { event.preventDefault(); this.fail(new Error(event.message || `${this.label}线程异常退出`)); };
+    this.worker.onmessageerror = () => this.fail(new Error(`${this.label}线程消息无法解析`));
   }
   call(command: StudioWorkerCommand, transfer: Transferable[] = []): Promise<StudioWorkerResult> {
     if (this.dead) return Promise.reject(this.dead);
@@ -161,7 +158,7 @@ class StudioWorker {
     for (const call of this.calls.values()) call.reject(error);
     this.calls.clear(); this.pending = 0;
   }
-  terminate() { this.worker.terminate(); this.fail(new DOMException("可视化导出已结束", "AbortError")); }
+  terminate() { this.worker.terminate(); this.fail(new DOMException(`${this.label}已结束`, "AbortError")); }
 }
 
 /** The renderers that opened an encoder writing the same parameter sets as the first one that
@@ -189,7 +186,8 @@ async function createStudioWorkerPool(project: VisualizerProject, prepared: Prep
   const timeline = prepared.timeline, count = Math.ceil(studioDuration(timeline) * fps);
   const imagePixels = images.reduce((sum, image) => sum + image.naturalWidth * image.naturalHeight, 0);
   const size = studioWorkerCount(width, height, imagePixels, timeline.frames.length * ((timeline.frames[0]?.bands.length ?? 0) + 4), navigator.hardwareConcurrency || 4);
-  const workers = Array.from({ length: size }, () => new StudioWorker());
+  // Vite emits the worker chunk; tool bundles that leave this URL unresolved fail to start it.
+  const workers = Array.from({ length: size }, () => new StudioWorker(new Worker(new URL("./visualizerStudioExport.worker.ts", import.meta.url), { type: "module" })));
   const abort = () => { for (const worker of workers) worker.fail(new DOMException("可视化导出已取消", "AbortError")); };
   // A worker that never loads (or never answers) must not hold the export forever.
   const timer = window.setTimeout(() => { for (const worker of workers) worker.fail(new Error("可视化导出线程启动超时")); }, WORKER_SETUP_MS);

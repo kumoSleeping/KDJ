@@ -1,7 +1,7 @@
 /**
- * The arithmetic of a `.kdjv` project's live preview (KdjvLivePicture, docs/kdjv.md): which clips
- * hold a decoder, where each sits on the canvas and how opaque it is — the same as the render's
- * (render.rs `fitted_picture_size`, `picture_axis`, `envelope`), so the preview and the export agree.
+ * The arithmetic of a `.kdjv` project's live picture (KdjvCodecPicture, docs/kdjv.md): which clips
+ * hold a decoder, where each sits on the canvas and how opaque it is. The export draws its frames
+ * with the same (projectExport.worker.ts), so the preview and the export agree.
  */
 import type { KdjvLive } from "../types";
 
@@ -70,7 +70,7 @@ export function heldClips(project: KdjvLive, t: number, showing: (n: number) => 
 export function clipBox(project: KdjvLive, c: LiveClip) {
   const s = project.sources[c.source];
   const W = project.width, H = project.height;
-  // A crop: what is left is placed as the whole picture would be (render.rs, keep_position off);
+  // A crop: what is left is placed as the whole picture would be (the old render's keep_position off);
   // the element stays the whole frame, larger than that box and clipped to it.
   const [l, t, r, b] = c.crop ?? [0, 0, 0, 0];
   const keepX = Math.max(0.01, 1 - l - r), keepY = Math.max(0.01, 1 - t - b);

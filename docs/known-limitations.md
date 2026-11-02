@@ -43,6 +43,18 @@ Windows Media Foundation、Android MediaCodec）编码。
 可选方案：openh264 软件编码（BSD-2；思科的专利许可只覆盖思科自己发的二进制）加 Opus 或其他不用系统编码器的音频，
 工作量较大，用户确有需要时再做。
 
+## 剪辑（`.kdjv` 工程）
+
+剪辑也不用 FFmpeg（docs/kdjv.md）：声音由 KDJ 自己混，画面由窗口用 WebCodecs 解码、合成和编码。因此：
+
+- 素材只收 MP4 / MOV / M4V / MKV / WebM 视频、symphonia 解得了的声音、图片和 GIF。AVI、FLV、TS、WMV 等报「请先转成 MP4」。
+- 声音是 Opus、AC-3 等 symphonia 解不了的视频，放进工程后没有声音（画面照用）。
+- 导出要有 `VideoEncoder` 和系统 AAC 编码器，限制同可视化导出；画面最大 3840 × 2160（H.264），更大的画布等比缩小；
+  帧率取整数（29.97 导出为 30）。
+- 导出由窗口画，窗口关掉或重载导出就停，回到队列里从头再来；以前的导出在服务端跑，窗口重载不影响。
+- HDR 素材按 WebView 自己的色彩管理画到 sRGB 画布上，没有专门的色调映射（以前 FFmpeg 用 zscale + tonemap）。
+- 没有预览代理：关键帧隔得很远的素材，跳转时要多解几帧。
+
 ## 截帧（`kdj peek`）和曲库视频的封面帧
 
 都由 KDJ 的窗口用 `VideoDecoder` 解码。没有 WebCodecs 的系统（macOS 10.15、多数 Linux）上 `kdj peek` 报错，
@@ -67,5 +79,6 @@ Windows Media Foundation、Android MediaCodec）编码。
 
 - `<data>/ai/`：已删除的内置 AI 的服务商 Key 和会话。
 - `<data>/tools/ffmpeg/`：以前在设置里装的 FFmpeg。
-- `vj-projects.json`、`workshop-backups/`、各处的 `.kdjv` 工程文件：已移出 KDJ 的剪辑功能的工程，以后用 KDJ 系列的剪辑软件打开。
+- `vj-projects.json`、`workshop-backups/`：2026-10-19 之前的旧剪辑工坊的工程和备份，现在的剪辑器不读。
+- `<data>/cache/vj-workshop/` 里旧版本的渲染（`kdjv-*.mp4`）、预览代理（`proxy-*.mp4`）和缩略帧：按缓存上限淘汰。
 - `<data>/video-cache/`：旧的兼容转码缓存，设置 → 系统 → 存储空间 能清掉；`<data>/cache/vj-workshop/`、`<data>/cache/renders/`：旧的剪辑渲染缓存和导出记录，要手动删。

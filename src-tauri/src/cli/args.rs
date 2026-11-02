@@ -109,6 +109,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: LibraryCmd,
     },
+    /// .kdjv 视频工程（docs/kdjv.md）
+    #[command(after_help = AFTER_HELP)]
+    Project {
+        #[command(subcommand)]
+        command: ProjectCmd,
+    },
     /// 歌曲可视化视频
     #[command(after_help = AFTER_HELP)]
     Visualizer {
@@ -133,6 +139,26 @@ pub enum VisualizerCmd {
         /// 画面高度，偶数，180–1440；默认 1080
         #[arg(long, value_name = "PX")]
         height: Option<u32>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProjectCmd {
+    /// 打开一个 .kdjv 工程：标题、时长、画布、素材；不能播放时说明原因
+    Check {
+        /// .kdjv 文件路径
+        path: String,
+    },
+    /// 用剪辑操作改 .kdjv 工程（自由轨道，docs/kdjv.md「格式 3」；格式 1、2 的工程第一次改时转成格式 3）：按顺序做完，能播放才写回；返回工程和每条轨道上片段的位置
+    Edit {
+        /// .kdjv 文件路径
+        path: String,
+        /// 操作列表（JSON 数组），如 [{"op":"add","clip":{"src":"/a.mp4","in":0,"out":10},"kind":"picture","at":12}]
+        #[arg(long)]
+        ops: String,
+        /// 文件还没有时新建
+        #[arg(long)]
+        create: bool,
     },
 }
 
@@ -247,7 +273,6 @@ mod tests {
             &["kdj", "library", "analyze"],
             &["kdj", "account", "list"],
             &["kdj", "quit"],
-            &["kdj", "project", "check", "a.kdjv"],
         ] {
             assert!(Cli::try_parse_from(retired).is_err(), "{retired:?}");
         }

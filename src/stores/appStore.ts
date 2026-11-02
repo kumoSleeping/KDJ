@@ -683,6 +683,10 @@ export function connectEvents(): () => void {
       const payload = event.payload;
       void import("../lib/cliPeek").then(module => module.peekForCli(payload));
     }
+    if (event.type === "kdjv.progress") {
+      const payload = event.payload;
+      void import("../lib/kdjvPlay").then(module => module.handleKdjvProgress(payload));
+    }
     if (event.type === "visualizer.render.requested") {
       const payload = event.payload;
       void import("../lib/visualizerCliRender").then(module => module.renderForCli(payload));

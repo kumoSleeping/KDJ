@@ -12,7 +12,7 @@
 - Backend work belongs in `crates/` and `src-tauri/`.
 - Frontend work belongs in `src/` and must be validated against the Tauri shell.
 - Video scheduling is shared through `src/lib/videoPlaybackEngine.ts`, `videoFrames.ts`, and `videoSeekQueue.ts`. Local playback, online previews and YouTube must use this common scheduling layer; official embedded players adapt their commands to the shared seek queue.
-- KDJ has no video editing. The editor, the `.kdjv` project engine (render, preview proxies, project export) and the workshop left KDJ after 1.1.0-rc19; the last commit with all of it is `8e13b6d1` (tag `v1.1.0-rc19`), where a future editing app of the KDJ family takes it from. `.kdjv` rows an older version put in the library stay, marked 工程 and refused when played. The song visualizer and its export are not editing and stay.
+- Video editing is part of KDJ (desktop only): the 剪辑 drawer edits `.kdjv` projects through the server's edit operations (`docs/kdjv.md`), shared with `kdj project edit`. It was taken out after 1.1.0-rc19 and brought back without FFmpeg: sources are read by `kdj_media::probe`, the sound is mixed by `workshop/render.rs` (symphonia + `kdj_media::stretch`), the picture is composed by the window from the sources with the live preview's own arithmetic (`kdjvLive.ts`), and an export is encoded by the window through the visualizer's job transport (`workshop/export.rs`, `studio.rs::start_project`). Do not add a server-side picture renderer or preview proxies back.
 - KDJ has no built-in AI (removed after 1.1.0-rc19; its code is in git history). External agents use KDJ through the `kdj` CLI (`docs/ai-cli.md`). The user's old `<data>/ai/` directory (provider keys, sessions) is left where it is; never delete it.
 - KDJ has no FFmpeg (removed after 1.1.0-rc19): sound is decoded by symphonia and kdj-media (pure Rust), pictures are decoded and encoded by the system's WebView (WebCodecs), and what a system cannot do is handed to the user's own system player. Never call or bundle FFmpeg/ffprobe, in code or in tests. What this leaves undone is listed in `docs/known-limitations.md`; keep it current.
 - Prioritize macOS and Windows while retaining Android support. Reuse system decoding; do not introduce a bundled decoder/player dependency merely to unify video controls. Keep native decoding, shared scheduling, and source-specific loading distinct when reporting capabilities.
@@ -26,7 +26,7 @@
 
 ## Persisted User Data
 
-- `vj-projects.json`（以及其它版本间共用的 `settings.json`、队列文件、数据库）是用户的长期资产，必须按“任何一次写入都不得比读到的内容少”处理。本版不再读取 `vj-projects.json`、`workshop-backups/` 和 `.kdjv` 工程，也绝不删除、改写或移动它们。
+- `vj-projects.json`（以及其它版本间共用的 `settings.json`、队列文件、数据库）是用户的长期资产，必须按“任何一次写入都不得比读到的内容少”处理。本版不读取 `vj-projects.json` 和 `workshop-backups/`，也绝不删除、改写或移动它们；`.kdjv` 工程只在剪辑操作成功时写回，打开只读，不认识的字段都留着。
 - Never rewrite a persisted document on open unless normalization or migration actually changed it; an unconditional save-on-open lets an older build restructure the whole file. This already destroyed every `crop_auto_fit` flag once (installed `/Applications/KDJ.app` 1.0.2-rc3 shares the same data directory as the dev build).
 - When a build cannot round-trip a loaded document without dropping keys, it MUST open it read-only, report the dropped paths, and leave the file untouched — never silently strip fields.
 - Keep automatic snapshots before rewriting a persisted document (the old workshop kept `workshop-backups/auto/` and `workshop-backups/daily/`; leave them where they are); recover from them rather than from memory.

@@ -7,6 +7,8 @@
 //!   symphonia decodes.
 //! - [`flv`]: 哔哩哔哩's single-stream FLV (H.264 with AAC or MP3) into MP4 by stream copy.
 //! - [`webm`]: WebM Opus into Ogg Opus.
+//! - [`probe`]: what a file holds (picture size, rate, colour, sound, lengths) from its container.
+//! - [`stretch`]: sound played faster or slower at its own pitch (WSOLA).
 
 mod bits;
 pub mod aac;
@@ -16,5 +18,7 @@ pub mod flv;
 pub mod h264;
 pub mod mp4;
 pub mod pcm;
+pub mod probe;
 pub mod remux;
+pub mod stretch;
 pub mod webm;
