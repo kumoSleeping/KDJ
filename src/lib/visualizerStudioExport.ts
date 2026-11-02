@@ -4,7 +4,7 @@ import { getBridge } from "./bridge";
 import { studioChunkFrames, studioVideoBitrate, studioWorkerCount } from "./visualizerStudioFrames";
 import { visualizerApi, type VisualizerJobStatus } from "./api";
 import { NO_BACKGROUND_DRAWING, NO_VIDEO_ENCODER } from "./visualizerExportSupport";
-import type { StudioFrameTiming, StudioWorkerCommand, StudioWorkerProgress, StudioWorkerReply, StudioWorkerRequest, StudioWorkerResult, StudioWorkerStep } from "./visualizerStudioExport.worker";
+import type { StudioFrameTiming, StudioWorkerCommand, StudioWorkerNote, StudioWorkerProgress, StudioWorkerReply, StudioWorkerRequest, StudioWorkerResult, StudioWorkerStep } from "./visualizerStudioExport.worker";
 import { captureDiagnostic } from "./diagnostics";
 
 const terminal = (status: VisualizerJobStatus) => ["done", "failed", "canceled"].includes(status.phase);
@@ -134,9 +134,10 @@ class StudioWorker {
   work = "";
   moved = performance.now();
   constructor() {
-    this.worker.onmessage = (event: MessageEvent<StudioWorkerReply | StudioWorkerProgress>) => {
+    this.worker.onmessage = (event: MessageEvent<StudioWorkerReply | StudioWorkerProgress | StudioWorkerNote>) => {
       this.moved = performance.now();
       if ("progress" in event.data) { ({ drawn: this.drawn, step: this.step } = event.data.progress); return; }
+      if ("note" in event.data) { captureDiagnostic("visualizer-export", "encoder-stall", event.data.note, "", "warn"); return; }
       const reply = event.data, call = this.calls.get(reply.id);
       if (!call) return;
       this.calls.delete(reply.id); this.pending--; this.step = undefined;
