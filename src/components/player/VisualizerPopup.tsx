@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { useVideoPip, videoPipFloats } from "../../lib/videoPip";
-import { canVisualizeTrack, useVisualizerPopup } from "../../lib/visualizerPopup";
+import { canVisualizeTrack, pinnedPopupTrack, useVisualizerPopup } from "../../lib/visualizerPopup";
 import { popupPictureAfter, popupSettingsStay, type PopupPicture } from "../../lib/visualizerPopupPicture";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
 
@@ -16,8 +16,11 @@ const VisualizerStudioPanel = lazy(() => import("../composition/VisualizerStudio
 export function VisualizerPopup() {
   const open = useVisualizerPopup(state => state.open);
   const playingTrack = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
-  const pinnedTrack = useVisualizerPopup(state => state.track);
+  const pin = useVisualizerPopup(state => state.pin);
+  const pinnedTrack = pinnedPopupTrack(pin, playingTrack?.id ?? null);
   const track = pinnedTrack ?? playingTrack;
+  // The player has moved on from where the pin was made: the window is the player's again.
+  useEffect(() => { if (pin && !pinnedTrack) useVisualizerPopup.getState().release(); }, [pin, pinnedTrack]);
   // A draft must have only one editor; the studio owns it while explicitly open.
   const editingTrackId = useVisualizerStudioStore(state => state.inlineSettings ? null : state.track?.id ?? null);
   const inlineSettings = useVisualizerStudioStore(state => state.inlineSettings);
@@ -38,8 +41,9 @@ export function VisualizerPopup() {
   useEffect(() => {
     if (!inlineSettings) return;
     const editor = useVisualizerStudioStore.getState();
-    // A song asked for by hand (the row's menu) is on its way to playing: its controls wait.
-    if (editor.editorIfNoWindow !== null && editor.editorIfNoWindow !== track?.id) return;
+    // The controls go where the window goes. A song asked for by hand (the row's menu) is in the
+    // window from the same click; once the window has moved on to another song, the promise of
+    // an editor for the one asked for is dropped with it (follow), never left waiting on it.
     if (settingsStay && track) editor.follow(track);
     // Asked for by hand and found to bring no window: the editor is where it gets a picture.
     else if (track && open && editor.editorIfNoWindow === track.id) editor.open(track);

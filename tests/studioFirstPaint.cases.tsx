@@ -183,6 +183,34 @@ const track = { id:42,title:"Test",artist:"",album:"",filename:"test.wav",path:"
     assert.equal(editor().track,null,'the controls stay closed until asked for');
     await act(async()=> { useVisualizerPopup.getState().setOpen(false); await wait(20); });
     assert.equal(floatingWindow(),null,'switching the visualizer off takes the window down');
+    // ---- A song asked for from the row's menu while another one plays is the player's window
+    // all the same: it holds only until the player's song changes.
+    const ask = (asked:ReturnType<typeof song>) => act(async()=> {
+      useVisualizerPopup.getState().openTrack(asked);
+      editor().openInlineSettings(asked,{ editorIfNoWindow:true });
+      await wait(80);
+    });
+    await play(song(42,'Test'),true);
+    await ask(song(46,'Asked'));
+    assert.equal(useVisualizerPopup.getState().pin?.track.id,46,'the asked-for song is in the window');
+    assert.equal(useVisualizerPopup.getState().pin?.over,42);
+    assert.equal(editor().track?.id,46,'its controls are in the drawer');
+    assert.ok(floatingWindow()?.querySelector('canvas'));
+    // The next song in the queue (or the bar's keys) takes over: the window and its controls go
+    // with the player instead of staying on a song nobody plays.
+    await play(song(47,'Queued'),true);
+    assert.equal(useVisualizerPopup.getState().pin,null,'the player moving on releases the window');
+    assert.equal(editor().track?.id,47,'the controls follow the player, not wait for the asked-for song');
+    assert.equal(editor().inlineSettings,true);
+    assert.ok(floatingWindow()?.querySelector('canvas'));
+    // Played from its own window, the asked-for song is the player's: the next one follows it.
+    await ask(song(48,'Again'));
+    await play(song(48,'Again'),true);
+    assert.equal(useVisualizerPopup.getState().pin,null,'playing the asked-for song hands the window to the player');
+    assert.equal(editor().track?.id,48);
+    await play(song(45,'Next'),true);
+    assert.equal(editor().track?.id,45,'and the window follows the player to the next song');
+    await act(async()=> { editor().close(); useVisualizerPopup.getState().setOpen(false); await wait(20); });
     await act(async()=>dock.unmount());
     // ---- The drawer: entries that are always there, one floating panel at a time; the one that
     // is replaced or closed leaves as it was.
