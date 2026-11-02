@@ -2674,7 +2674,10 @@ export const TrackTable = memo(function TrackTable({
             const track = rowMenu.track;
             setRowMenu(null);
             if (isVideoTrack(track.format)) { useVisualizerStudioStore.getState().open(track); return; }
+            // The window is the player's picture: the song asked for is played, as a double
+            // click would, and holds the window until the player has it.
             useVisualizerPopup.getState().openTrack(track);
+            if (getPlayingTrack()?.id !== track.id) playFromTable(track);
             useVisualizerStudioStore.getState().openInlineSettings(track, { editorIfNoWindow: true });
           }}><BarChart3 size={12} />展开可视化</button>
           {menuIds.length === 1 && (
