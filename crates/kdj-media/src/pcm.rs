@@ -196,3 +196,65 @@ impl Sink<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An AIFF of stereo 16-bit `pcm` at 44.1 kHz, as Apple writes it: big-endian `AIFF`, or
+    /// little-endian AIFF-C (`sowt`, Logic, QuickTime); with an `ID3 ` chunk after the sound.
+    fn aiff(pcm: &[i16], little_endian: bool) -> Vec<u8> {
+        let frames = (pcm.len() / 2) as u32;
+        let mut comm = Vec::new();
+        comm.extend_from_slice(&2u16.to_be_bytes());
+        comm.extend_from_slice(&frames.to_be_bytes());
+        comm.extend_from_slice(&16u16.to_be_bytes());
+        comm.extend_from_slice(&[0x40, 0x0e, 0xac, 0x44, 0, 0, 0, 0, 0, 0]);
+        if little_endian {
+            comm.extend_from_slice(b"sowt\x00\x00");
+        }
+        let mut ssnd = vec![0u8; 8];
+        for sample in pcm {
+            ssnd.extend_from_slice(&if little_endian { sample.to_le_bytes() } else { sample.to_be_bytes() });
+        }
+        let id3 = b"ID3\x03\x00\x00\x00\x00\x00\x00".to_vec();
+        let mut body = if little_endian { b"AIFC".to_vec() } else { b"AIFF".to_vec() };
+        let chunk = |body: &mut Vec<u8>, id: &[u8], data: &[u8]| {
+            body.extend_from_slice(id);
+            body.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            body.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                body.push(0);
+            }
+        };
+        if little_endian {
+            chunk(&mut body, b"FVER", &0xa280_5140u32.to_be_bytes());
+        }
+        chunk(&mut body, b"COMM", &comm);
+        chunk(&mut body, b"SSND", &ssnd);
+        chunk(&mut body, b"ID3 ", &id3);
+        let mut file = b"FORM".to_vec();
+        file.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        file.extend_from_slice(&body);
+        file
+    }
+
+    /// AIFF and AIFF-C (`sowt`) decode exactly, for the editor's mix and the exports.
+    #[test]
+    fn aiff_and_aiff_c_decode_sample_for_sample() {
+        let pcm: Vec<i16> = (0..2_000).map(|n| ((n * 37) % 20_000 - 10_000) as i16).collect();
+        for (little_endian, ext) in [(false, "aiff"), (true, "aifc")] {
+            let path = std::env::temp_dir().join(format!("kdj-media-{}-{little_endian}.{ext}", std::process::id()));
+            std::fs::write(&path, aiff(&pcm, little_endian)).unwrap();
+            let mut out = Vec::new();
+            let decoded = decode(&path, None, None, &|| false, &mut |samples| {
+                out.extend_from_slice(samples);
+                Ok(())
+            });
+            let _ = std::fs::remove_file(&path);
+            assert_eq!(decoded.unwrap_or_else(|error| panic!("{ext}: {error:#}")), 1_000);
+            let expected: Vec<f32> = pcm.iter().map(|s| *s as f32 / 32_768.).collect();
+            assert_eq!(out, expected, "{ext} sowt={little_endian}");
+        }
+    }
+}
