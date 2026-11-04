@@ -151,6 +151,11 @@ fn media_path_allowed(path: &str) -> bool {
         // The local file a `kdj peek` reads, while that peek is open (cli_media.rs).
         segments.as_slice(),
         ["api", "cli", "peek", id, "source"] if !id.is_empty()
+    ) || matches!(
+        // A project's live preview and its export: only the files that project names (kdjv.rs
+        // `source`), and the frames of its pictures (`image`).
+        segments.as_slice(),
+        ["api", "kdjv", "source" | "image", id, n] if !id.is_empty() && !n.is_empty()
     )
 }
 
@@ -411,8 +416,13 @@ pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) ->
         control: control.clone(),
         media: media.clone(),
     };
-    // The visualizer (analysis, export) is on every platform.
+    // The visualizer (analysis, export) is on every platform; the editor's workshop is desktop only.
     let router = routes::router(ctx).merge(compositions::audio_visualizer::studio::router());
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let router = {
+        let workshop = compositions::workshop::Workshop::new(state.clone())?;
+        router.merge(compositions::workshop::routes::router(workshop))
+    };
     let router = router.merge(themes::router())
         .merge(diagnostics::router())
         .route("/ws", axum::routing::get(ws::handler))
@@ -532,6 +542,22 @@ mod auth_tests {
                 "/api/library/audio/1?kdj_media_token=media-token",
                 None
             ),
+            &auth
+        ));
+        assert!(request_authorized(
+            &request(Method::GET, "/api/kdjv/source/7/0?kdj_media_token=media-token", None),
+            &auth
+        ));
+        assert!(request_authorized(
+            &request(Method::GET, "/api/kdjv/proxy/7/0?kdj_media_token=media-token", None),
+            &auth
+        ));
+        assert!(request_authorized(
+            &request(Method::GET, "/api/kdjv/frame?track_id=7&src=a.mp4&t=1.0&h=72&kdj_media_token=media-token", None),
+            &auth
+        ));
+        assert!(!request_authorized(
+            &request(Method::POST, "/api/kdjv/preview?kdj_media_token=media-token", None),
             &auth
         ));
         assert!(request_authorized(

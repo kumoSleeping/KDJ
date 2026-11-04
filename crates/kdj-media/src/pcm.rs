@@ -45,6 +45,11 @@ pub fn duration_secs(path: &Path) -> Option<f64> {
     (secs.is_finite() && secs > 0.).then_some(secs)
 }
 
+/// Whether the first audio track has a decoder here (symphonia has none for Opus, AC-3, DTS, …).
+pub fn decodable(path: &Path) -> bool {
+    open(path).is_ok_and(|(_, (track, _))| symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default()).is_ok())
+}
+
 type Opened = (Box<dyn symphonia::core::formats::FormatReader>, (symphonia::core::formats::Track, Source));
 
 fn open(path: &Path) -> Result<Opened> {

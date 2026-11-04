@@ -31,6 +31,8 @@ struct Demand { token: u64, index: u64, end: u64, attempt: u64 }
 struct Snapshot {
     id: String, phase: String, status: String, progress: f64,
     demand: Option<Demand>, output_path: String, error: String,
+    /// Why a job was stopped from outside, for a window to tell apart: `kdjv_project_changed`.
+    #[serde(skip_serializing_if = "String::is_empty")] code: String,
     /// Concurrent uploads and polls can answer out of order; the editor keeps the newest.
     version: u64,
 }
@@ -104,7 +106,7 @@ struct Job {
 impl Job {
     /// `frames` in GOPs of `per`. Compressed GOPs are small: the window is as wide as it gets.
     fn new(id: String, frames: u64, per: u64) -> Self {
-        Self { inner: Mutex::new(Exchange { snapshot: Snapshot { id, phase: "queued".into(), status: "等待编码资源".into(), progress: 0., demand: None, output_path: String::new(), error: String::new(), version: 0 }, token: 0, attempt: 0, next: 0, pending: BTreeMap::new() }), changed: Notify::new(), ready: Condvar::new(), cancel: CancellationToken::new(), count: frames.div_ceil(per), window: MAX_WINDOW, created: Instant::now(), last_seen: Mutex::new(Instant::now()), progressed: Mutex::new((0, Instant::now())), patience: Duration::from_secs(120), chunks: Chunks { frames, per, parameters: Mutex::new(None) } }
+        Self { inner: Mutex::new(Exchange { snapshot: Snapshot { id, phase: "queued".into(), status: "等待编码资源".into(), progress: 0., demand: None, output_path: String::new(), error: String::new(), code: String::new(), version: 0 }, token: 0, attempt: 0, next: 0, pending: BTreeMap::new() }), changed: Notify::new(), ready: Condvar::new(), cancel: CancellationToken::new(), count: frames.div_ceil(per), window: MAX_WINDOW, created: Instant::now(), last_seen: Mutex::new(Instant::now()), progressed: Mutex::new((0, Instant::now())), patience: Duration::from_secs(120), chunks: Chunks { frames, per, parameters: Mutex::new(None) } }
     }
     /// A GOP is a second of video drawn and encoded by one renderer, which takes a slow machine
     /// with a large canvas minutes. So the export is not timed per GOP: it stops only when for
@@ -190,7 +192,7 @@ impl Jobs {
     }
     fn insert(&self, job: Arc<Job>) -> Result<()> {
         let mut jobs = self.jobs.lock().unwrap();
-        ensure!(!jobs.values().any(|j| !j.snapshot().terminal()), "已有可视化视频正在导出，请先取消或等待完成");
+        ensure!(!jobs.values().any(|j| !j.snapshot().terminal()), "已有视频正在导出（可视化或剪辑），请先取消或等待完成");
         if jobs.len() >= 8 { if let Some(oldest) = jobs.iter().min_by_key(|(_, j)| j.created).map(|(id, _)| id.clone()) { jobs.remove(&oldest); } }
         jobs.insert(job.snapshot().id, job); Ok(())
     }
@@ -206,7 +208,13 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/visualizer/jobs/{id}", get(poll))
         .route("/api/visualizer/jobs/{id}/cancel", post(cancel))
         .route("/api/visualizer/jobs/{id}/frames", post(frame).layer(DefaultBodyLimit::max(MAX_CHUNK)))
-        .layer(Extension(Arc::new(Jobs::default())))
+        .layer(Extension(shared_jobs()))
+}
+/// The export jobs, the visualizer's and the `.kdjv` projects' (`start_project`): one at a time,
+/// on the window's one encoder.
+fn shared_jobs() -> Arc<Jobs> {
+    static JOBS: std::sync::OnceLock<Arc<Jobs>> = std::sync::OnceLock::new();
+    JOBS.get_or_init(|| Arc::new(Jobs::default())).clone()
 }
 fn fingerprint(path: &std::path::Path) -> Result<String> {
     let s = super::signature(path)?;
@@ -395,8 +403,20 @@ async fn start(State(state): State<Arc<AppState>>, Extension(jobs): Extension<Ar
     let output = destination(&p.output_path)?;
     let job = Arc::new(p.job(format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>())));
     jobs.insert(job.clone())?;
-    // Cover editor disconnects even while queued for the shared encoder.
-    let weak = Arc::downgrade(&job);
+    watch_editor(&job);
+    let first = job.snapshot();
+    tokio::spawn(async move {
+        // Tear down pending producers after, not before, classifying the result;
+        // otherwise every encoder failure would be mislabeled as user cancel.
+        let _lifetime = job.cancel.clone().drop_guard();
+        let result = render(&p, sound, &audio, &output, job.clone()).await;
+        finish(&job, result);
+    });
+    Ok(Json(first))
+}
+/// Cover editor disconnects even while queued for the shared encoder.
+fn watch_editor(job: &Arc<Job>) {
+    let weak = Arc::downgrade(job);
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -405,23 +425,68 @@ async fn start(State(state): State<Arc<AppState>>, Extension(jobs): Extension<Ar
             if job.editor_idle() { job.stop(); break; }
         }
     });
-    let first = job.snapshot();
-    tokio::spawn(async move {
-        // Tear down pending producers after, not before, classifying the result;
-        // otherwise every encoder failure would be mislabeled as user cancel.
-        let _lifetime = job.cancel.clone().drop_guard();
-        let result = render(&p, sound, &audio, &output, job.clone()).await;
-        let mut g = job.inner.lock().unwrap(); g.pending.clear(); g.snapshot.demand = None;
-        if let Err(error) = result {
-            if !job.cancel.is_cancelled() { tracing::error!(error = %format!("{error:#}"), phase = %g.snapshot.phase, "可视化合成导出失败"); }
-            if g.snapshot.phase != "done" {
-                g.snapshot.phase = if job.cancel.is_cancelled() { "canceled" } else { "failed" }.into();
-                g.snapshot.error = format!("{error:#}"); g.snapshot.status = if job.cancel.is_cancelled() { "已取消并清理临时文件" } else { "导出失败" }.into();
-            }
+}
+/// The job's end as its render left it. A job already stopped from outside (`stop_project`)
+/// keeps what it was stopped for.
+fn finish(job: &Job, result: Result<()>) {
+    let mut g = job.inner.lock().unwrap(); g.pending.clear(); g.snapshot.demand = None;
+    if let Err(error) = result {
+        if !job.cancel.is_cancelled() { tracing::error!(error = %format!("{error:#}"), phase = %g.snapshot.phase, "可视化合成导出失败"); }
+        if g.snapshot.phase != "done" && g.snapshot.code.is_empty() {
+            g.snapshot.phase = if job.cancel.is_cancelled() { "canceled" } else { "failed" }.into();
+            g.snapshot.error = format!("{error:#}"); g.snapshot.status = if job.cancel.is_cancelled() { "已取消并清理临时文件" } else { "导出失败" }.into();
         }
-        job.ready.notify_all(); job.publish(&mut g);
+    }
+    job.ready.notify_all(); job.publish(&mut g);
+}
+/// A `.kdjv` project's export (workshop/export.rs): drawn and encoded by the window like the
+/// visualizer's, muxed here with the project's own mix (`sound`, a 48 kHz WAV) through the same
+/// path, checks and commit.
+pub(crate) struct ProjectExport {
+    pub duration: f64, pub width: u32, pub height: u32, pub fps: u32, pub chunk_frames: u32,
+    pub video_bitrate: u64, pub sound: PathBuf, pub output: PathBuf,
+}
+/// Longest project export: hours, unlike a song's visualizer.
+const MAX_PROJECT_SECONDS: f64 = 6. * 3600.;
+/// Starts a project's export job; `keep` (the staged mix) is held until the job has ended. Answers
+/// the job's first snapshot; the window drives it through `/api/visualizer/jobs/{id}`.
+pub(crate) fn start_project(p: ProjectExport, keep: Box<dyn Send + Sync>) -> Result<serde_json::Value> {
+    ensure!((1..=600).contains(&p.chunk_frames), "视频分段长度无效");
+    ensure!(p.video_bitrate == 0 || (1_000_000..=80_000_000).contains(&p.video_bitrate), "视频码率无效");
+    ensure!((16..=3840).contains(&p.width) && (16..=2160).contains(&p.height) && p.width % 2 == 0 && p.height % 2 == 0 && (1..=120).contains(&p.fps), "输出画布或帧率无效");
+    ensure!(p.duration.is_finite() && p.duration > 0. && p.duration <= MAX_PROJECT_SECONDS, "输出时长无效");
+    let export = Export {
+        track_id: 0, signature: fingerprint(&p.sound)?, duration: p.duration, output_path: p.output.to_string_lossy().into_owned(),
+        width: p.width, height: p.height, fps: p.fps, chunk_frames: p.chunk_frames, video_bitrate: p.video_bitrate, audio_48k: true,
+    };
+    let output = destination(&export.output_path)?;
+    ensure!(kdj_media::aac::available(), "这台设备没有系统 AAC 编码器，不能导出工程的声音");
+    let job = Arc::new(export.job(format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>())));
+    shared_jobs().insert(job.clone())?;
+    watch_editor(&job);
+    let first = job.snapshot();
+    let frames = (p.duration * 48_000.).round() as u64;
+    tokio::spawn(async move {
+        let _keep = keep;
+        let _lifetime = job.cancel.clone().drop_guard();
+        let result = render(&export, Sound::Encode { rate: 48_000, frames }, &p.sound, &output, job.clone()).await;
+        finish(&job, result);
     });
-    Ok(Json(first))
+    Ok(serde_json::to_value(first)?)
+}
+/// Stops a project's export from outside (its project was written): failed, with `code` saying why.
+pub(crate) fn stop_project(id: &str, code: &str, message: &str) {
+    let Some(job) = shared_jobs().jobs.lock().unwrap().get(id).cloned() else { return };
+    let mut g = job.inner.lock().unwrap();
+    if g.snapshot.terminal() { return; }
+    job.cancel.cancel(); g.pending.clear(); g.snapshot.demand = None;
+    g.snapshot.phase = "failed".into(); g.snapshot.status = "导出已停止".into();
+    g.snapshot.error = message.into(); g.snapshot.code = code.into();
+    job.ready.notify_all(); job.publish(&mut g);
+}
+/// Whether a job has ended (or is gone).
+pub(crate) fn job_ended(id: &str) -> bool {
+    shared_jobs().jobs.lock().unwrap().get(id).is_none_or(|job| job.snapshot().terminal())
 }
 #[derive(Deserialize)]
 struct Poll { #[serde(default)] since: u64, #[serde(default)] drawn: Option<u64> }

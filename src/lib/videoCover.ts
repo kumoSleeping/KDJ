@@ -1,7 +1,8 @@
 /**
  * A library video with no picture of its own gets a frame as its cover: decoded here with the
- * system decoder (codecFrames.ts) and kept by the server (`/library/video-cover`). One video at
- * a time, each asked once per run; one that cannot be decoded keeps the video mark.
+ * system decoder (codecFrames.ts) and kept by the server (`/library/video-cover`); a `.kdjv`
+ * project's is a frame of one of its sources. One video at a time, each asked once per run; one
+ * that cannot be decoded keeps the video mark.
  */
 import { api, framesApi } from "./api";
 import { codecFramesAvailable, mostlyBlack, openVideoFrames, toJpeg } from "./codecFrames";
@@ -13,12 +14,14 @@ const POSITIONS = [0.1, 0.35, 0.6];
 const asked = new Map<number, Promise<boolean>>();
 let queue: Promise<unknown> = Promise.resolve();
 
-async function make(trackId: number): Promise<boolean> {
-  const frames = await openVideoFrames(api.videoUrl(trackId), COVER_WIDTH);
+async function make(trackId: number, project: boolean): Promise<boolean> {
+  // A project's cover is a frame of the source it plays a third of the way in (`/kdjv/cover`).
+  const place = project ? await api.kdjvCover(trackId) : null;
+  const frames = await openVideoFrames(place ? api.kdjvSourceUrl(trackId, place.source) : api.videoUrl(trackId), COVER_WIDTH);
   try {
     let chosen: HTMLCanvasElement | OffscreenCanvas | null = null;
-    for (const part of POSITIONS) {
-      const canvas = await frames.canvas(frames.duration * part);
+    for (const part of place ? [null] : POSITIONS) {
+      const canvas = await frames.canvas(part === null ? place!.at : frames.duration * part);
       if (!canvas) continue;
       chosen ??= canvas;
       if (!mostlyBlack(canvas)) { chosen = canvas; break; }
@@ -31,12 +34,12 @@ async function make(trackId: number): Promise<boolean> {
   }
 }
 
-/** Whether a cover was made for the video: the caller then loads its cover again. */
-export function requestVideoCover(trackId: number): Promise<boolean> {
+/** Whether a cover was made for the video (or `.kdjv` project): the caller then loads its cover again. */
+export function requestVideoCover(trackId: number, project = false): Promise<boolean> {
   if (!codecFramesAvailable()) return Promise.resolve(false);
   const known = asked.get(trackId);
   if (known) return known;
-  const run = queue.then(() => make(trackId)).catch(() => false);
+  const run = queue.then(() => make(trackId, project)).catch(() => false);
   queue = run;
   asked.set(trackId, run);
   return run;

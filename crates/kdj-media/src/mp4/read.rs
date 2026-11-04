@@ -24,9 +24,11 @@ pub struct Track {
     pub handler: [u8; 4],
     pub timescale: u32,
     pub language: u16,
-    /// From `tkhd`, in pixels.
+    /// From `tkhd`, in pixels, before `rotation`.
     pub width: u32,
     pub height: u32,
+    /// Clockwise turn of the picture `tkhd`'s matrix asks for: 0, 90, 180 or 270.
+    pub rotation: u16,
     /// `stsd` entries, each a whole box; samples use the first.
     pub entries: Vec<Vec<u8>>,
     /// First non-empty edit's start, in media time; leading empty edits in movie time.
@@ -282,6 +284,12 @@ fn parse_moov(body: &[u8]) -> Result<(Movie, Vec<(u32, Trex)>)> {
     Ok((movie, trex))
 }
 
+/// The turn a `tkhd` matrix's first row (16.16 fixed point) makes, to the nearest quarter.
+fn rotation(a: i32, b: i32) -> u16 {
+    let degrees = (b as f64).atan2(a as f64).to_degrees();
+    (((degrees / 90.).round() as i32).rem_euclid(4) * 90) as u16
+}
+
 fn parse_trak(body: &[u8], timescale: u32) -> Result<Track> {
     let mut track = Track {
         id: 0,
@@ -290,6 +298,7 @@ fn parse_trak(body: &[u8], timescale: u32) -> Result<Track> {
         language: 0x55c4,
         width: 0,
         height: 0,
+        rotation: 0,
         entries: Vec::new(),
         edit_media_time: None,
         edit_lead: 0,
@@ -304,7 +313,10 @@ fn parse_trak(body: &[u8], timescale: u32) -> Result<Track> {
     track.id = c.u32()?;
     c.skip(4)?;
     c.skip(if version == 1 { 8 } else { 4 })?;
-    c.skip(8 + 2 + 2 + 2 + 2 + 36)?;
+    c.skip(8 + 2 + 2 + 2 + 2)?;
+    let (a, b) = (c.i32()?, c.i32()?);
+    c.skip(28)?;
+    track.rotation = rotation(a, b);
     track.width = c.u32()? >> 16;
     track.height = c.u32()? >> 16;
     if let Some(edts) = child(body, b"edts")? {
@@ -508,4 +520,16 @@ pub fn ensure_supported_entry(track: &Track) -> Result<()> {
         bail!("暂不支持多个样本描述的轨道");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    #[test]
+    fn a_matrix_turn_is_read_to_the_nearest_quarter() {
+        const ONE: i32 = 1 << 16;
+        assert_eq!(super::rotation(ONE, 0), 0);
+        assert_eq!(super::rotation(0, ONE), 90);
+        assert_eq!(super::rotation(-ONE, 0), 180);
+        assert_eq!(super::rotation(0, -ONE), 270);
+    }
 }

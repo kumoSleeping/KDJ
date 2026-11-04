@@ -217,6 +217,7 @@ mod tests {
             language: 0,
             width: 0,
             height: 0,
+            rotation: 0,
             entries: vec![entry],
             edit_media_time: None,
             edit_lead: 0,

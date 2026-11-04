@@ -1,5 +1,8 @@
 import { createElement } from "react";
-import { Clapperboard, FolderInput } from "lucide-react";
+import { Clapperboard, FolderInput, FolderOpen } from "lucide-react";
+import { getBridge } from "../../lib/bridge";
+import { projectExportActive } from "../../lib/projectExportQueue";
+import { useProjectExportStore } from "../../stores/projectExportStore";
 import { useSidePanels } from "../../lib/sidePanels";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
@@ -8,7 +11,7 @@ import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import { createBatchReporter, type BatchMember } from "./taskBatch";
 import { taskDefaultStay } from "./taskBubbleSchema";
 import { dismissTask, showTask } from "./taskBubbleStore";
-import { downloadTaskCover, visualizerTaskCover } from "./taskCovers";
+import { downloadTaskCover, projectTaskCover, visualizerTaskCover } from "./taskCovers";
 
 /**
  * The app's own activities that report as task bubbles without a call from the code that
@@ -106,11 +109,40 @@ function watchExports(): () => void {
         fresh: before === undefined ? task.createdAt >= since : !VISUALIZER_ACTIVE.has(before),
       });
     }
+    // 剪辑/VJ projects: one stopped because its project was changed says so; a paused one leaves
+    // without a word; a finished one names the folder it went to.
+    for (const task of useProjectExportStore.getState().tasks) {
+      const key = `project:${task.id}`;
+      const before = phases.get(key);
+      const active = projectExportActive(task);
+      phases.set(key, task.phase);
+      const cover = projectTaskCover(task);
+      const parts = task.outputPath.split(/[\\/]/);
+      const file = parts.pop() ?? "", folder = parts.pop() ?? "";
+      members.push({
+        key,
+        title: task.name,
+        covers: cover ? [cover] : [],
+        state: active ? "active" : task.phase === "done" ? "done"
+          : task.phase === "failed" || (task.phase === "canceled" && task.changed) ? "failed" : "gone",
+        progress: task.progress,
+        error: task.changed ? "工程在导出时被改动，已停止" : task.error,
+        fresh: before === undefined ? task.createdAt >= since : !["queued", "rendering"].includes(before),
+        outcome: task.phase === "done" ? {
+          detail: folder ? `已导出到「${folder}」· ${file}` : `已导出 ${file}`,
+          actions: [{
+            id: "reveal", label: "打开所在文件夹", icon: createElement(FolderOpen, { size: 13, "aria-hidden": true }),
+            onSelect: () => { void getBridge().revealPath(task.outputPath).catch(() => undefined); },
+          }],
+        } : undefined,
+      });
+    }
     reporter.report(members);
   };
   read();
   const stop = useVisualizerExportStore.subscribe((state, before) => { if (state.tasks !== before.tasks) read(); });
-  return () => { stop(); reporter.stop(); };
+  const stopProjects = useProjectExportStore.subscribe((state, before) => { if (state.tasks !== before.tasks) read(); });
+  return () => { stop(); stopProjects(); reporter.stop(); };
 }
 
 function watchImports(): () => void {

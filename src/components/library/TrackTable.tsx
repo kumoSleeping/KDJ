@@ -21,7 +21,9 @@ import {
   Trash2,
   Video,
   Image as ImageIcon,
+  Clapperboard,
 } from "lucide-react";
+import { useLaneEditor } from "../../stores/laneEditorStore";
 import { libraryDemand, restoreLibraryAnchor } from "../../lib/libraryViewport";
 import { listScrollsItself, rowListPadding, useRowList, useScrollMotion } from "../common/rowList";
 import { scrollTopTo } from "../../lib/wheelScroll";
@@ -88,6 +90,7 @@ import { startLongPress } from "../../lib/longPress";
 import { pointerTrackDropAt, type PointerTrackDrop } from "../../lib/pointerTrackDrop";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
+import { exportProject } from "../../lib/kdjvPlay";
 import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isImageTrack, isProjectTrack, isVideoTrack, thumbUrl } from "../../lib/format";
 import { shouldHandleWorkspaceDelete } from "../../lib/workspacePanes";
 import {
@@ -118,7 +121,7 @@ import {
 } from "../../lib/tableColumnPrefs";
 import { ContextMenu, InlineNotice } from "../common";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
-import { visualizerExportAvailable } from "../../lib/platformFeatures";
+import { mediaProductionAvailable, visualizerExportAvailable } from "../../lib/platformFeatures";
 import { canVisualizeTrack, useVisualizerPopup } from "../../lib/visualizerPopup";
 import { exportVisualizerTracks, reportVisualizerExportError } from "../../lib/visualizerExportActions";
 import { useVisualizerExportBlocked } from "../../lib/visualizerExportSupport";
@@ -394,7 +397,7 @@ function TrackCoverThumb({ track }: { track: TrackSummary }) {
               return;
             }
             // videoCover.ts brings mediabunny, which the list itself does not need until here.
-            void import("../../lib/videoCover").then(module => module.requestVideoCover(track.id)).catch(() => false).then(made => {
+            void import("../../lib/videoCover").then(module => module.requestVideoCover(track.id, isProjectTrack(track.format))).catch(() => false).then(made => {
               if (made) setAttempt(1);
               else { coverSettled(key, false); setMissing(true); }
             });
@@ -522,9 +525,9 @@ function trackCell(
       return (
         <div key={key} className="kd-list-cell kd-td-strong" role="gridcell" data-col="title" data-flex="" title={track.title || track.filename}>
           <TrackCoverThumb track={track} />
-          {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。旧版曲库里的 KDJ 视频工程写一个「工程」小标签。 */}
+          {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。KDJ 视频工程写一个「工程」小标签。 */}
           {isProjectTrack(track.format) ? (
-            <span className="kd-video-mark kd-project-mark" title="KDJ 视频工程：这一版不再支持，文件留在原处">工程</span>
+            <span className="kd-video-mark kd-project-mark" title="KDJ 视频工程：由本机文件拼成，在 KDJ 里播放">工程</span>
           ) : isVideoTrack(track.format) && (
             <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
               <Video size={11} aria-hidden="true" />
@@ -1220,7 +1223,7 @@ export const TrackTable = memo(function TrackTable({
     let dragging = false;
     let ghost: PointerDragGhost | null = null;
     let unlockScroll: (settleMs?: number) => void = () => undefined;
-    // A place of the app's own that takes the rows (a drawer's title row), told when the pointer leaves it.
+    // A place of the app's own that takes the rows (the editor), told when the pointer leaves it.
     let place: PointerTrackDrop | null = null;
 
     try {
@@ -2261,6 +2264,8 @@ export const TrackTable = memo(function TrackTable({
     },
     cancelPress,
     doubleClick(track) {
+      // A project double-clicked plays and opens in the editor beside the list, whichever click plays.
+      if (mediaProductionAvailable() && !selecting && isProjectTrack(track.format)) void useLaneEditor.getState().openTrack(track);
       if (selecting) return;
       const submitted = doubleClickPlaybackRef.current;
       doubleClickPlaybackRef.current = null;
@@ -2661,6 +2666,26 @@ export const TrackTable = memo(function TrackTable({
             >
               <Pencil size={12} />
               编辑 Meta
+            </button>
+          )}
+          {mediaProductionAvailable() && isProjectTrack(rowMenu.track.format) && (
+            <button type="button" disabled={menuIds.length !== 1} onClick={() => {
+              const track = rowMenu.track;
+              setRowMenu(null);
+              exportProject(track);
+            }}><Download size={12} />导出 MP4</button>
+          )}
+          {mediaProductionAvailable() && menuIds.length === 1 && !isImageTrack(rowMenu.track.format) && (
+            <button type="button" onClick={() => {
+              const track = rowMenu.track;
+              setRowMenu(null);
+              // A project opens in the editor; a video is cut; a song is the base of a VJ.
+              if (isProjectTrack(track.format)) { void useLaneEditor.getState().openTrack(track); return; }
+              void api.track(track.id).then(full => isVideoTrack(full.format)
+                ? useLaneEditor.getState().startVideo(full)
+                : useLaneEditor.getState().startVj(full)).catch(() => undefined);
+            }}><Clapperboard size={12} />
+              {isProjectTrack(rowMenu.track.format) ? "编辑工程" : isVideoTrack(rowMenu.track.format) ? "剪辑这个视频" : "用这首歌做 VJ"}
             </button>
           )}
           {visualizerExportAvailable() && <button type="button" title={visualizerExportBlocked ?? undefined}

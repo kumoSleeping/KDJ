@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use serde_json::{json, Value};
 
-use super::args::{Cli, Commands, LibraryCmd, VisualizerCmd};
+use super::args::{Cli, Commands, LibraryCmd, ProjectCmd, VisualizerCmd};
 use super::http::HttpClient;
 use super::{runtime, CliError};
 
@@ -21,7 +21,7 @@ const NOTES: [&str; 9] = [
     "下载完成后 KDJ 自动入库并分析。移动、改名、删除、整理文件请直接用你自己的文件工具；放进 download.library_roots 下的文件会被 KDJ 自动跟上。",
     "library get 缺少分析时会当场补齐再返回（可能要几十秒）；时间单位都是秒，grid.downbeats 是小节线。",
     "peek 把截图存成 JPEG 文件并返回路径（多张时另有一张按时间顺序拼好的 sheet），用你看图片的工具打开即可；截图只用来核对画面内容，判断不了音画是否同步。",
-    "align 是声学定位：返回几套 plans，segments 里 ref = ref_at + (video - video_in) / speed（秒）。evidence 为 verified 的是声学核实过的，auto=true 的可以直接采用；melody / partial 只是候选，需要用户试听确认。ref_bar 是参考曲的小节号（参考曲分析过才有）。",
+    "align 是声学定位：返回几套 plans，segments 里 ref = ref_at + (video - video_in) / speed（秒）。evidence 为 verified 的是声学核实过的，auto=true 的可以直接采用；melody / partial 只是候选，需要用户试听确认。ref_bar 是参考曲的小节号（参考曲分析过才有）。剪辑写成 KDJ 的 .kdjv 视频工程（docs/kdjv.md），用 project edit 改、project check 检查。",
     "扫码登录会在用户屏幕上打开二维码图片，请让用户用对应 App 扫码；youtube / ytm / soundcloud 从本机浏览器导入登录状态，需要用户先在该浏览器里登录。",
     "除了 KDJ，也可以结合你自己的网络搜索或浏览器工具寻找素材，再把链接交给 search 或 download。",
 ];
@@ -105,6 +105,13 @@ fn run_inner(cli: Cli) -> Result<()> {
             &json!({ "reference": media_arg(&reference), "video": media_arg(&video) }),
         )?,
         Commands::Library { command } => library(&http, command)?,
+        Commands::Project { command } => match command {
+            ProjectCmd::Check { path } => http.post_json_long("/api/kdjv/check", &json!({ "path": absolute(&path) }))?,
+            ProjectCmd::Edit { path, ops, create } => {
+                let ops: Value = serde_json::from_str(&ops).map_err(|error| CliError::new("usage", format!("--ops 不是有效的 JSON：{error}")))?;
+                http.post_json_long("/api/kdjv/edit", &json!({ "path": absolute(&path), "ops": ops, "create": create }))?
+            }
+        },
         Commands::Visualizer { command } => match command {
             VisualizerCmd::Render { id, out, width, height } => http.post_json_long(
                 "/api/visualizer/render",
@@ -526,7 +533,7 @@ fn analyzed_tracks(http: &HttpClient, ids: &[i64]) -> Result<Vec<(Value, Value)>
     let mut pending_grid = Vec::new();
     for &id in ids {
         let track = http.get_value(&format!("/api/library/tracks/{id}"))?;
-        // A `.kdjv` project an earlier build put in the library is not sound to analyse.
+        // A project is not sound to analyse: its songs are, by their own rows.
         if track["format"].as_str().is_some_and(|f| f.eq_ignore_ascii_case("kdjv")) {
             continue;
         }
@@ -707,6 +714,9 @@ mod tests {
                 "kdj library list",
                 "kdj library get",
                 "kdj library add <PATH>",
+                "kdj project check <PATH>",
+                "kdj project render <PATH>",
+                "kdj project edit <PATH>",
                 "kdj visualizer render <ID>",
             ]
         );
