@@ -859,7 +859,7 @@ fn search_local_library(
                 track.title.clone()
             };
             let max_quality = match track.format.to_ascii_lowercase().as_str() {
-                "flac" | "wav" | "aiff" | "aif" | "alac" => Some(Quality::Flac),
+                "flac" | "wav" | "aiff" | "aif" | "aifc" | "alac" => Some(Quality::Flac),
                 _ if track.bitrate.unwrap_or(0) >= 256_000 => Some(Quality::Q320),
                 _ => Some(Quality::Q128),
             };

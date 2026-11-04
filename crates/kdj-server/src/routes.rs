@@ -6540,7 +6540,7 @@ fn duplicate_text(value: &str) -> String {
 
 fn duplicate_quality(track: &Track) -> (i64, String) {
     let format = track.format.trim().to_ascii_lowercase();
-    let lossless = matches!(format.as_str(), "flac" | "wav" | "aiff" | "aif" | "alac");
+    let lossless = matches!(format.as_str(), "flac" | "wav" | "aiff" | "aif" | "aifc" | "alac");
     let format_rank = if lossless { 2_i64 } else { 1_i64 };
     let sample_rate = track.samplerate.unwrap_or(0).max(0);
     let bitrate = track.bitrate.unwrap_or(0).max(0);
@@ -8116,6 +8116,7 @@ fn mime_for(path: &Path) -> String {
         "ogg" => "audio/ogg",
         "opus" => "audio/opus",
         "wav" => "audio/wav",
+        "aiff" | "aif" | "aifc" => "audio/aiff",
         _ => "application/octet-stream",
     }
     .to_string()
