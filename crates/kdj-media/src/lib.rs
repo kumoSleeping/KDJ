@@ -9,6 +9,7 @@
 //! - [`webm`]: WebM Opus into Ogg Opus.
 //! - [`probe`]: what a file holds (picture size, rate, colour, sound, lengths) from its container.
 //! - [`stretch`]: sound played faster or slower at its own pitch (WSOLA).
+//! - [`mix`]: the sample loops of a project's sound mix (16-bit PCM, a clip at one gain, the limiter).
 
 mod bits;
 pub mod aac;
@@ -16,6 +17,7 @@ pub mod audio;
 pub mod export;
 pub mod flv;
 pub mod h264;
+pub mod mix;
 pub mod mp4;
 pub mod pcm;
 pub mod probe;

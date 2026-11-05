@@ -148,9 +148,7 @@ fn read_frames(decoded: &Decoded, from: i64, count: usize) -> Result<Vec<f32>> {
     let mut bytes = vec![0u8; ((hi - lo) * 4) as usize];
     file.read_exact(&mut bytes)?;
     let at = ((lo as i64 - from) * 2) as usize;
-    for (n, sample) in bytes.chunks_exact(2).enumerate() {
-        out[at + n] = i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32768.;
-    }
+    kdj_media::mix::s16le_to_f32(&bytes, &mut out[at..]);
     Ok(out)
 }
 
@@ -189,7 +187,7 @@ fn add_clip(mix: &mut [f32], origin: f64, c: &Clip, decoded: &Decoded, from_ms: 
         kdj_media::stretch::stretch(&input, 2, count, &|o| source_frame(o) - read_from as f64)
     };
     let length = c.duration();
-    for n in 0..count {
+    let gain_at = |n: usize| {
         let local = a + n as f64 * ms_per_frame;
         let mut gain = (c.sound.gain * c.fades.alpha(local, true)) as f32;
         let from_start = frames(local) as usize;
@@ -200,31 +198,37 @@ fn add_clip(mix: &mut [f32], origin: f64, c: &Clip, decoded: &Decoded, from_ms: 
         if declick_out && to_end < DECLICK_FRAMES {
             gain *= to_end as f32 / DECLICK_FRAMES as f32;
         }
+        gain
+    };
+    // Only the ends of a clip are shaped (its fades, the click-free ramps): those frames take their
+    // own gain, the steady stretch between them is added at the clip's volume in one run.
+    let steady = c.sound.gain as f32;
+    let mut lo = 0;
+    while lo < count && gain_at(lo) != steady {
+        lo += 1;
+    }
+    let mut hi = count;
+    while hi > lo && gain_at(hi - 1) != steady {
+        hi -= 1;
+    }
+    for n in (0..lo).chain(hi..count) {
+        let gain = gain_at(n);
         let o = (first + n) * 2;
         mix[o] += sound[n * 2] * gain;
         mix[o + 1] += sound[n * 2 + 1] * gain;
     }
+    kdj_media::mix::add_scaled(mix, first, &sound, lo, hi, steady);
     Ok(())
 }
 
 /// Keeps the mix under full scale: the gain drops at once to what the loudest frame of the next
-/// millisecond needs and comes back over about fifty.
+/// millisecond needs and comes back over about fifty (kdj_media::mix::limit).
 fn limit(mix: &mut [f32]) {
-    let frames = mix.len() / 2;
-    let peak = |n: usize| mix[n * 2].abs().max(mix[n * 2 + 1].abs());
-    let peaks: Vec<f32> = (0..frames).map(peak).collect();
-    let mut gain = 1f32;
-    for n in 0..frames {
-        let ahead = peaks[n..(n + LIMIT_AHEAD).min(frames)].iter().fold(0f32, |m, &p| m.max(p));
-        let target = if ahead > 1. { 1. / ahead } else { 1. };
-        gain = if target < gain { target } else { (gain + LIMIT_RELEASE).min(target) };
-        mix[n * 2] = (mix[n * 2] * gain).clamp(-1., 1.);
-        mix[n * 2 + 1] = (mix[n * 2 + 1] * gain).clamp(-1., 1.);
-    }
+    kdj_media::mix::limit(mix, LIMIT_AHEAD, LIMIT_RELEASE);
 }
 
 fn to_s16(samples: &[f32]) -> Vec<u8> {
-    samples.iter().flat_map(|s| ((s.clamp(-1., 1.) * 32767.).round() as i16).to_le_bytes()).collect()
+    kdj_media::mix::f32_to_s16le(samples)
 }
 
 impl Workshop {
@@ -550,5 +554,59 @@ mod mix_tests {
         let mut quiet = vec![0.25f32; 9600];
         limit(&mut quiet);
         assert!(quiet.iter().all(|&s| s == 0.25), "a mix under full scale is left alone");
+    }
+
+    #[test]
+    fn a_faded_clip_has_every_frame_at_its_own_gain() {
+        let (_dir, decoded) = source(1.);
+        let mut c = clip(0., 0., 1000.);
+        c.sound.gain = 0.7;
+        c.fades = Fades { audio_in_ms: 300., audio_out_ms: 200., ..Fades::new(1000., false) };
+        let count = frames(1000.) as usize;
+        let mut mix = vec![0f32; count * 2];
+        add_clip(&mut mix, 0., &c, &decoded, 0., 1000., true, true).unwrap();
+        // Each frame as the mixer shaped it before the steady stretch was added in one run.
+        for n in 0..count {
+            let local = n as f64 * 1000. / SAMPLE_RATE as f64;
+            let mut gain = (c.sound.gain * c.fades.alpha(local, true)) as f32;
+            let from_start = frames(local) as usize;
+            let to_end = frames(1000. - local) as usize;
+            if from_start < DECLICK_FRAMES {
+                gain *= from_start as f32 / DECLICK_FRAMES as f32;
+            }
+            if to_end < DECLICK_FRAMES {
+                gain *= to_end as f32 / DECLICK_FRAMES as f32;
+            }
+            let sample = (n % 32768) as f32 / 32768.;
+            assert_eq!(mix[n * 2], 0. + sample * gain, "frame {n}");
+            assert_eq!(mix[n * 2 + 1], 0. + -sample * gain, "frame {n}, right");
+        }
+    }
+
+    #[test]
+    fn the_limiter_gives_what_scanning_the_next_millisecond_gave() {
+        // The limiter as it was: the loudest of the next LIMIT_AHEAD frames, scanned at each frame.
+        fn scanned(mix: &mut [f32]) {
+            let frames = mix.len() / 2;
+            let peaks: Vec<f32> = (0..frames).map(|n| mix[n * 2].abs().max(mix[n * 2 + 1].abs())).collect();
+            let mut gain = 1f32;
+            for n in 0..frames {
+                let ahead = peaks[n..(n + LIMIT_AHEAD).min(frames)].iter().fold(0f32, |m, &p| m.max(p));
+                let target = if ahead > 1. { 1. / ahead } else { 1. };
+                gain = if target < gain { target } else { (gain + LIMIT_RELEASE).min(target) };
+                mix[n * 2] = (mix[n * 2] * gain).clamp(-1., 1.);
+                mix[n * 2 + 1] = (mix[n * 2 + 1] * gain).clamp(-1., 1.);
+            }
+        }
+        // Bursts over full scale between quiet stretches, left and right apart.
+        let mix: Vec<f32> = (0..48_000).flat_map(|n| {
+            let t = n as f32 / 48_000.;
+            let loud = if (n / 700) % 3 == 0 { 2.3 } else { 0.4 };
+            [loud * (t * 2_513.).sin(), 0.9 * loud * (t * 1_777. + 0.3).sin()]
+        }).collect();
+        let (mut fast, mut slow) = (mix.clone(), mix);
+        limit(&mut fast);
+        scanned(&mut slow);
+        assert_eq!(fast, slow);
     }
 }

@@ -54,6 +54,10 @@ opt-level = 2
 opt-level = 2
 [profile.release.package.kdj-playback]
 opt-level = 2
+# The editor's sound mix (mix.rs) and retiming (stretch.rs), run again over a whole project at
+# every sound edit.
+[profile.release.package.kdj-media]
+opt-level = 2
 
 # Their hot loops live mostly in dependencies, so only overriding the workspace wrappers is not
 # enough. Keep codecs/resamplers/FFT throughput-optimized while the rest of the graph uses `s`.
@@ -93,6 +97,12 @@ opt-level = 2
 [profile.dev]
 debug = 0
 incremental = true
+
+# Unoptimised, the editor's sound mix took about 0.4 s per eight-second chunk, and a volume edit
+# mixes every chunk the clip covers again (3 s for a four-minute song). kdj-media is small and
+# rarely changes, so the dev app mixes at release speed.
+[profile.dev.package.kdj-media]
+opt-level = 2
 
 # tauri:dev 默认是 debug：波形/分析在未优化下单曲要几十秒，播放条会一直空着。
 # `package."*"` 只覆盖 crates.io 依赖，不覆盖 workspace member——所以分析、STEM 和
