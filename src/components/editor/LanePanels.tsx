@@ -38,17 +38,34 @@ function NumberField({ label, value, step, min, max, onCommit }: {
   </label>;
 }
 
-/** A slider that shows its value while it moves and sends it once, when it settles. */
+/**
+ * A slider that shows its value while it moves and sends it once: when it is let go, or (moved
+ * with the keys) when it has settled.
+ */
 function SettleSlider({ label, value, min, max, step, defaultValue, format, onCommit }: {
   label: string; value: number; min: number; max: number; step: number; defaultValue: number;
   format(value: number): string; onCommit(value: number): void;
 }) {
   const [moving, setMoving] = useState<number | null>(null);
   const settle = useRef<number | null>(null);
-  const change = (next: number) => {
-    setMoving(next);
+  const latest = useRef<number | null>(null);
+  const send = () => {
     if (settle.current !== null) window.clearTimeout(settle.current);
-    settle.current = window.setTimeout(() => { settle.current = null; setMoving(null); if (next !== value) onCommit(next); }, 350);
+    settle.current = null;
+    const next = latest.current;
+    latest.current = null;
+    setMoving(null);
+    if (next !== null && next !== value) onCommit(next);
+  };
+  // Let go anywhere: the press that moved it ends, so the value is sent at once.
+  const letGo = useRef<() => void>(() => undefined);
+  letGo.current = () => { if (latest.current !== null) send(); };
+  const change = (next: number) => {
+    if (latest.current === null) window.addEventListener("pointerup", () => letGo.current(), { once: true });
+    setMoving(next);
+    latest.current = next;
+    if (settle.current !== null) window.clearTimeout(settle.current);
+    settle.current = window.setTimeout(send, 350);
   };
   useEffect(() => () => { if (settle.current !== null) window.clearTimeout(settle.current); }, []);
   return <Slider label={label} value={moving ?? value} min={min} max={max} step={step} defaultValue={defaultValue} format={format} onChange={change} />;
@@ -379,12 +396,10 @@ export function ToolPanel({ tool, project, selected, playhead, beatNear, edit }:
       </Section>}
       <Section label="声音">
         <div className="kd-lanes-row">
-          <label className="kd-lanes-check">
-            <input type="checkbox" checked={Boolean(clip.muted)} onChange={event => edit([{ op: "set", id: clip.id, fields: { muted: event.target.checked } }])} />
-            <span>静音</span>
-          </label>
-          <SettleSlider label="音量" value={clip.volume ?? 1} min={0} max={2} step={0.05} defaultValue={1} format={percent}
-            onCommit={value => edit([{ op: "set", id: clip.id, fields: { volume: value } }])} />
+          {/* Silencing is the track's key beside the lanes; a clip silenced here earlier reads 0 and
+              is heard again as soon as its volume is moved. */}
+          <SettleSlider label="音量" value={clip.muted ? 0 : clip.volume ?? 1} min={0} max={2} step={0.05} defaultValue={1} format={percent}
+            onCommit={value => edit([{ op: "set", id: clip.id, fields: clip.muted ? { volume: value, muted: false } : { volume: value } }])} />
         </div>
       </Section>
       <Section label="淡入淡出">
