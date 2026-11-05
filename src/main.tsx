@@ -3,10 +3,13 @@ import { StrictMode, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { RootErrorBoundary } from "./components/RootErrorBoundary";
 import { installDiagnostics, captureDiagnostic } from "./lib/diagnostics";
+import { installAvcLevel } from "./lib/avcLevel";
 
 // A diagnostic hook must never prevent the application itself from booting.
 try { installDiagnostics(); }
 catch (error) { captureDiagnostic("runtime", "diagnostics.install", error); }
+// H.264 marked level 6.x decodes in the page instead of falling back to a `<video>` (avcLevel.ts).
+installAvcLevel();
 
 const root = document.getElementById("root");
 if (!root) throw new Error("找不到 #root，index.html 被改坏了");

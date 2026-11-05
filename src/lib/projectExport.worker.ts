@@ -10,6 +10,9 @@ import { createGopEncoder, postGop, type GopEncoder, type StudioFrameTiming, typ
 import { h264ParameterSets, rgbaToYuv420 } from "./visualizerStudioFrames";
 import type { StudioWorkerNote, StudioWorkerProgress, StudioWorkerReply, StudioWorkerResult } from "./visualizerStudioExport.worker";
 import type { KdjvLive } from "../types";
+import { installAvcLevel } from "./avcLevel";
+
+installAvcLevel();
 
 /** What the export draws: the project's frame `f` is its time `from + f / fps`. */
 export interface ProjectExportGeometry {

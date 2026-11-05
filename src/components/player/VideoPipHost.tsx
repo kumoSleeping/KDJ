@@ -276,7 +276,8 @@ export function VideoPipHost() {
   const error = useVideoPip((state) => state.error);
   const session = useVideoPip((state) => state.session);
   // Whether a library video's sound plays: one that does not plays as silence (SystemPlayerNotice).
-  const localSound = useVideoSound(session?.source === "local" ? session.trackId : null);
+  // A project's sound is its own mix, never a video's: it is not asked (the server answers 400).
+  const localSound = useVideoSound(session?.source === "local" && !session.project ? session.trackId : null);
   const [videoFullscreen, setVideoFullscreen] = useState(false);
   // The picture's own width / height, once the source has told it. The floating window is the
   // shape of the video it holds, not of a 16:9 frame; a change (metadata arriving, another
