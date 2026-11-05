@@ -19,12 +19,12 @@ use lofty::tag::{Accessor, ItemKey, Tag, TagExt, TagType};
 
 /// 支持的音频扩展名。曲库扫描也用这一份，两边必须一致。
 ///
-/// 和 v0.1.0 的 `tagging.py::AUDIO_EXTENSIONS` **逐项相同**，一个都别多：
-/// 早先这里多了 `wma`/`alac`，后果是这些文件被扫进曲库、symphonia 又解不了，
-/// 永远挂着"分析失败"。`mp4` 也不在这里——它在 [`VIDEO_EXTENSIONS`]，
-/// 入库判定走 `is_media_extension`（音频 ∪ 视频），不受影响。
+/// 只收 symphonia 解得了的：早先这里多了 `wma`/`alac`，后果是这些文件被扫进曲库、symphonia 又解不了，
+/// 永远挂着"分析失败"。AIFF / AIFF-C（`aiff`、`aif`、`aifc`）靠各 crate 打开的 symphonia `aiff`
+/// feature；关掉它，曲库照样收、标签照样读（lofty），却一首都播不了。`mp4` 也不在这里——它在
+/// [`VIDEO_EXTENSIONS`]，入库判定走 `is_media_extension`（音频 ∪ 视频），不受影响。
 pub const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "aiff", "aif",
+    "mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "aiff", "aif", "aifc",
 ];
 
 /// 视频容器也进曲库：现场素材、MV 常常只有视频版。

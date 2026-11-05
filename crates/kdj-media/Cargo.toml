@@ -8,7 +8,7 @@ description = "Pure-Rust MP4 remuxing and the system AAC encoders: downloads and
 [dependencies]
 anyhow = "1.0.104"
 rubato = "4.0.0"
-symphonia = { version = "0.5.4", default-features = false, features = ["aac", "alac", "mp3", "isomp4", "mkv", "ogg", "vorbis", "flac", "wav", "pcm"] }
+symphonia = { version = "0.5.4", default-features = false, features = ["aac", "aiff", "alac", "mp3", "isomp4", "mkv", "ogg", "vorbis", "flac", "wav", "pcm"] }
 tracing = "0.1.44"
 
 [dev-dependencies]

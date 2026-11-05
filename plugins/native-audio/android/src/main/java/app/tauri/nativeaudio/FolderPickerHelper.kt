@@ -66,7 +66,7 @@ internal object FolderPickerHelper {
 
     /** 曲库认的媒体后缀，与 Rust 侧 `is_media_extension` 逐项一致（音频 ∪ 视频）。 */
     private val MEDIA_EXTENSIONS = setOf(
-        "mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "aiff", "aif",
+        "mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "aiff", "aif", "aifc",
         "mp4", "m4v", "mov", "webm", "mkv",
     )
 

@@ -23,6 +23,9 @@ symphonia 0.5 没有 Opus 解码器。影响：
 AC-3 / E-AC-3（杜比）、DTS 等 symphonia 不支持的音轨，处理同 Opus：视频静音播放并提示，`kdj align` 报错。
 下载里的杜比音轨不能加 Offset，也不能转成 AAC（报「这个音轨的编码解不了（例如杜比 E-AC-3）……」）。
 
+AIFF / AIFF-C（`.aiff`、`.aif`、`.aifc`）由 symphonia 的 `aiff` feature 解码：PCM 8–32 位（大端，AIFF-C 的 `sowt` 小端 16 位）、
+32/64 位浮点、μ-law、A-law 都行；AIFF-C 的 IMA ADPCM（`ima4`，老 Mac 的压缩格式）解不了，处理同 Opus。
+
 ## 画面解不了的视频
 
 本地视频的画面由 WebView 解码：macOS 是 VideoToolbox，Windows（WebView2）是 Media Foundation，Android 是 MediaCodec，
