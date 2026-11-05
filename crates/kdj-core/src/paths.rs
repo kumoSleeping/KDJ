@@ -106,27 +106,68 @@ pub fn render_filename(
             ("id", key),
         ],
     ) {
-        Some(text) => text,
-        None => format!("{safe_title} - {safe_artists}"),
+        // Nothing left (a template of the album alone, a song without one): the default.
+        Some(text) if !text.trim().is_empty() => text,
+        _ => format!("{safe_title} - {safe_artists}"),
     };
     finalize_filename(&format!("{rendered}.{safe_ext}"), "mp3")
 }
 
 /// 展开 `{name}` 占位符。遇到未知占位符或不成对的花括号返回 None（调用方退回默认模板）。
+///
+/// 空着的字段（没有专辑）不留下连接它的文字：去掉它和前一个字段之间的那段（它是第一个字段时，
+/// 去掉它和后一个字段之间的那段），连同紧挨着它的括号——`{title} ({album})` 是「歌名」，不是
+/// 「歌名 ()」；`{album} - {title}` 是「歌名」，不是「 - 歌名」。设置里的排版预览照同样的规矩
+/// （src/lib/filenameTemplate.ts）。
 fn expand_template(template: &str, vars: &[(&str, &str)]) -> Option<String> {
-    let mut out = String::with_capacity(template.len());
+    enum Part<'a> {
+        Text(String),
+        Field(&'a str),
+    }
+    let mut parts = Vec::new();
     let mut rest = template;
     while let Some(start) = rest.find('{') {
-        out.push_str(&rest[..start]);
+        parts.push(Part::Text(rest[..start].to_string()));
         let after = &rest[start + 1..];
         let end = after.find('}')?;
         let name = &after[..end];
         let value = vars.iter().find(|(key, _)| *key == name).map(|(_, v)| *v)?;
-        out.push_str(value);
+        parts.push(Part::Field(value));
         rest = &after[end + 1..];
     }
-    out.push_str(rest);
-    Some(out)
+    parts.push(Part::Text(rest.to_string()));
+    const OPENING: &[char] = &['(', '[', '（', '【'];
+    const CLOSING: &[char] = &[')', ']', '）', '】'];
+    // Text and fields alternate: parts[0] is text, every odd part a field.
+    while let Some(i) = parts.iter().position(|p| matches!(p, Part::Field(v) if v.is_empty())) {
+        let first = !parts[..i].iter().any(|p| matches!(p, Part::Field(_)));
+        if let Part::Text(before) = &mut parts[i - 1] {
+            if first {
+                let kept = before.trim_end().trim_end_matches(OPENING).len();
+                before.truncate(kept);
+            } else {
+                before.clear();
+            }
+        }
+        let later = parts[i + 2..].iter().any(|p| matches!(p, Part::Field(_)));
+        if let Part::Text(after) = &mut parts[i + 1] {
+            *after = if first && later {
+                String::new()
+            } else {
+                after.trim_start_matches(CLOSING).to_string()
+            };
+        }
+        parts[i] = Part::Text(String::new());
+    }
+    Some(
+        parts
+            .into_iter()
+            .map(|p| match p {
+                Part::Text(text) => text,
+                Part::Field(value) => value.to_string(),
+            })
+            .collect(),
+    )
 }
 
 /// 归一化路径：展开 `.`/`..`，不触碰文件系统。
@@ -299,6 +340,18 @@ mod tests {
             "flac",
         );
         assert_eq!(name, "夜曲 - 周杰伦.flac");
+    }
+
+    #[test]
+    fn an_empty_field_takes_its_joining_text_with_it() {
+        let name = |template: &str, album: &str| render_filename(template, "夜曲", "周杰伦", album, "1", "flac");
+        assert_eq!(name("{title} ({album})", ""), "夜曲.flac");
+        assert_eq!(name("{title} ({album})", "十一月的萧邦"), "夜曲 (十一月的萧邦).flac");
+        assert_eq!(name("{album} - {title}", ""), "夜曲.flac");
+        assert_eq!(name("({album}) {title}", ""), "夜曲.flac");
+        assert_eq!(name("{title} - {album} - {artist}", ""), "夜曲 - 周杰伦.flac");
+        assert_eq!(name("{artist}_{title} [{album}]", ""), "周杰伦_夜曲.flac");
+        assert_eq!(name("{album}", ""), "夜曲 - 周杰伦.flac", "nothing left: the default");
     }
 
     #[test]

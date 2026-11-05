@@ -1,0 +1,98 @@
+/* 设置 → 下载 → 歌曲文件名 (FilenameTemplate.tsx): the pieces in one wrapping line, the keys that
+   add one under them, and the example. Pieces are soft fills, no frames, like the settings' keys. */
+.kd-name-reset {
+  appearance: none;
+  padding: 0 0.2rem;
+  border: none;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  cursor: pointer;
+}
+.kd-name-reset:hover,
+.kd-name-reset:focus-visible { color: var(--kd-text); }
+
+.kd-name-pieces {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 1.7rem;
+}
+.kd-name-piece {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  height: 1.55rem;
+  padding: 0 0.15rem 0 0.5rem;
+  border-radius: 0.3rem;
+  background: var(--kd-hover);
+  color: var(--kd-text);
+  font-size: var(--kd-size-sm);
+  white-space: nowrap;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  -webkit-app-region: no-drag;
+}
+.kd-name-piece[data-kind="mark"] {
+  color: var(--kd-muted);
+  font-weight: 700;
+}
+.kd-name-piece:not(:has(.kd-name-piece-x)) { padding-right: 0.5rem; }
+.kd-name-piece:focus-visible { outline: 2px solid var(--kd-theme); outline-offset: 1px; }
+.kd-name-piece[data-moving] {
+  cursor: grabbing;
+  color: var(--kd-theme);
+}
+.kd-name-piece-x {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  padding: 0;
+  border: none;
+  border-radius: 0.2rem;
+  background: transparent;
+  color: var(--kd-faint);
+  cursor: pointer;
+}
+.kd-name-piece-x:hover { color: var(--kd-text); }
+
+.kd-name-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.1rem 0.25rem;
+  margin-top: 0.35rem;
+}
+.kd-name-add-key {
+  appearance: none;
+  min-width: 1.5rem;
+  height: 1.4rem;
+  padding: 0 0.35rem;
+  border: none;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  cursor: pointer;
+}
+.kd-name-add-key[data-kind="mark"] { font-weight: 700; }
+.kd-name-add-key:hover,
+.kd-name-add-key:focus-visible {
+  color: var(--kd-text);
+  background: var(--kd-hover);
+}
+.kd-name-add-key[data-kind="field"]::before { content: "+ "; color: var(--kd-faint); }
+
+.kd-name-example {
+  margin: 0.35rem 0 0;
+  color: var(--kd-text-body);
+  font-size: var(--kd-size-xs);
+  overflow-wrap: anywhere;
+}

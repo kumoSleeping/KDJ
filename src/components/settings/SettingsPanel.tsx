@@ -53,6 +53,7 @@ import { AccountRow, linkedAccount, linkedPlatforms } from "./AccountRow";
 import { ActivityLogPanel } from "./ActivityLogPanel";
 import { UpdateRow } from "./UpdateRow";
 import { CliPanel } from "./CliPanel";
+import { FilenameTemplate } from "./FilenameTemplate";
 import { TASK_STAY_CHOICES, useTaskStayPref, type TaskStaySeconds } from "../../lib/taskStayPref";
 
 import "./Preferences.css";
@@ -573,6 +574,13 @@ export function SettingsPanel({ preferences = false, page }: {
               />
             </div>
           </div>
+        </Panel>}
+
+        {on("general") && settings && <Panel heading="下载" dense>
+          <FilenameTemplate
+            template={settings.filename_template}
+            onChange={(next) => void saveSettings({ filename_template: next }).catch(() => undefined)}
+          />
         </Panel>}
 
         {on("playback") && <Panel heading="流媒体播放" dense>
