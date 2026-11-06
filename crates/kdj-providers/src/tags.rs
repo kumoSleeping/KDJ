@@ -167,6 +167,17 @@ fn set_text_if_changed(tag: &mut lofty::tag::Tag, key: ItemKey, value: &str) -> 
     true
 }
 
+/// 这首歌在所属专辑里的位置：第几首、第几张碟。
+///
+/// 是**专辑**里的曲序，不是歌单里的排位——拿歌单顺序填进去，
+/// 用户按曲序排专辑时会把整张专辑排乱。`None` 表示平台没给可靠的值，
+/// 写标签时不碰文件里已有的那一项，也不写 0。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AlbumPosition {
+    pub track: Option<u32>,
+    pub disc: Option<u32>,
+}
+
 /// 写入标题 / 艺人 / 专辑 / 封面。
 ///
 /// 写标签失败**不该让下载算失败**——文件本身已经好了。调用方负责只记一条 warn。
@@ -177,12 +188,31 @@ pub fn embed_metadata(
     album: &str,
     cover: Option<&[u8]>,
 ) -> Result<()> {
+    embed_metadata_at(path, title, artists, album, cover, AlbumPosition::default())
+}
+
+/// 同 [`embed_metadata`]，另写专辑曲序 / 碟号（MP3 是 `TRCK` / `TPOS`，
+/// FLAC/OGG 是 `TRACKNUMBER` / `DISCNUMBER`，M4A 是 `trkn` / `disk`，由 lofty 按容器映射）。
+pub fn embed_metadata_at(
+    path: &Path,
+    title: &str,
+    artists: &[String],
+    album: &str,
+    cover: Option<&[u8]>,
+    position: AlbumPosition,
+) -> Result<()> {
     let mut tagged = open_for_write(path)?;
     let tag = tagged.primary_tag_mut().expect("刚插入过一定存在");
 
     tag.set_title(title.to_string());
     if !album.is_empty() {
         tag.set_album(album.to_string());
+    }
+    if let Some(track) = position.track.filter(|n| *n > 0) {
+        tag.set_track(track);
+    }
+    if let Some(disc) = position.disc.filter(|n| *n > 0) {
+        tag.set_disk(disc);
     }
     // 多艺人：mutagen 写的是多值帧，lofty 这边用 `/` 连接是各家播放器最通用的读法。
     let artist_text = if artists.is_empty() {
@@ -899,6 +929,37 @@ pub(crate) mod tests {
         out.extend_from_slice(&[0; 16]);
         out.resize(out.len() + 64 * 1024, 0);
         out
+    }
+
+    #[test]
+    fn download_tags_write_the_album_position_and_keep_it_when_unknown() {
+        let wav = scratch("position");
+        let flac = wav.with_file_name("song.flac");
+        std::fs::write(&flac, minimal_flac()).unwrap();
+        for path in [&wav, &flac] {
+            let artists = vec!["艺人".to_string()];
+            let position = AlbumPosition {
+                track: Some(5),
+                disc: Some(2),
+            };
+            embed_metadata_at(path, "歌", &artists, "专辑", None, position).unwrap();
+            let read = |path: &Path| {
+                let tagged = Probe::open(path).unwrap().read().unwrap();
+                let tag = tagged.primary_tag().unwrap();
+                (tag.track(), tag.disk())
+            };
+            assert_eq!(read(path), (Some(5), Some(2)), "{}", path.display());
+
+            // 平台没给曲序时不能把文件里已有的那份抹掉，也不能写成 0
+            embed_metadata(path, "歌", &artists, "专辑", None).unwrap();
+            let zero = AlbumPosition {
+                track: Some(0),
+                disc: None,
+            };
+            embed_metadata_at(path, "歌", &artists, "专辑", None, zero).unwrap();
+            assert_eq!(read(path), (Some(5), Some(2)), "{}", path.display());
+        }
+        let _ = std::fs::remove_dir_all(wav.parent().unwrap());
     }
 
     #[test]

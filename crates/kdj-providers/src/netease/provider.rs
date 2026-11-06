@@ -1481,17 +1481,29 @@ impl MusicProvider for NeteaseProvider {
         // Python 在下载前会做一次 `if not song_info.get("al"): 回查详情`——那次回查
         // **只为封面**。payload 里没有 al 时（前端手搓的请求、老版本存下来的队列条目）
         // 直接跳过等于下下来的文件没有专辑封面，所以这一步不能省。
+        // 专辑曲序同理：搜索、歌单、专辑三条来路的歌曲结构都带 `no` / `cd`，
+        // 只有手搓请求和老队列条目没有，这时和封面合用同一次详情回查。
+        let payload_song = Value::Object(source.payload.clone());
         let mut cover_url = source.cover.clone();
-        if cover_url.is_empty() && needs_detail_for_cover(source) {
+        let mut position = album_position(&payload_song);
+        let need_cover = cover_url.is_empty() && needs_detail_for_cover(source);
+        let need_position = needs_detail_for_position(source);
+        if need_cover || need_position {
             if let Ok(songs) = self.track_detail(std::slice::from_ref(&source.key)).await {
-                if let Some(found) = songs.first().and_then(cover_from_detail) {
-                    cover_url = found;
+                if let Some(song) = songs.first() {
+                    if need_cover {
+                        if let Some(found) = cover_from_detail(song) {
+                            cover_url = found;
+                        }
+                    }
+                    if need_position {
+                        position = album_position(song);
+                    }
                 }
             }
         }
         if cover_url.is_empty() {
-            cover_url =
-                cover_from_detail(&Value::Object(source.payload.clone())).unwrap_or_default();
+            cover_url = cover_from_detail(&payload_song).unwrap_or_default();
         }
         let cover = self.fetch_cover(&cover_url).await;
         let artists = if source.artists.is_empty() {
@@ -1499,12 +1511,13 @@ impl MusicProvider for NeteaseProvider {
         } else {
             source.artists.clone()
         };
-        if let Err(err) = tags::embed_metadata(
+        if let Err(err) = tags::embed_metadata_at(
             &path,
             &source.title,
             &artists,
             &source.album,
             cover.as_deref(),
+            position,
         ) {
             tracing::warn!("网易云写标签失败 song={}: {err}", source.key);
         }
@@ -1855,6 +1868,33 @@ fn needs_detail_for_cover(source: &SongSource) -> bool {
     !is_truthy(source.payload.get("al"))
 }
 
+/// payload 里完全没有曲序字段时才回查详情。`no: 0` 是平台明确说"不在专辑里"
+/// （单曲、云盘上传），再查一次也还是 0。
+fn needs_detail_for_position(source: &SongSource) -> bool {
+    !source.payload.contains_key("no") && !source.payload.contains_key("position")
+}
+
+/// 专辑曲序 / 碟号。新接口是 `no` + `cd`，老接口是 `position` + `disc`；
+/// `cd` 是字符串，常见 `"1"`、`"01"`，偶尔 `"1/2"`，0 和认不出来的都当没有。
+fn album_position(song: &Value) -> tags::AlbumPosition {
+    tags::AlbumPosition {
+        track: positive_index(first_truthy(song, &["no", "position"])),
+        disc: positive_index(first_truthy(song, &["cd", "disc"])),
+    }
+}
+
+fn positive_index(value: Option<&Value>) -> Option<u32> {
+    let number = match value? {
+        Value::Number(number) => number.as_u64()?,
+        Value::String(text) => {
+            let head = text.split('/').next().unwrap_or_default().trim();
+            head.parse::<u64>().ok()?
+        }
+        _ => return None,
+    };
+    u32::try_from(number).ok().filter(|n| *n > 0)
+}
+
 /// 从一条曲目详情里取封面地址（`al.picUrl`）。
 fn cover_from_detail(song: &Value) -> Option<String> {
     song.get("al")
@@ -2159,6 +2199,37 @@ mod tests {
         assert_eq!(login_answer(&json!({"code": -460, "message": "Cheating"})), LoginAnswer::Other);
         assert_eq!(login_answer(&json!({"code": 405, "msg": "操作频繁"})), LoginAnswer::Other);
         assert_eq!(login_answer(&json!({})), LoginAnswer::Other);
+    }
+
+    #[test]
+    fn album_position_reads_both_detail_shapes_and_ignores_zero() {
+        use tags::AlbumPosition;
+        let modern = json!({"id": 1, "no": 5, "cd": "01"});
+        assert_eq!(
+            album_position(&modern),
+            AlbumPosition {
+                track: Some(5),
+                disc: Some(1)
+            }
+        );
+        let legacy = json!({"id": 1, "position": 3, "disc": "2/2"});
+        assert_eq!(
+            album_position(&legacy),
+            AlbumPosition {
+                track: Some(3),
+                disc: Some(2)
+            }
+        );
+        let single = json!({"id": 1, "no": 0, "cd": ""});
+        assert_eq!(album_position(&single), AlbumPosition::default());
+
+        let mut source = to_source(&single);
+        assert!(
+            !needs_detail_for_position(&source),
+            "no: 0 是平台的答案，不再回查"
+        );
+        source.payload.remove("no");
+        assert!(needs_detail_for_position(&source));
     }
 
     #[test]
