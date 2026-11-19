@@ -68,10 +68,12 @@ version = "0.8.5"
 [dependencies.regex]
 version = "1"
 
-# KDJ already links libsqlite3-sys 0.33 through rusqlite 0.35 / SQLCipher.
+# KDJ already links libsqlite3-sys 0.39 through rusqlite 0.41 / SQLCipher.
 # Keep one native sqlite provider; SQLCipher can read the browsers' plain SQLite DBs.
 [dependencies.rusqlite]
-version = "0.35"
+version = "0.41"
+# u64 / usize bind and read as before 0.38 (checked against i64).
+features = ["fallible_uint"]
 
 [dependencies.tempfile]
 version = "3.27"

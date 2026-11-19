@@ -12,10 +12,10 @@ kdj-core = { version = "1.1.1-rc1", path = "../kdj-core" }
 kdj-providers = { version = "1.1.1-rc1", path = "../kdj-providers" }
 lofty = "0.24.0"
 r2d2 = "0.8.10"
-r2d2_sqlite = "0.28"
+r2d2_sqlite = "0.36"
 # Windows runner 与移动端没有系统 sqlite3，因此只在这些平台启用 bundled；
 # macOS/Linux 继续使用系统 SQLite。
-rusqlite = "0.35"
+rusqlite = { version = "0.41", features = ["fallible_uint"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.19"
@@ -29,7 +29,7 @@ walkdir = "2.5.0"
 trash = "5"
 
 [target.'cfg(any(target_os = "windows", target_os = "android", target_os = "ios"))'.dependencies]
-rusqlite = { version = "0.35", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
