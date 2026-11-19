@@ -96,6 +96,8 @@ export type NewClip = Partial<Omit<LaneClip, "id" | "at">> & { src: string };
 export type LaneOp =
   | { op: "new"; title: string; canvas?: { width: number; height: number; fps?: number } }
   | { op: "title"; title: string }
+  /** The picture's size (and frame rate); null: the first video's own. */
+  | { op: "canvas"; canvas: { width: number; height: number; fps?: number } | null }
   | { op: "add_track"; kind: TrackKind; index?: number; name?: string }
   | { op: "remove_track"; id: string }
   | { op: "move_track"; id: string; index: number }
@@ -185,7 +187,8 @@ export interface AlignPlan {
   /** Which found placement it is a way of laying, and how that one was found, where, how fast. */
   group?: string;
   group_label?: string;
-  /** "verified" (the same recording), "melody" (a likeness of the tune) or "partial". */
+  /** "verified" (the same recording), "melody" (a likeness of the tune), "partial", or "tempo"
+   *  (not found by listening: laid where the clip was, at the speed that makes its tempo the song's). */
   evidence?: string;
   /** Sure enough to be applied without asking. */
   auto: boolean;
@@ -199,9 +202,11 @@ export interface AlignPlan {
  * The operations that put `clip` where `plan` says it lies in the song placed at `song`: the clip
  * leaves its place and each matched stretch goes into its track at its time, kept inside that song.
  */
-export function alignedOps(clip: LaneClip, track: string, plan: AlignPlan, song: { at: number; in: number; length: number; speed?: number }): LaneOp[] {
+export function alignedOps(clip: LaneClip, track: string, plan: AlignPlan, song: { at: number; in: number; length: number; speed?: number }, also: readonly string[] = []): LaneOp[] {
   const { id: _id, at: _at, in: _in, out: _out, speed: _speed, ...keep } = clip;
-  const ops: LaneOp[] = [{ op: "remove", id: clip.id }];
+  // `also`: the other pieces the plan applied before laid, which this one replaces with it.
+  const gone = [clip.id, ...also.filter(id => id !== clip.id)];
+  const ops: LaneOp[] = gone.map(id => ({ op: "remove" as const, id }));
   // A song played faster or slower takes its video along: the song's second `ref` is at
   // `at + (ref - in) / k` in the project, and the video runs k times as fast with it.
   const k = song.speed && song.speed > 0 ? song.speed : 1;
@@ -212,9 +217,10 @@ export function alignedOps(clip: LaneClip, track: string, plan: AlignPlan, song:
     if (at < song.at) { from += (song.at - at) * speed; at = song.at; }
     const end = at + (to - from) / speed, limit = song.at + song.length;
     if (end > limit) to -= (end - limit) * speed;
-    if ((to - from) / speed <= 0.05) continue;
+    // A speed the project cannot play (tracks.rs: 0.5–2) is not laid.
+    if ((to - from) / speed <= 0.05 || speed < 0.5 || speed > 2) continue;
     const round = (value: number) => Math.round(value * 1000) / 1000;
     ops.push({ op: "add", clip: { ...keep, src: clip.src, in: round(from), out: round(to), speed: Math.round(speed * 1e6) / 1e6 }, track, at: round(at) });
   }
-  return ops.length > 1 ? ops : [];
+  return ops.length > gone.length ? ops : [];
 }

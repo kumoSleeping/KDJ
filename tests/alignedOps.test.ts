@@ -28,6 +28,15 @@ test("a song at its own speed keeps the plan's speed to a millionth", () => {
   assert.equal(ops[1].at, 37.379);
 });
 
+test("a plan laid over another's pieces takes them all out, and lays nothing at a speed the project cannot play", () => {
+  const ops = alignedOps(clip, "v1", plan, { at: 0, in: 0, length: 275 }, ["c2", "c7", "c8"]);
+  assert.deepEqual(ops.slice(0, 3), [{ op: "remove", id: "c2" }, { op: "remove", id: "c7" }, { op: "remove", id: "c8" }]);
+  assert.equal(ops[3].op, "add");
+  assert.equal(ops.length, 4);
+  // Nothing to lay: the clip stays as it is.
+  assert.deepEqual(alignedOps(clip, "v1", { ...plan, segments: [{ ...plan.segments[0], speed: 2.4 }] }, { at: 0, in: 0, length: 275 }), []);
+});
+
 test("the lane ruler names about a dozen bars", () => {
   assert.equal(rulerStep(96), 8);
   assert.equal(rulerStep(10), 1);

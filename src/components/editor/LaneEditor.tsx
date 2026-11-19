@@ -26,7 +26,7 @@ import "./LaneEditor.css";
 
 /** What the editor shows with nothing open: a picture track and a sound track of a project not made yet. */
 const NOTHING: LaneProject = {
-  path: "", trackId: null, songIds: [], grid: null, analysing: false, lengths: {}, sources: [],
+  path: "", trackId: null, songIds: [], grid: null, analysing: false, lengths: {}, sources: [], canvas: null,
   doc: { kdjv: 3, title: "", tracks: [{ id: "v1", kind: "picture", clips: [] }, { id: "a1", kind: "sound", clips: [] }] },
   layout: {
     duration: 60, folds: [], songs: [],
@@ -107,7 +107,7 @@ export function LaneEditor() {
   };
 
   /** One frame of the project, in seconds. */
-  const frame = 1 / ((doc.canvas as { fps?: number } | undefined)?.fps || 30);
+  const frame = 1 / ((doc.canvas as { fps?: number } | undefined)?.fps || project.canvas?.fps || 30);
   /** Where the playhead stops on ↑ and ↓: both ends, the markers, and where clips, songs and titles begin and end. */
   const editPoints = () => [...new Set([0, span, ...(doc.markers ?? []).map(m => m.at),
     ...layout.tracks.flatMap(track => track.clips.flatMap(clip => [clip.at, clip.at + clip.length])),

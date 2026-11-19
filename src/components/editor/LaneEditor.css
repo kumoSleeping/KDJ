@@ -376,8 +376,9 @@
 .kd-crop { display: inline-flex; align-items: center; gap: 8px; }
 .kd-crop-frame {
   position: relative;
-  width: 112px;
-  height: 63px;
+  flex: none;
+  width: 128px;
+  height: 72px;
   border-radius: 4px;
   background: color-mix(in srgb, var(--kd-text) 10%, transparent);
 }
@@ -389,6 +390,14 @@
 .kd-crop-edge[data-side="2"] { right: -5px; }
 .kd-crop-edge[data-side="1"] { top: -5px; }
 .kd-crop-edge[data-side="3"] { bottom: -5px; }
+/* Each side has a short grip at its middle, so it reads as something to pull. */
+.kd-crop-edge::after { content: ""; position: absolute; inset: 0; margin: auto; border-radius: 2px; background: var(--kd-text); }
+.kd-crop-edge[data-side="0"]::after, .kd-crop-edge[data-side="2"]::after { width: 3px; height: min(16px, 60%); }
+.kd-crop-edge[data-side="1"]::after, .kd-crop-edge[data-side="3"]::after { width: min(16px, 60%); height: 3px; }
+.kd-crop-sides { display: grid; grid-template-columns: repeat(2, auto); gap: 4px 8px; }
+.kd-crop-sides input[type="number"] { width: 3.25rem; }
+.kd-lanes-action[aria-pressed="true"] { font-weight: 650; }
+.kd-lanes-plan .kd-lanes-action[aria-pressed="false"] { color: var(--kd-muted); }
 .kd-crop-edge:focus-visible { outline: 1px solid var(--kd-text); outline-offset: -3px; border-radius: 3px; }
 
 /* A title's words and colours. */

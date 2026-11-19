@@ -77,6 +77,8 @@ export interface LaneProject {
   lengths: Record<string, number>;
   /** Its sources as its live picture numbers them (the last edit's `live`): what the frames along a clip are read from. */
   sources: NonNullable<LaneEdited["live"]>["sources"];
+  /** The picture as it is drawn now (the document's canvas, else the first video's), from the last edit's `live`. */
+  canvas: { width: number; height: number; fps?: number } | null;
 }
 
 interface LaneEditorState {
@@ -90,8 +92,13 @@ interface LaneEditorState {
   error: string | null;
   /** Clips being found in their song (校准), by `alignKey`. */
   aligning: string[];
-  /** What 校准 found for a clip, by `alignKey`: its plans, best first, or none that fit. */
+  /**
+   * What 校准 found for a file in a song, by `alignKey`: its plans, best first, or none that fit.
+   * They are kept until that file is looked for again: laying one does not take the others away.
+   */
   plans: Record<string, AlignFound>;
+  /** The plan last laid for a file in a song, by `alignKey`, and the clips it made. */
+  applied: Record<string, { plan: string; clips: string[] }>;
   /** Each project's documents before its edits (undo) and after the ones undone (redo), by path. */
   history: Record<string, { past: LaneDocument[]; future: LaneDocument[] }>;
   /** Whether what is dragged lands on the song's beats (N; Alt while dragging lets it go free). */
@@ -189,10 +196,16 @@ const fileName = (path: string) => path.slice(Math.max(path.lastIndexOf("/"), pa
 export interface AlignFound { plans: AlignPlan[]; reason?: string }
 
 /**
- * Whose 校准 a result is: the project, the clip and its file. Clip ids repeat from project to
- * project (c1, c2…), and a clip's file can change, so a result never shows on another clip.
+ * Whose 校准 a result is: the project, the file and the song it was looked for in. Not the clip:
+ * laying a plan replaces the clip with new ones, and what was found for its file still holds.
  */
-export const alignKey = (path: string, clipId: string, src: string) => `${path}\n${clipId}\n${src}`;
+export const alignKey = (path: string, src: string, song: string) => `${path}\n${src}\n${song}`;
+
+/** The `alignKey` of a clip of `project`: its file in the song it lies over; null without a song. */
+export function clipAlignKey(project: LaneProject, clipId: string): string | null {
+  const target = songUnder(project, clipId);
+  return target ? alignKey(project.path, target.clip.src, target.reference) : null;
+}
 
 /** A song for the song lane; a picture for the picture lane. Projects themselves are neither. */
 export const isSongTrack = (track: Pick<Track, "format">) =>
@@ -334,6 +347,8 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       analysing: songIds.some(id => id !== null && waiting.has(id)),
       lengths: { ...kept, ...(edited.lengths ?? {}) },
       sources: edited.live?.sources ?? get().projects.find(p => p.path === edited.path)?.sources ?? [],
+      canvas: edited.live ? { width: edited.live.width, height: edited.live.height, fps: edited.live.fps }
+        : get().projects.find(p => p.path === edited.path)?.canvas ?? null,
     };
     set(state => {
       const known = state.projects.some(p => p.path === project.path);
@@ -432,7 +447,7 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
   };
 
   return {
-    open: false, projects: [], active: null, selected: null, busy: false, error: null, aligning: [], plans: {}, history: {},
+    open: false, projects: [], active: null, selected: null, busy: false, error: null, aligning: [], plans: {}, applied: {}, history: {},
     snap: true, ranges: {}, clipboard: null,
     toggleSnap: () => set(state => ({ snap: !state.snap })),
     setRange(end, at) {
@@ -633,17 +648,23 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       const target = project && songUnder(project, clipId);
       if (!project || !target) return;
       const before = target.clip;
-      const key = alignKey(project.path, clipId, before.src);
+      const key = alignKey(project.path, before.src, target.reference);
       if (get().aligning.includes(key)) return;
       set(state => ({ aligning: [...state.aligning, key], error: null }));
       try {
-        const reply = await api.align(target.reference, before.src);
+        // Where the clip lies now: what the plan by tempo alone starts from (cli_media.rs `tempo_plans`).
+        const k = target.song.speed && target.song.speed > 0 ? target.song.speed : 1;
+        const reply = await api.align(target.reference, before.src, {
+          video_in: before.in ?? 0, video_out: before.out,
+          ref_at: Math.round((target.song.in + (before.at - target.song.at) * k) * 1000) / 1000,
+        });
         set(state => ({ plans: { ...state.plans, [key]: { plans: reply.plans, reason: reply.reason } } }));
         const now = get().projects.find(p => p.path === project.path);
         const still = now ? findClip(now.doc, clipId)?.clip : undefined;
         // A plan sure enough goes in by itself, unless the clip was changed meanwhile.
-        if (auto && reply.plans[0]?.auto && still && still.in === before.in && still.out === before.out && get().active === project.path) {
-          await get().applyPlan(clipId, reply.plans[0]);
+        const sure = reply.plans.find(plan => plan.auto);
+        if (auto && sure && still && still.in === before.in && still.out === before.out && still.at === before.at && get().active === project.path) {
+          await get().applyPlan(clipId, sure);
         }
       } catch (error) {
         if (!auto) set({ error: message(error) });
@@ -655,18 +676,24 @@ export const useLaneEditor = create<LaneEditorState>((set, get) => {
       const project = get().projects.find(p => p.path === get().active);
       const target = project && songUnder(project, clipId);
       if (!target) return;
-      const ops = alignedOps(target.clip, target.track, plan, target.song);
+      const key = alignKey(project.path, target.clip.src, target.reference);
       const before = new Set(allClips(project.doc).map(({ clip }) => clip.id));
+      // The pieces the plan laid before this one (this clip among them) give way to it together.
+      const laid = get().applied[key]?.clips ?? [];
+      const also = laid.includes(clipId) ? laid.filter(id => before.has(id)) : [];
+      const ops = alignedOps(target.clip, target.track, plan, target.song, also);
       const chosen = get().selected === clipId;
-      if (ops.length && await get().edit(ops)) {
-        // The clip laid in the song stays chosen (the first of its pieces), with its panel open.
+      if (!ops.length) { set({ error: "这个方案放不进这首歌：超出了歌的范围，或速度不在 0.5–2 倍之间" }); return; }
+      if (await get().edit(ops)) {
+        // The clip laid in the song stays chosen (the first of its pieces), with its panel open;
+        // what was found stays too, so another way of laying it is one press away.
         const now = get().projects.find(p => p.path === project.path);
-        const made = (now ? allClips(now.doc) : []).filter(({ clip }) => !before.has(clip.id) || clip.id === clipId)
-          .filter(({ clip }) => clip.src === target.clip.src).sort((a, b) => a.clip.at - b.clip.at)[0];
-        set(state => {
-          const { [alignKey(project.path, clipId, target.clip.src)]: _gone, ...plans } = state.plans;
-          return { plans, ...(chosen && made && state.active === project.path ? { selected: made.clip.id } : {}) };
-        });
+        const made = (now ? allClips(now.doc) : []).filter(({ clip }) => !before.has(clip.id) && clip.src === target.clip.src)
+          .sort((a, b) => a.clip.at - b.clip.at);
+        set(state => ({
+          applied: { ...state.applied, [key]: { plan: plan.id, clips: made.map(({ clip }) => clip.id) } },
+          ...(chosen && made[0] && state.active === project.path ? { selected: made[0].clip.id } : {}),
+        }));
       }
     },
   };

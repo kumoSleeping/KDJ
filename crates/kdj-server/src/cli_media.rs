@@ -321,6 +321,14 @@ pub async fn finish_peek(AxumPath(id): AxumPath<String>, Json(result): Json<Peek
 pub struct AlignBody {
     reference: String,
     video: String,
+    /// Where the video lies now (the editor's clip): the part of it played, in its own seconds,
+    /// and the reference's second its start is at. What the tempo plan starts from (`tempo_plans`).
+    #[serde(default)]
+    video_in: Option<f64>,
+    #[serde(default)]
+    video_out: Option<f64>,
+    #[serde(default)]
+    ref_at: Option<f64>,
 }
 
 /// The first `MAX_AUDIO_SECONDS` of a file's sound, mono at the alignment's rate, decoded by
@@ -521,27 +529,116 @@ fn plans(found: &RecordingMatch, video_ms: f64, reference_ms: f64, downbeats: &[
     out
 }
 
+/// A file's beats and bar lines in its own timeline.
+#[derive(Clone)]
+struct Grid {
+    beats: Vec<f64>,
+    downbeats: Vec<f64>,
+}
+
 /// The beats of a file in its own timeline (a video's in video time, its sound shifted by the
-/// start of the sound stream): the library's analysis for a row, else one made now and kept for
-/// as long as the file does not change. None for what is not a local file, or has no beats.
-async fn beats_of(state: &Arc<AppState>, media: &Media, shift: f64) -> Option<Vec<f64>> {
+/// start of the sound stream): the library's analysis for a row, else one made now (a row just
+/// downloaded has none yet) and kept for as long as the file does not change. None for what is
+/// not a local file, or has no beats.
+async fn beats_of(state: &Arc<AppState>, media: &Media, shift: f64) -> Option<Grid> {
     let Media::File { path, track_id, .. } = media else { return None };
     if let Some(id) = track_id {
         // The library's analysis of a video row is already in video time.
-        return crate::rhythm::analysis(state, *id).await.ok().flatten().map(|a| a.beats).filter(|b| b.len() >= 16);
+        let known = crate::rhythm::analysis(state, *id).await.ok().flatten().filter(|a| a.beats.len() >= 16);
+        if let Some(analysis) = known {
+            return Some(Grid { beats: analysis.beats, downbeats: analysis.downbeats });
+        }
     }
-    static MADE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, (String, Vec<f64>)>>> = std::sync::OnceLock::new();
+    static MADE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, (String, Grid)>>> = std::sync::OnceLock::new();
     let signature = kdj_library::rhythm::signature(path).ok()?;
-    if let Some((known, beats)) = MADE.get_or_init(Default::default).lock().unwrap().get(path) {
+    if let Some((known, grid)) = MADE.get_or_init(Default::default).lock().unwrap().get(path) {
         if *known == signature {
-            return Some(beats.clone());
+            return (grid.beats.len() >= 16).then(|| grid.clone());
         }
     }
     let file = path.clone();
-    let analysis = tokio::task::spawn_blocking(move || kdj_analysis::rhythm::analyze(&file, true, &|| false)).await.ok()?.ok()??;
-    let beats: Vec<f64> = analysis.beats.iter().map(|b| b + shift).filter(|b| *b >= 0.).collect();
-    MADE.get_or_init(Default::default).lock().unwrap().insert(path.clone(), (signature, beats.clone()));
-    (beats.len() >= 16).then_some(beats)
+    let analysis = tokio::task::spawn_blocking(move || {
+        let _background = kdj_core::thread_qos::prefer_background();
+        kdj_analysis::rhythm::analyze(&file, true, &|| false)
+    }).await.ok()?.ok()??;
+    let moved = |times: &[f64]| times.iter().map(|b| b + shift).filter(|b| *b >= 0.).collect::<Vec<f64>>();
+    let grid = Grid { beats: moved(&analysis.beats), downbeats: moved(&analysis.downbeats) };
+    MADE.get_or_init(Default::default).lock().unwrap().insert(path.clone(), (signature, grid.clone()));
+    (grid.beats.len() >= 16).then_some(grid)
+}
+
+/// The beat period (seconds) of `beats` between `from` and `to`, else of all of them.
+fn beat_period(beats: &[f64], from: f64, to: f64) -> Option<f64> {
+    let gaps = |list: &[f64]| list.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.05).collect::<Vec<f64>>();
+    let inside: Vec<f64> = beats.iter().copied().filter(|b| *b >= from && *b <= to).collect();
+    let mut found = gaps(&inside);
+    if found.len() < 8 {
+        found = gaps(beats);
+    }
+    (found.len() >= 8).then(|| kdj_analysis::dsp::median(&mut found))
+}
+
+/**
+ * The placement by tempo alone, for a video whose sound is not found in the song (another
+ * recording, another song altogether): the video keeps the place it has (`video_in`..`video_out`
+ * at `ref_at`; the whole video from the song's start when not given) and is played at the speed
+ * that makes its tempo the song's, then locked to the song's beats (beat_lock.rs) and moved by
+ * whole beats until its bar lines fall on the song's. A tempo read at half or double (85 for 170)
+ * is folded to the speed nearest 1. Nothing when either side has no beats or they do not pair.
+ */
+fn tempo_plans(video: &Grid, song: &Grid, guess: (f64, f64, f64), downbeats: &[f64]) -> Vec<Value> {
+    use kdj_analysis::beat_lock::{bend, lock, Piece};
+    let (video_in, video_out, ref_at) = guess;
+    if video_out - video_in < 2. {
+        return vec![];
+    }
+    let (Some(video_beat), Some(song_beat)) = (
+        beat_period(&video.beats, video_in, video_out),
+        beat_period(&song.beats, ref_at, ref_at + (video_out - video_in)),
+    ) else { return vec![] };
+    // Played `speed` times as fast, the video's beat lasts video_beat / speed: the song's.
+    let mut speed = video_beat / song_beat;
+    while speed >= std::f64::consts::SQRT_2 {
+        speed /= 2.;
+    }
+    while speed < std::f64::consts::FRAC_1_SQRT_2 {
+        speed *= 2.;
+    }
+    let guess = Piece { video_in, video_out, ref_at, speed };
+    let Some(mut locked) = lock(&video.beats, &song.beats, &guess) else { return vec![] };
+    let mut piece = locked.pieces[0];
+    if !(0.5..=2.).contains(&piece.speed) {
+        return vec![];
+    }
+    // The bar: the shift of a few beats that puts the most of the video's bar lines on the song's.
+    let on_bars = |piece: &Piece| video.downbeats.iter().filter(|v| **v >= piece.video_in && **v <= piece.video_out)
+        .filter(|v| {
+            let at = piece.at(**v);
+            let i = song.downbeats.partition_point(|d| *d < at);
+            [i.checked_sub(1), Some(i)].into_iter().flatten().filter_map(|j| song.downbeats.get(j)).any(|d| (d - at).abs() <= song_beat * 0.2)
+        }).count();
+    if video.downbeats.len() >= 4 && song.downbeats.len() >= 4 {
+        let stay = on_bars(&piece);
+        let best = [1.0_f64, -1., 2., -2.].into_iter()
+            .map(|k| (k, on_bars(&Piece { ref_at: piece.ref_at + k * song_beat, ..piece })))
+            .max_by(|a, b| a.1.cmp(&b.1).then(b.0.abs().total_cmp(&a.0.abs())));
+        if let Some((k, _)) = best.filter(|(_, count)| *count > stay) {
+            piece.ref_at += k * song_beat;
+            locked.pieces[0] = piece;
+        }
+    }
+    let bpm = |period: f64| (600. / period).round() / 10.;
+    let mut base = plan("tempo", "按 BPM 对拍", "tempo", false, None,
+        &[Segment { video_in: piece.video_in * 1000., video_out: piece.video_out * 1000., ref_at: piece.ref_at * 1000., speed: piece.speed }], downbeats);
+    base["group"] = json!("tempo");
+    base["group_label"] = json!(format!("按 BPM 对拍 · {} → {} BPM · {:.4}×", bpm(video_beat), bpm(video_beat / piece.speed), piece.speed));
+    let mut out = vec![locked_plan(&base, "tempo-beat".into(), "变速对拍", &[piece], &locked, downbeats)];
+    if let Some(bent) = bend(&video.beats, &song.beats, &locked) {
+        if bent.pieces.iter().all(|p| (0.5..=2.).contains(&p.speed)) {
+            out.push(locked_plan(&base, "tempo-beat-bend".into(), "分段变速", &bent.pieces, &bent, downbeats));
+        }
+    }
+    out
 }
 
 /// Where a file's sound starts after its picture, in seconds (an MP4's leading empty edits): the
@@ -714,9 +811,27 @@ pub async fn align(State(state): State<Arc<AppState>>, Json(body): Json<AlignBod
             plan["offset"] = json!(round(first.ref_at - first.video_in / first.speed));
         }
     }
-    let (video_beats, song_beats) = tokio::join!(beats_of(&state, &video, video_shift), beats_of(&state, &reference, reference_shift));
-    let plans = lock_plans(plans, video_beats.as_deref(), song_beats.as_deref(),
-        video_ms / 1000. + video_shift, reference_ms / 1000. + reference_shift, &downbeats);
+    let (video_grid, song_grid) = tokio::join!(beats_of(&state, &video, video_shift), beats_of(&state, &reference, reference_shift));
+    let (video_s, song_s) = (video_ms / 1000. + video_shift, reference_ms / 1000. + reference_shift);
+    let mut plans = lock_plans(plans, video_grid.as_ref().map(|g| g.beats.as_slice()), song_grid.as_ref().map(|g| g.beats.as_slice()),
+        video_s, song_s, &downbeats);
+    // By tempo alone, from where the video lies now: the one that goes in by itself when
+    // listening found nothing sure, else one more way offered after the others.
+    if let (Some(video_grid), Some(song_grid)) = (&video_grid, &song_grid) {
+        let from = body.video_in.filter(|v| v.is_finite() && *v >= 0.).unwrap_or(0.).min(video_s);
+        let to = body.video_out.filter(|v| v.is_finite() && *v > from).unwrap_or(video_s).min(video_s);
+        let at = body.ref_at.filter(|v| v.is_finite()).unwrap_or(0.);
+        let mut tempo = tempo_plans(video_grid, song_grid, (from, to, at), &downbeats);
+        if plans.iter().any(|plan| plan["auto"] == true) {
+            plans.append(&mut tempo);
+        } else {
+            if let Some(first) = tempo.first_mut() {
+                first["auto"] = json!(true);
+            }
+            tempo.append(&mut plans);
+            plans = tempo;
+        }
+    }
     // A library row may not know its length yet; the decoded sound always does, and the caller
     // needs it to see where the song runs without picture.
     let described = |media: &Media, ms: f64| {
@@ -795,6 +910,35 @@ mod tests {
         let first = &laid[0];
         assert_eq!(first["auto"], true, "{first}");
         assert!((first["offset"].as_f64().unwrap() - 5.0).abs() < 0.05, "{first}");
+    }
+
+    /// A 170 BPM video dropped 30 s into a 128 BPM song whose sound it does not hold: it stays
+    /// there, slowed to the song's tempo (128 / 170), its beats and bar lines on the song's.
+    #[test]
+    fn a_video_of_another_song_is_laid_by_tempo_where_it_lies() {
+        let grid = |bpm: f64, first: f64, seconds: f64| {
+            let beats: Vec<f64> = (0..).map(|i| first + i as f64 * 60. / bpm).take_while(|t| *t < seconds).collect();
+            Grid { downbeats: beats.iter().copied().step_by(4).collect(), beats }
+        };
+        let (video, song) = (grid(170., 0.31, 90.), grid(128., 0.1, 240.));
+        let laid = tempo_plans(&video, &song, (0., 90., 30.), &song.downbeats);
+        let first = &laid[0];
+        assert_eq!(first["evidence"], "tempo");
+        assert_eq!(first["label"], "变速对拍");
+        let seg = &first["segments"][0];
+        let speed = seg["speed"].as_f64().unwrap();
+        assert!((speed - 128. / 170.).abs() < 1e-3, "{first}");
+        // The video's first bar line (0.31 s) lands on one of the song's, within two beats of where it lay.
+        let at = seg["ref_at"].as_f64().unwrap() + (0.31 - seg["video_in"].as_f64().unwrap()) / speed;
+        assert!((at - 30.).abs() < 2.5 * 60. / 128. + 0.31, "{first}");
+        assert!(song.downbeats.iter().any(|d| (d - at).abs() < 0.02), "{at} is no bar line: {first}");
+        assert!(first["beat"]["error_ms"].as_f64().unwrap() < 2., "{first}");
+        // A tempo read at half (85 for 170) gives the same speed, not half of it.
+        let half = Grid { beats: video.beats.iter().copied().step_by(2).collect(), downbeats: vec![] };
+        let folded = tempo_plans(&half, &song, (0., 90., 30.), &[]);
+        assert!((folded[0]["segments"][0]["speed"].as_f64().unwrap() - 128. / 170.).abs() < 1e-3, "{}", folded[0]);
+        // No beats on one side: nothing is offered.
+        assert!(tempo_plans(&Grid { beats: vec![], downbeats: vec![] }, &song, (0., 90., 30.), &[]).is_empty());
     }
 
     #[test]

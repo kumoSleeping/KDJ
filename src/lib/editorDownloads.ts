@@ -81,15 +81,32 @@ export async function downloadIntoEditor(payload: ActiveSearchDrag, path: string
 function remember(items: EditorDownload[]): void {
   useEditorDownloads.setState(({ pending }) => ({ pending: [...pending, ...items] }));
   // A task that was already done (a file downloaded before) is put in at once.
-  settle(useDownloadStore.getState().tasks);
+  settle();
 }
 
-/** Puts in what has finished, in drop order; forgets what failed. */
-function settle(tasks: Map<string, DownloadTask>): void {
+/**
+ * A download as the store has it now: in its queue while it waits or runs, in its history once it
+ * is done (downloadStore.ts takes a finished task out of `tasks`), or nowhere once it was cleared.
+ */
+export function editorDownloadTask(id: string, store = useDownloadStore.getState()): DownloadTask | undefined {
+  return store.tasks.get(id) ?? store.history.find(task => task.id === id);
+}
+
+/** Tasks the store has shown at least once: one of these gone from it was cancelled or cleared. */
+const seen = new Set<string>();
+
+/** Puts in what has finished, in drop order; forgets what failed or was taken out of the queue. */
+function settle(): void {
   const { pending } = useEditorDownloads.getState();
   for (const item of pending) {
-    const task = tasks.get(item.task);
-    if (!task || item.placing) continue;
+    if (item.placing) continue;
+    const task = editorDownloadTask(item.task);
+    if (!task) {
+      // Cancelled while it waited, or its record cleared: nothing will come, so nothing is shown.
+      if (seen.has(item.task)) { seen.delete(item.task); forget(item); }
+      continue;
+    }
+    seen.add(item.task);
     if (task.state === "failed" || task.state === "canceled") {
       forget(item);
       if (task.state === "failed") useLaneEditor.getState().fail(`「${item.title}」没下载下来：${task.error || "下载失败"}`);
@@ -99,9 +116,10 @@ function settle(tasks: Map<string, DownloadTask>): void {
     // Downloads of one drop go in in the order they were dragged: one waits for those before it.
     if (pending.some(other => other.drop === item.drop && other.order < item.order)) continue;
     update(item, { placing: true });
-    void place(item, task).finally(() => {
+    void place(item, task).catch(error => useLaneEditor.getState().fail(`「${item.title}」没放进去：${message(error)}`)).finally(() => {
+      seen.delete(item.task);
       forget(item);
-      settle(useDownloadStore.getState().tasks);
+      settle();
     });
   }
 }
@@ -141,6 +159,7 @@ function watchEditorDownloads(): void {
   if (watching) return;
   watching = true;
   useDownloadStore.subscribe((state, previous) => {
-    if (state.tasks !== previous.tasks && useEditorDownloads.getState().pending.length) settle(state.tasks);
+    // A finished download leaves `tasks` for `history`: both are followed, or it is never put in.
+    if ((state.tasks !== previous.tasks || state.history !== previous.history) && useEditorDownloads.getState().pending.length) settle();
   });
 }

@@ -937,6 +937,8 @@ export interface KdjvLive {
   duration: number;
   width: number;
   height: number;
+  /** The project's frame rate (absent from older servers). */
+  fps?: number;
   /**
    * `file` names the file (and its signature): a source number may be another file after an edit.
    * `frame_ends`: an image's or GIF's frame end times in seconds (empty for a still).

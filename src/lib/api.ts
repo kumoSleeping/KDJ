@@ -958,8 +958,8 @@ export const api = {
   startRhythm: (trackId: number, precise = true) => post<{ job_id: string | null; queued: number }>(`/library/rhythm/${trackId}`, { precise }),
   /** Operations on a `.kdjv` 2 project (src/lib/lanes.ts), applied in order and saved only when the result plays. */
   /** Where a video's sound is found in a reference song (cli_media.rs `align`): placement plans, best first. */
-  align: (reference: string, video: string) =>
-    post<{ matched: boolean; plans: import("./lanes").AlignPlan[]; reason?: string }>("/cli/align", { reference, video }),
+  align: (reference: string, video: string, lying?: { video_in: number; video_out: number; ref_at: number }) =>
+    post<{ matched: boolean; plans: import("./lanes").AlignPlan[]; reason?: string }>("/cli/align", { reference, video, ...lying }),
   editKdjv: (body: { path?: string; track_id?: number; ops: import("./lanes").LaneOp[]; create?: boolean }) =>
     post<import("./lanes").LaneEdited>("/kdjv/edit", body),
   /** A project's file and title renamed in its folder, its library row moved with it; answers as an edit does. */

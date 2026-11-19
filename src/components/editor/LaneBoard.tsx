@@ -26,7 +26,7 @@ import { fileLabel, LANE_END, laneClock, rulerStep, snapToBar, trackName, type L
 import { activeTrackDragIds, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
 import { usePointerSearchDrop, usePointerTrackDrop } from "../../lib/pointerTrackDrop";
 import { activeSearchDrag, finishSearchDrop, isSearchDownloadDrag, readSearchDrop, type ActiveSearchDrag } from "../../lib/searchDrag";
-import { useEditorDownloads } from "../../lib/editorDownloads";
+import { editorDownloadTask, useEditorDownloads } from "../../lib/editorDownloads";
 import { sourceOf, stripFrame } from "../../lib/clipFrameStrip";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
@@ -161,14 +161,19 @@ function StripFrame({ url, file, at }: { url: string; file: string; at: number }
 /** Where an online song or video dropped on the tracks will go once downloaded, and how far along it is. */
 function PendingDownloads({ path, lane, span, end }: { path: string | null; lane: "song" | "main"; span: number; end: number }) {
   const all = useEditorDownloads(state => state.pending);
+  // Both are read so that the mark follows a task from the queue into the history.
   const tasks = useDownloadStore(state => state.tasks);
+  const history = useDownloadStore(state => state.history);
   const pending = all.filter(item => item.path === path && item.lane === lane);
   return <>{pending.map(item => {
-    const task = tasks.get(item.task);
+    const task = tasks.get(item.task) ?? history.find(done => done.id === item.task) ?? editorDownloadTask(item.task);
     const progress = task ? Math.round(Math.min(1, Math.max(0, task.progress)) * 100) : 0;
+    // What it is waiting for, as the queue has it: not started yet, being put in, or how far along.
+    const state = item.placing || task?.state === "done" ? "正在放进来"
+      : task?.state === "queued" || task?.state === "paused" ? "等待下载" : `${progress}%`;
     return <span key={item.task} className="kd-lanes-pending"
       style={{ left: pct(Math.min(item.at >= LANE_END ? end : item.at, span), span) }} title={`${item.title} · 下载好就放在这里`}>
-      {item.title}{task?.state === "done" ? "" : ` · ${progress}%`}
+      {item.title} · {state}
     </span>;
   })}</>;
 }

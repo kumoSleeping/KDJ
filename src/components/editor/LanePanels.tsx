@@ -9,7 +9,8 @@ import { api } from "../../lib/api";
 import { exportProject, useKdjvLive } from "../../lib/kdjvPlay";
 import { allClips, clipLength, fileLabel, findClip, laneClock, type AlignPlan, type ExportOptions, type LaneClip, type LaneOp, type LaneTitle } from "../../lib/lanes";
 import { drawTitle, TITLE_DEFAULTS, type TitleLook } from "../../lib/titleImage";
-import { alignKey, songsOf, useLaneEditor, type LaneProject } from "../../stores/laneEditorStore";
+import { sourceOf } from "../../lib/clipFrameStrip";
+import { clipAlignKey, songsOf, useLaneEditor, type LaneProject } from "../../stores/laneEditorStore";
 import { Segmented, Slider } from "../common";
 
 export type Tool = "title" | "export";
@@ -72,10 +73,11 @@ function SettleSlider({ label, value, min, max, step, defaultValue, format, onCo
 }
 
 /**
- * The crop: a small frame of the picture with what is kept marked inside it; each side of the
- * kept part is pulled from its edge (or moved with the arrow keys once focused).
+ * The crop: a small frame in the picture's own shape with what is kept marked inside it; each side
+ * of the kept part is pulled from its edge (or moved with the arrow keys once focused), or typed
+ * as the percent taken off that side.
  */
-function CropBox({ crop, onCommit }: { crop: Crop; onCommit(crop: Crop): void }) {
+function CropBox({ crop, aspect, onCommit }: { crop: Crop; aspect: number; onCommit(crop: Crop): void }) {
   const frame = useRef<HTMLDivElement>(null);
   const [live, setLive] = useState<Crop | null>(null);
   const c = live ?? crop;
@@ -86,6 +88,8 @@ function CropBox({ crop, onCommit }: { crop: Crop; onCommit(crop: Crop): void })
   const pull = (side: number) => (event: ReactPointerEvent<HTMLSpanElement>) => {
     if (event.button !== 0 || !frame.current) return;
     event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.focus({ preventScroll: true });
     event.currentTarget.setPointerCapture(event.pointerId);
     const box = frame.current.getBoundingClientRect();
     let next: Crop = [...c];
@@ -115,19 +119,31 @@ function CropBox({ crop, onCommit }: { crop: Crop; onCommit(crop: Crop): void })
     const delta = inward.includes(event.key) ? step : outward.includes(event.key) ? -step : 0;
     if (!delta) return;
     event.preventDefault();
+    event.stopPropagation();
     const next = [...crop] as Crop;
     next[side] = limit(side, crop[side] + delta, crop);
-    onCommit(next);
+    if (next[side] !== crop[side]) onCommit(next);
   };
+  /** One side typed, in percent. */
+  const typed = (side: number) => (value: number) => {
+    const next = [...crop] as Crop;
+    next[side] = limit(side, value / 100, crop);
+    if (next[side] !== crop[side]) onCommit(next);
+  };
+  // The frame in the picture's shape, 72 px on its longer side's cross axis, kept within reason.
+  const height = aspect >= 1 ? 72 : 96;
+  const width = Math.round(Math.max(40, Math.min(160, height * aspect)));
   return <div className="kd-crop">
-    <div ref={frame} className="kd-crop-frame" role="group" aria-label="裁剪">
+    <div ref={frame} className="kd-crop-frame" role="group" aria-label="裁剪" style={{ width, height }}>
       <div className="kd-crop-keep" style={{ left: `${c[0] * 100}%`, top: `${c[1] * 100}%`, right: `${c[2] * 100}%`, bottom: `${c[3] * 100}%` }}>
         {SIDES.map((name, side) => <span key={name} className="kd-crop-edge" data-side={side} role="slider" tabIndex={0}
           aria-label={`${name}边裁掉`} aria-valuemin={0} aria-valuemax={90} aria-valuenow={Math.round(c[side] * 100)}
           aria-valuetext={percent(c[side])} onPointerDown={pull(side)} onKeyDown={nudge(side)} />)}
       </div>
     </div>
-    <span className="kd-lanes-note">{c.some(v => v > 0) ? c.map(v => Math.round(v * 100)).join(" · ") : ""}</span>
+    <div className="kd-crop-sides">
+      {SIDES.map((name, side) => <NumberField key={name} label={`${name}%`} value={Math.round(c[side] * 100)} step={1} min={0} max={90} onCommit={typed(side)} />)}
+    </div>
     {crop.some(v => v > 0) && <button type="button" className="kd-lanes-action" onClick={() => onCommit([0, 0, 0, 0])}>
       <RotateCcw size={13} />不裁</button>}
   </div>;
@@ -135,28 +151,34 @@ function CropBox({ crop, onCommit }: { crop: Crop; onCommit(crop: Crop): void })
 
 /** A branch of the chosen clip on one side: on or off, how long, how opaque, faded or not. */
 /** 校准: where the chosen clip's sound lies in the song under it, and the ways to place it there. */
-function AlignPanel({ path, clip }: { path: string; clip: LaneClip }) {
-  const key = alignKey(path, clip.id, clip.src);
+function AlignPanel({ project, clip }: { project: LaneProject; clip: LaneClip }) {
+  const key = clipAlignKey(project, clip.id) ?? "";
   const aligning = useLaneEditor(state => state.aligning.includes(key));
   const found = useLaneEditor(state => state.plans[key]);
+  const applied = useLaneEditor(state => state.applied[key]);
   const { calibrate, applyPlan } = useLaneEditor.getState();
   const plans = found?.plans;
-  // What came back, said of this clip's own file: not there at all, or only a likeness of the tune.
+  // The plan this clip was laid by (one of the pieces it made), until the clip is changed by hand.
+  const laid = applied?.clips.includes(clip.id) ? applied.plan : null;
+  // What came back, said of this clip's own file: not there at all, only a likeness of the tune,
+  // or nothing heard and the two tempos matched instead.
+  const heard = (plans ?? []).filter(plan => plan.evidence !== "tempo");
   const note = !found || aligning ? null
-    : plans!.length === 0 ? `「${fileLabel(clip.src)}」的声音里没有找到这首歌`
-      : plans!.some(plan => plan.auto) ? null : "只找到旋律相近的位置，试听后再选";
+    : plans!.length === 0 ? `「${fileLabel(clip.src)}」的声音里没有找到这首歌，两边的节拍也对不上`
+      : heard.length === 0 ? "声音里没有找到这首歌，按两边的 BPM 对拍"
+        : heard.some(plan => plan.auto) ? null : "只找到旋律相近的位置，试听后再选";
   return <div className="kd-lanes-rows">
     <div className="kd-lanes-row">
-      <button type="button" className="kd-lanes-action" disabled={aligning} onClick={() => void calibrate(clip.id)}>
-        {aligning ? <LoaderCircle size={14} className="kd-spin" /> : <Crosshair size={14} />}{aligning ? "正在对齐" : "对齐到歌"}
+      <button type="button" className="kd-lanes-action" disabled={aligning || !key} onClick={() => void calibrate(clip.id)}>
+        {aligning ? <LoaderCircle size={14} className="kd-spin" /> : <Crosshair size={14} />}{aligning ? "正在对齐" : found ? "重新对齐" : "对齐到歌"}
       </button>
       {note && <span className="kd-lanes-note" title={found?.reason}>{note}</span>}
     </div>
-    {groupsOf(plans ?? []).slice(0, 5).map(group => <div key={group.id} className="kd-lanes-plan" role="group" aria-label={group.label}>
+    {groupsOf(plans ?? []).slice(0, 6).map(group => <div key={group.id} className="kd-lanes-plan" role="group" aria-label={group.label}>
       <span className="kd-lanes-note">{group.label}</span>
       <div className="kd-lanes-row">
         {group.plans.map(plan => <button key={plan.id} type="button" className="kd-lanes-action" title={planTitle(plan)}
-          onClick={() => void applyPlan(clip.id, plan)}>
+          aria-pressed={laid === plan.id} onClick={() => void applyPlan(clip.id, plan)}>
           {plan.label}{plan.beat ? ` · ${plan.beat.error_ms < 1 ? "<1" : Math.round(plan.beat.error_ms)} ms` : ""}
           {plan.segments.length > 1 ? ` · ${plan.segments.length} 段` : ""}
         </button>)}
@@ -181,6 +203,7 @@ function groupsOf(plans: AlignPlan[]) {
 function planTitle(plan: AlignPlan): string {
   const what = plan.label === "保留完整" ? "整段视频按对拍后的速度放，歌放到哪就到哪"
     : plan.label === "裁切匹配段" ? "只放匹配到的那一段，速度和起点按拍对齐"
+      : plan.label === "变速对拍" ? "留在现在的位置，速度改成和歌同一个 BPM，拍子和小节对到歌上"
       : plan.label === "分段变速" ? "按歌里节奏的变化分成几段，每段自己的速度，首尾相接"
         : plan.label === "不对拍" ? "按听到的位置和速度放，不按拍修正" : plan.label;
   const speeds = [...new Set(plan.segments.map(s => s.speed.toFixed(4)))].join(" / ");
@@ -321,6 +344,15 @@ function ExportPanel({ project }: { project: LaneProject }) {
   </div>;
 }
 
+/** The shapes a project's picture can be given, width to height. */
+const SHAPES = [[16, 9], [9, 16], [1, 1], [4, 3], [3, 4], [21, 9]] as const;
+
+/** The shape of a clip's own picture (its file's, as shown), 16:9 when it is not known. */
+function aspectOf(project: LaneProject, clip: LaneClip): number {
+  const source = project.sources[sourceOf(project.sources, project.path, clip.src)];
+  return source && source.width > 0 && source.height > 0 ? source.width / source.height : 16 / 9;
+}
+
 /** A labelled row of the inspector: a quiet word, then its controls. */
 function Section({ label, children }: { label: string; children: ReactNode }) {
   return <div className="kd-lanes-section">
@@ -381,14 +413,19 @@ export function ToolPanel({ tool, project, selected, playhead, beatNear, edit }:
           <Segmented label="速度" value={clip.speed ?? 1}
             options={SPEEDS.map(speed => ({ value: speed, label: `${speed}×` }))}
             onChange={value => edit([{ op: "set", id: clip.id, fields: { speed: value } }])} />
-          <NumberField label="速度×" value={clip.speed ?? 1} step={0.0001} min={0.25} max={4}
-            onCommit={value => edit([{ op: "set", id: clip.id, fields: { speed: Math.max(0.25, Math.min(4, value)) } }])} />
+          <NumberField label="速度×" value={clip.speed ?? 1} step={0.0001} min={0.5} max={2}
+            onCommit={value => edit([{ op: "set", id: clip.id, fields: { speed: Math.max(0.5, Math.min(2, value)) } }])} />
         </div>
         <div className="kd-lanes-row">
-          <CropBox crop={clip.crop ?? [0, 0, 0, 0]} onCommit={crop => edit([{ op: "set", id: clip.id, fields: { crop } }])} />
+          <CropBox crop={clip.crop ?? [0, 0, 0, 0]} aspect={aspectOf(project, clip)} onCommit={crop => edit([{ op: "set", id: clip.id, fields: { crop } }])} />
           <div className="kd-lanes-rows kd-lanes-grow">
             <SettleSlider label="缩放" value={clip.scale ?? 1} min={0.1} max={2} step={0.05} defaultValue={1} format={percent}
               onCommit={value => edit([{ op: "set", id: clip.id, fields: { scale: value } }])} />
+            {/* Where it stands on the picture: felt wherever it is smaller, or larger, than the picture. */}
+            <SettleSlider label="左右" value={clip.x ?? 0.5} min={0} max={1} step={0.01} defaultValue={0.5} format={percent}
+              onCommit={value => edit([{ op: "set", id: clip.id, fields: { x: value } }])} />
+            <SettleSlider label="上下" value={clip.y ?? 0.5} min={0} max={1} step={0.01} defaultValue={0.5} format={percent}
+              onCommit={value => edit([{ op: "set", id: clip.id, fields: { y: value } }])} />
             <SettleSlider label="透明度" value={clip.opacity ?? 1} min={0} max={1} step={0.05} defaultValue={1} format={percent}
               onCommit={value => edit([{ op: "set", id: clip.id, fields: { opacity: value } }])} />
           </div>
@@ -413,13 +450,31 @@ export function ToolPanel({ tool, project, selected, playhead, beatNear, edit }:
           </button>
         </div>
       </Section>
-      {vj && picture && <Section label="校准"><AlignPanel path={project.path} clip={clip} /></Section>}
+      {vj && picture && <Section label="校准"><AlignPanel project={project} clip={clip} /></Section>}
     </div>;
   }
 
   if (pictures.length === 0) return null;
-  // Nothing chosen: every picture of the project at once.
+  // The picture's shape: the one the project names, else the first video's.
+  const named = doc.canvas as { width?: number; height?: number } | undefined;
+  const shape = !named?.width || !named.height ? "auto"
+    : SHAPES.map(([w, h]) => `${w}:${h}`).find(s => { const [w, h] = s.split(":").map(Number); return Math.abs(named.width! / named.height! - w / h) < 0.01; }) ?? "";
+  /** A canvas of that shape, its short side the one the picture has now (1080 when nothing says). */
+  const shaped = (value: string) => {
+    const [w, h] = value.split(":").map(Number);
+    const now = project.canvas;
+    const short = Math.max(2, Math.min(4320, even(now ? Math.min(now.width, now.height) : 1080)));
+    const long = Math.min(7680, even(short * Math.max(w, h) / Math.min(w, h)));
+    return { width: w >= h ? long : short, height: w >= h ? short : long, ...(now?.fps ? { fps: now.fps } : {}) };
+  };
+  // Nothing chosen: the picture's shape, and every picture of the project at once.
   return <Section label="画面">
+    <div className="kd-lanes-row">
+      <Segmented<string> label="画面比例" value={shape}
+        options={[{ value: "auto", label: "跟随视频" }, ...SHAPES.map(([w, h]) => ({ value: `${w}:${h}`, label: `${w}:${h}` }))]}
+        onChange={value => edit([{ op: "canvas", canvas: value === "auto" ? null : shaped(value) }])} />
+      {project.canvas && <span className="kd-lanes-note">{project.canvas.width} × {project.canvas.height}</span>}
+    </div>
     <div className="kd-lanes-row">
       <button type="button" className="kd-lanes-action" onClick={() => edit(pictures.map(c => ({ op: "set" as const, id: c.id, fields: { fill: true } })))}>全部铺满</button>
       <button type="button" className="kd-lanes-action" onClick={() => edit(pictures.map(c => ({ op: "set" as const, id: c.id, fields: { fill: false } })))}>全部完整</button>

@@ -772,6 +772,8 @@ pub struct Live {
     pub duration: f64,
     pub width: u32,
     pub height: u32,
+    /// The project's frame rate: its canvas's, else the first video's.
+    pub fps: f64,
     pub sources: Vec<LiveSource>,
     pub clips: Vec<LiveClip>,
 }
@@ -839,7 +841,7 @@ pub fn live(p: &CompositionProject) -> Live {
             });
         }
     }
-    Live { duration: p.duration() / 1000., width: p.canvas.width, height: p.canvas.height, sources, clips }
+    Live { duration: p.duration() / 1000., width: p.canvas.width, height: p.canvas.height, fps: p.canvas.fps, sources, clips }
 }
 
 /// What the project's sound is keyed by: the clips heard, the sources they play and its length.

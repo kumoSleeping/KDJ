@@ -28,6 +28,12 @@ pub enum Op {
         canvas: Option<Value>,
     },
     Title { title: String },
+    /// The picture's size and frame rate: `{"width", "height", "fps"?}` (even, 2–7680; fps 1–120),
+    /// or null for the first video's own.
+    Canvas {
+        #[serde(default)]
+        canvas: Option<Value>,
+    },
     /// A track of `kind` (`picture` or `sound`) at `index` (0 is the top), else below the last
     /// track of its kind (a picture track above the sound tracks).
     AddTrack {
@@ -322,6 +328,7 @@ fn op_name(op: &Op) -> &'static str {
     match op {
         Op::New { .. } => "new",
         Op::Title { .. } => "title",
+        Op::Canvas { .. } => "canvas",
         Op::AddTrack { .. } => "add_track",
         Op::RemoveTrack { .. } => "remove_track",
         Op::MoveTrack { .. } => "move_track",
@@ -364,6 +371,27 @@ fn apply_one(doc: &mut Value, op: &Op) -> Result<()> {
             *doc = fresh;
         }
         Op::Title { title } => doc["title"] = json!(title),
+        Op::Canvas { canvas } => match canvas {
+            None | Some(Value::Null) => {
+                if let Some(map) = doc.as_object_mut() {
+                    map.remove("canvas");
+                }
+            }
+            Some(canvas) => {
+                let side = |key: &str| canvas.get(key).and_then(Value::as_u64).filter(|v| (2..=7680).contains(v) && v % 2 == 0);
+                let (Some(width), Some(height)) = (side("width"), side("height")) else {
+                    bail!("canvas 的 width 和 height 要是 2–7680 之间的偶数")
+                };
+                let mut next = json!({ "width": width, "height": height });
+                // The frame rate given, else the one the project already names.
+                match canvas.get("fps").or_else(|| doc.get("canvas").and_then(|c| c.get("fps"))).and_then(Value::as_f64) {
+                    Some(fps) if (1. ..=120.).contains(&fps) => next["fps"] = json!(fps),
+                    Some(_) => bail!("canvas 的 fps 要在 1–120 之间"),
+                    None => {}
+                }
+                doc["canvas"] = next;
+            }
+        },
         Op::AddTrack { kind, index, name } => {
             insert_track(doc, kind, *index, name.as_deref())?;
         }
@@ -771,6 +799,18 @@ mod tests {
             {"op":"add","clip":{"src":"/b.mp4","in":0,"out":5}},
             {"op":"add","clip":{"src":"/s.m4a","in":0,"out":60},"kind":"sound"}
         ]"#)).unwrap()
+    }
+
+    #[test]
+    fn the_picture_is_given_a_shape_and_follows_the_first_video_again() {
+        let upright = apply(&two(), &ops(r#"[{"op":"canvas","canvas":{"width":1080,"height":1920,"fps":60}}]"#)).unwrap();
+        assert_eq!(upright["canvas"], json!({ "width": 1080, "height": 1920, "fps": 60.0 }));
+        // Another shape keeps the frame rate the project names.
+        let square = apply(&upright, &ops(r#"[{"op":"canvas","canvas":{"width":1080,"height":1080}}]"#)).unwrap();
+        assert_eq!(square["canvas"], json!({ "width": 1080, "height": 1080, "fps": 60.0 }));
+        let own = apply(&square, &ops(r#"[{"op":"canvas","canvas":null}]"#)).unwrap();
+        assert!(own.get("canvas").is_none());
+        assert!(apply(&two(), &ops(r#"[{"op":"canvas","canvas":{"width":1081,"height":1920}}]"#)).is_err(), "an odd side is refused");
     }
 
     #[test]
