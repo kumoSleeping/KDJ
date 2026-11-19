@@ -13,9 +13,10 @@ kdj-providers = { version = "1.1.1-rc1", path = "../kdj-providers" }
 lofty = "0.24.0"
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.36"
-# Windows runner 与移动端没有系统 sqlite3，因此只在这些平台启用 bundled；
-# macOS/Linux 继续使用系统 SQLite。
-rusqlite = { version = "0.41", features = ["fallible_uint"] }
+# SQLite 随应用一起编（bundled），所有平台都一样：rusqlite 0.41 用到 sqlite3_error_offset（3.38）和
+# sqlite3_set_clientdata（3.44），系统自带的 SQLite（macOS 10.15–13、Ubuntu 22.04）没有，链接不上，
+# 在新系统上链接成功的包拿到旧系统上启动就崩。
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.19"
@@ -27,9 +28,6 @@ walkdir = "2.5.0"
 # service::move_to_trash 在那两个平台上编成一个报错的桩。
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 trash = "5"
-
-[target.'cfg(any(target_os = "windows", target_os = "android", target_os = "ios"))'.dependencies]
-rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
